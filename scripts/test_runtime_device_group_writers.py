@@ -74,6 +74,7 @@ SIGNATURES = [
     '- (void)rollbackIdentifier:(NSString *)type previous:(BOOL)previous beforeImage:(NSDictionary *)beforeImage secondaryKey:(NSString *)secondaryKey notificationName:(CFStringRef)notificationName operation:(id)operation sourceCommitIdentifier:(NSString *)identifier',
 ]
 SIGNATURES += ['- (void)loadSettings',
+               '- (BOOL)isApplicationEnabled:(NSString *)bundleID',
                '- (void)loadScopedApps',
                '- (BOOL)reloadScopedAppsWithError:(NSError **)error',
                '- (BOOL)addApplicationsToScopeAndPersist:(NSArray<NSString *> *)bundleIDs error:(NSError **)error',
@@ -198,7 +199,7 @@ def source_contracts():
     assert 'TestDependencyLifecycle(manager, Identity(@"a"), Identity(@"b"))' in fixture
     assert 'test_runtime_device_group_writers.py --native' in read('.github/workflows/build-ios-arm.yml')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H5M-partial'
+    assert manifest['rollout'] == '4C.2H5N-partial'
     assert manifest['writers']['identifier-dependencies']['status'] == 'enrolled'
     assert manifest['writers']['identifier-artifacts']['status'] == 'enrolled'
     print('PASS: Device dependency writer contracts (partial enrollment; native runtime not implied)')
@@ -206,6 +207,10 @@ def source_contracts():
 
 def generate_native_fragments(folder):
     manager = read('common/IdentifierManager.m')
+    reader_state = manager.split('// Per-instance app-enabled reader state.', 1)[1].split('\n', 1)[1].split('- (BOOL)refreshCanonicalCellularIdentityForCurrentProfile;', 1)[0]
+    assert reader_state.lstrip().startswith('@property '), 'native state fragment must exclude the marker comment remainder'
+    (folder / 'PXAppEnabledState.inc').write_text(reader_state, encoding='utf-8')
+    (folder / 'PXIdentifierManagerInit.inc').write_text(method(manager, '- (instancetype)init'), encoding='utf-8')
     methods = [method(manager, signature) for signature in SIGNATURES]
     (folder / 'PXDeviceGroupDeclarations.inc').write_text('\n'.join(m.split(' {', 1)[0] + ';' for m in methods), encoding='utf-8')
     (folder / 'PXDeviceGroupMethods.inc').write_text('\n\n'.join(methods), encoding='utf-8')
@@ -232,6 +237,7 @@ def native_tests():
         folder = Path(temp)
         generate_native_fragments(folder)
         sources = ['common/PXRuntimeIdentifierWriter.m', 'common/PXRuntimeSourceStore.m', 'common/PXRuntimePublisher.m',
+                   'common/PXRuntimeSnapshotReader.m',
                    'common/PXRuntimeProfileSelection.m', 'common/PXProfileLifecycleLease.m', 'common/PXProfileDeletionJournal.m',
                    'common/PXProfileArtifactMutation.m',
                    'common/PXRuntimeGeneration.m', 'common/PXRuntimeArtifactPreparation.m',

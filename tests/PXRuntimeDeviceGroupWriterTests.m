@@ -73,6 +73,11 @@ BOOL PXPerformStandaloneRuntimeSourceWrite(BOOL (^body)(PXRuntimeSourceTransacti
 static BOOL gManagerLoadRole = YES;
 static BOOL PXIdentifierManagerIsManagerProcess(void) { return gManagerLoadRole; }
 static NSUInteger gVerificationCaptures, gVerificationSourceReads;
+static PXRuntimeReadSnapshot *gAppEnabledReadView;
+static NSUInteger gAppEnabledSnapshotCaptures;
+static PXRuntimeReadSnapshot *PXFixtureAppEnabledSnapshot(void) {
+    gAppEnabledSnapshotCaptures++; return gAppEnabledReadView;
+}
 static void (^gDuringVerificationRead)(NSString *path);
 NSDictionary *PXCaptureRuntimeSources(NSDictionary *(^loader)(NSError **), NSError **error) {
     gVerificationCaptures++;
@@ -459,14 +464,23 @@ ARTIFACT_SINGLETON
 }
 @end
 #include "PXDeviceGroupStatics.inc"
-@interface PXDeviceGroupFixture : NSObject {
-    NSMutableDictionary *_appEnabledCache;
-}
+// Compile the exact production constructor/state as well as the reader used below.
+@interface PXAppEnabledInitFixture : NSObject
+@property (nonatomic, strong) NSMutableDictionary *settings;
+@property (nonatomic, strong) NSMutableDictionary *scopedApps;
+@property (nonatomic, strong) NSMutableDictionary *spoofCache;
+#include "PXAppEnabledState.inc"
+@end
+@implementation PXAppEnabledInitFixture
+#include "PXIdentifierManagerInit.inc"
+@end
+@interface PXDeviceGroupFixture : NSObject
 @property (nonatomic, strong) NSError *error;
 @property (nonatomic, strong) NSMutableDictionary *settings;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, id> *identifierToggleOperations;
 @property (nonatomic, strong) NSMutableDictionary *scopedApps;
 @property (nonatomic, strong) NSMutableDictionary *spoofCache;
+#include "PXAppEnabledState.inc"
 - (NSString *)profileIdentityPath;
 - (NSString *)profileIdentityPathWithLifecycleLease:(PXProfileLifecycleLease *)lease;
 - (BOOL)isIdentifierEnabled:(NSString *)type;
@@ -521,7 +535,7 @@ ARTIFACT_SINGLETON
 #define CFNotificationCenterPostNotification PXToggleFixtureNotification
 #define PXReadRuntimeSourceDictionary PXFixtureReadVerificationDictionary
 #define PX_IDENTIFIER_RUNTIME_READ_OPERATION ((void)0)
-#define PXCaptureRuntimeSnapshot() ((PXRuntimeReadSnapshot *)nil)
+#define PXCaptureRuntimeSnapshot() PXFixtureAppEnabledSnapshot()
 #define LSApplicationProxy PXScopeProxyFixture
 #define NSClassFromString PXFixtureClassLookup
 #include "PXDeviceGroupMethods.inc"
@@ -3644,6 +3658,98 @@ static void TestExplicitScopeReload(void) {
     } @finally { gManagerLoadRole = YES; }
 }
 
+static void TestApplicationEnabledCacheOwnership(void) {
+    gManagerLoadRole = YES;
+    __weak NSMutableDictionary *released = nil;
+    @autoreleasepool {
+        PXAppEnabledInitFixture *one = [PXAppEnabledInitFixture new], *two = [PXAppEnabledInitFixture new];
+        CHECK([one.appEnabledCache isKindOfClass:NSMutableDictionary.class] && one.appEnabledCache != two.appEnabledCache &&
+              !one.appEnabledLastReloadTime && !two.appEnabledLastLoggedBundleID,
+              "exact manager constructor owns separate initialized reader state");
+        released = one.appEnabledCache;
+    }
+    CHECK(released == nil, "enabled cache lifetime follows its manager without static retention");
+    PXDeviceGroupFixture *one = [PXDeviceGroupFixture new], *two = [PXDeviceGroupFixture new];
+    one.scopedApps[@"fixture.cache"] = [@{ @"enabled": @YES } mutableCopy];
+    two.scopedApps[@"fixture.cache"] = [@{ @"enabled": @NO } mutableCopy];
+    NSUInteger reads = gVerificationSourceReads, captures = gVerificationCaptures, attempts = gStandaloneSourceAttempts;
+    CHECK([one isApplicationEnabled:@"fixture.cache"] && ![two isApplicationEnabled:@"fixture.cache"] &&
+          [one isApplicationEnabled:@"fixture.cache"] && ![two isApplicationEnabled:@"fixture.cache"] &&
+          one.appEnabledCache != two.appEnabledCache && reads == gVerificationSourceReads && captures == gVerificationCaptures && attempts == gStandaloneSourceAttempts,
+          "same bundle ID keeps independent cached decisions for different manager scope views");
+    NSDictionary *before = [one.appEnabledCache copy]; NSString *logged = one.appEnabledLastLoggedBundleID;
+    NSUInteger snapshots = gAppEnabledSnapshotCaptures;
+    CHECK(![one isApplicationEnabled:nil] && ![one isApplicationEnabled:@""] && ![one isApplicationEnabled:(id)@1] &&
+          [before isEqual:one.appEnabledCache] && [logged isEqual:one.appEnabledLastLoggedBundleID] &&
+          reads == gVerificationSourceReads && attempts == gStandaloneSourceAttempts && snapshots == gAppEnabledSnapshotCaptures,
+          "invalid enabled-reader IDs fail before cache logging reload or snapshot work");
+    one.scopedApps[@"fixture.cache"][@"enabled"] = @NO;
+    CHECK([one isApplicationEnabled:@"fixture.cache"], "fresh enabled cache retains existing thirty second policy");
+    NSTimeInterval now = NSDate.date.timeIntervalSince1970;
+    one.appEnabledCache[@"fixture.cache"] = @{ @"enabled": @YES, @"timestamp": @(now - 31.0) };
+    CHECK(![one isApplicationEnabled:@"fixture.cache"] && ![two isApplicationEnabled:@"fixture.cache"],
+          "expired enabled cache rechecks its own scope without borrowing sibling values");
+    CHECK(![one isApplicationEnabled:@"com.hydra.tlinkios"], "enabled reader retains exact self-app exclusion");
+    one.scopedApps[@"fixture.Case"] = [@{ @"enabled": @"YES" } mutableCopy];
+    one.appEnabledLastReloadTime = now;
+    CHECK([one isApplicationEnabled:@"fixture.case"], "enabled reader retains case insensitive fallback and string scalar policy");
+
+    PXDeviceGroupFixture *seed = ScopeMetadataFixture(NO);
+    (void)seed;
+    one = [PXDeviceGroupFixture new]; two = [PXDeviceGroupFixture new];
+    reads = gVerificationSourceReads; captures = gVerificationCaptures;
+    NSUInteger notices = gBatchNotifications;
+    CHECK([one isApplicationEnabled:@"fixture.unresolved"] && [two isApplicationEnabled:@"fixture.unresolved"] &&
+          reads + 2 == gVerificationSourceReads && captures + 2 == gVerificationCaptures &&
+          one.appEnabledLastReloadTime > 0 && two.appEnabledLastReloadTime > 0 && notices == gBatchNotifications,
+          "each manager gets its own first miss reload instead of sharing another instance throttle");
+    reads = gVerificationSourceReads;
+    CHECK(![one isApplicationEnabled:@"fixture.missing.one"] && ![one isApplicationEnabled:@"fixture.missing.two"] &&
+          ![two isApplicationEnabled:@"fixture.missing.three"] && reads == gVerificationSourceReads,
+          "different negative keys retain the sixty second reload throttle within each manager");
+    one = [PXDeviceGroupFixture new]; reads = gVerificationSourceReads;
+    gFailNextToggleVerificationCapture = YES;
+    CHECK(![one isApplicationEnabled:@"fixture.failed.reload"] && one.appEnabledLastReloadTime > 0 &&
+          ![one isApplicationEnabled:@"fixture.failed.next"] && reads == gVerificationSourceReads,
+          "failed manager reload still consumes only its own existing reload interval");
+    two = [PXDeviceGroupFixture new];
+    CHECK([two isApplicationEnabled:@"fixture.unresolved"] && reads + 1 == gVerificationSourceReads,
+          "one manager reload failure cannot suppress another manager first reload");
+
+    one = ScopeMetadataFixture(NO); two = [PXDeviceGroupFixture new];
+    CHECK([two reloadScopedAppsWithError:NULL] && ![one isApplicationEnabled:@"fixture.installed"] && ![two isApplicationEnabled:@"fixture.installed"],
+          "writer invalidation reader caches seeded");
+    NSDictionary *otherCache = [two.appEnabledCache copy];
+    CHECK([one setApplicationEnabledAndPersist:YES forBundleID:@"fixture.installed" error:NULL] && !one.appEnabledCache.count &&
+          [otherCache isEqual:two.appEnabledCache] && [one isApplicationEnabled:@"fixture.installed"] && ![two isApplicationEnabled:@"fixture.installed"],
+          "scope writer invalidates its owner cache without reinterpreting another manager local view");
+    CHECK([two reloadScopedAppsWithError:NULL] && !two.appEnabledCache.count && [two isApplicationEnabled:@"fixture.installed"],
+          "explicit sibling reload adopts canonical change and invalidates its own stale decision");
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    NSDictionary *runtime = @{ @"schemaVersion": @1, @"globalScope": @{ @"ScopedApps": @{
+        @"fixture.cache": @{ @"enabled": @YES }, @"fixture.Case": @{ @"enabled": @"YES" }, @"fixture.bad": @[],
+        @"fixture.scalar": @{ @"enabled": @[] } } } };
+    gAppEnabledReadView = [[PXRuntimeReadSnapshot alloc] initWithPropertyList:runtime readerGeneration:1];
+    one = [PXDeviceGroupFixture new]; one.scopedApps[@"fixture.cache"] = [@{ @"enabled": @NO } mutableCopy];
+    one.appEnabledCache[@"fixture.cache"] = @{ @"enabled": @NO, @"timestamp": @(NSDate.date.timeIntervalSince1970) };
+    before = [one.appEnabledCache copy]; reads = gVerificationSourceReads; captures = gVerificationCaptures;
+    attempts = gStandaloneSourceAttempts; snapshots = gAppEnabledSnapshotCaptures;
+    gManagerLoadRole = NO;
+    @try {
+        CHECK([one isApplicationEnabled:@"fixture.cache"] && [one isApplicationEnabled:@"fixture.case"] &&
+              ![one isApplicationEnabled:@"fixture.bad"] && ![one isApplicationEnabled:@"fixture.scalar"] &&
+              ![one isApplicationEnabled:@"fixture.absent"] && ![one isApplicationEnabled:@"com.hydra.tlinkios"] &&
+              [before isEqual:one.appEnabledCache] && !one.appEnabledLastReloadTime && !one.appEnabledLastLoggedBundleID &&
+              reads == gVerificationSourceReads && captures == gVerificationCaptures && attempts == gStandaloneSourceAttempts &&
+              snapshots + 5 == gAppEnabledSnapshotCaptures,
+              "RootHide injected enabled reader keeps snapshot authority before owner cache throttle and file paths");
+        snapshots = gAppEnabledSnapshotCaptures;
+        CHECK(![one isApplicationEnabled:nil] && ![one isApplicationEnabled:(id)@[]] && snapshots == gAppEnabledSnapshotCaptures,
+              "RootHide invalid IDs do not capture snapshots or mutate instance state");
+    } @finally { gManagerLoadRole = YES; gAppEnabledReadView = nil; }
+#endif
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
@@ -3689,6 +3795,7 @@ int main(void) {
         TestAtomicScopeAdditionBatch();
         TestExtensionScopeWorkflowUI();
         TestExplicitScopeReload();
+        TestApplicationEnabledCacheOwnership();
         gStore = nil;
         [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
         printf("Runtime device group and telephony writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);

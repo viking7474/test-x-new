@@ -102,3 +102,6 @@ is rejected separately. Negative controls do not edit production files.
 
 Both scheme native builds/runtime checks remain pending macOS CI; full Patch 4 and
 global reader/cache ordering remain partial.
+
+2026-10-30: user reports H5M build pass. H5N addresses per-instance enabled-cache
+ownership; local Windows checks still do not imply native/device execution.

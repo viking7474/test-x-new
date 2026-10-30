@@ -79,6 +79,11 @@
 @property (nonatomic, strong) NSMutableDictionary *scopedApps;
 @property (nonatomic, strong) NSError *error;
 @property (nonatomic, strong) NSMutableDictionary *spoofCache;
+// Per-instance app-enabled reader state. Scope belongs to this manager too.
+@property (nonatomic, strong) NSMutableDictionary *appEnabledCache;
+@property (nonatomic) NSTimeInterval appEnabledLastReloadTime;
+@property (nonatomic, copy) NSString *appEnabledLastLoggedBundleID;
+@property (nonatomic) NSTimeInterval appEnabledLastLogTime;
 - (BOOL)refreshCanonicalCellularIdentityForCurrentProfile;
 - (PXCommittedRuntimeGeneration *)ownedRuntimeGenerationForProfileID:(NSString *)profileID currentProfile:(BOOL)current networkArtifacts:(NSDictionary *)networkArtifacts deferSettings:(BOOL)deferSettings error:(NSError **)error;
 - (BOOL)commitRuntimeGenerationAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts lifecycleLease:(PXProfileLifecycleLease *)lease deferSettings:(BOOL)deferSettings receipt:(PXCommittedRuntimeGeneration **)receipt error:(NSError **)error;
@@ -1187,6 +1192,7 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
         _settings = [NSMutableDictionary dictionary];
         _scopedApps = [NSMutableDictionary dictionary];
         _spoofCache = [NSMutableDictionary dictionary];
+        _appEnabledCache = [NSMutableDictionary dictionary];
     }
     return self;
 }
@@ -3479,11 +3485,8 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
     return displayApps;
 }
 
-// Cache for application enabled status to reduce frequent lookups and logging
-static NSMutableDictionary *_appEnabledCache = nil;
-static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 seconds
-
 - (BOOL)isApplicationEnabled:(NSString *)bundleID {
+    if (![bundleID isKindOfClass:NSString.class] || !bundleID.length) return NO;
     PX_IDENTIFIER_RUNTIME_READ_OPERATION;
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     if (!PXIdentifierManagerIsManagerProcess()) {
@@ -3501,12 +3504,6 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
         return NO;
     }
 #endif
-    // Initialize cache if needed
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        _appEnabledCache = [NSMutableDictionary dictionary];
-    });
-    
     // Check if we have a cached result that's still valid
     NSDictionary *cachedResult = _appEnabledCache[bundleID];
     if (cachedResult) {
@@ -3514,21 +3511,19 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
         NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
         
         // If the cache hasn't expired, use it
-        if (now - timestamp < _cacheExpirationTime) {
+        if (now - timestamp < 30.0) {
             return [cachedResult[@"enabled"] boolValue];
         }
     }
     
-    // Only log once every 30 seconds per app to avoid spamming logs
-    static NSString *lastLoggedApp = nil;
-    static NSTimeInterval lastLogTime = 0;
+    // Retain the last-app / 30-second logging policy on this instance.
     NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
-    BOOL shouldLog = ![lastLoggedApp isEqualToString:bundleID] || (now - lastLogTime > 30.0);
+    BOOL shouldLog = ![_appEnabledLastLoggedBundleID isEqualToString:bundleID] || (now - _appEnabledLastLogTime > 30.0);
     
     if (shouldLog) {
         PXLog(@"[WeaponX] IdentifierManager DEBUG: Checking if app is enabled: %@", bundleID);
-        lastLoggedApp = [bundleID copy];
-        lastLogTime = now;
+        _appEnabledLastLoggedBundleID = [bundleID copy];
+        _appEnabledLastLogTime = now;
     }
     
     // Never consider the WeaponX app itself as enabled for spoofing
@@ -3557,13 +3552,12 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
     
     // Ensure we have the latest scoped apps data
     // Only reload scoped apps if we haven't reloaded recently
-    static NSTimeInterval lastReloadTime = 0;
-    if (now - lastReloadTime > 60.0) { // Only reload every minute at most
+    if (now - _appEnabledLastReloadTime > 60.0) { // Only reload every minute per instance
         if (shouldLog) {
             PXLog(@"[WeaponX] IdentifierManager DEBUG: App not found directly, reloading scoped apps");
         }
         [self loadScopedApps];
-        lastReloadTime = now;
+        _appEnabledLastReloadTime = now;
     }
     
     // Check again after potentially reloading the scoped apps

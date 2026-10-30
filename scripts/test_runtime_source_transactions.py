@@ -39,7 +39,7 @@ def source_contracts():
         assert f'(^ _Nonnull PXRuntimePublication{name})' in publisher_header
     assert 'NSDictionary * _Nonnull (^ _Nonnull PXRuntimePublicationDistributor)' in publisher_header
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H5M-partial'
+    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H5N-partial'
     assert len(manifest['sources']) == 19 and len({x['field'] for x in manifest['sources']}) == 19
     for source in manifest['sources']:
         for writer in source['writers']:
@@ -690,6 +690,48 @@ def source_contracts():
                  'rootful legacy malformed file preserves memory and caches without escalating to owner APIs'):
         assert case in fixture_settings, case
     assert 'TestExplicitScopeReload();' in fixture_settings
+    enabled_reader = method(manager, '- (BOOL)isApplicationEnabled:(NSString *)bundleID')
+    invalid_id = 'if (![bundleID isKindOfClass:NSString.class] || !bundleID.length) return NO;'
+    assert enabled_reader.index(invalid_id) < enabled_reader.index('PX_IDENTIFIER_RUNTIME_READ_OPERATION;')
+    assert enabled_reader.index('#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)') < enabled_reader.index('PXCaptureRuntimeSnapshot()') < enabled_reader.index('NSDictionary *cachedResult = _appEnabledCache[bundleID];')
+    assert 'static NSMutableDictionary *_appEnabledCache' not in manager
+    assert 'static ' not in enabled_reader and 'dispatch_once' not in enabled_reader
+    state = manager.split('// Per-instance app-enabled reader state.', 1)[1].split('- (BOOL)refreshCanonicalCellularIdentityForCurrentProfile;', 1)[0]
+    for declaration in ('@property (nonatomic, strong) NSMutableDictionary *appEnabledCache;',
+                        '@property (nonatomic) NSTimeInterval appEnabledLastReloadTime;',
+                        '@property (nonatomic, copy) NSString *appEnabledLastLoggedBundleID;',
+                        '@property (nonatomic) NSTimeInterval appEnabledLastLogTime;'):
+        assert declaration in state
+    assert '_appEnabledCache = [NSMutableDictionary dictionary];' in method(manager, '- (instancetype)init')
+    assert enabled_reader.count('_appEnabledCache =') == 0
+    assert 'now - timestamp < 30.0' in enabled_reader
+    assert 'if (now - _appEnabledLastReloadTime > 60.0)' in enabled_reader
+    assert enabled_reader.index('[self loadScopedApps];') < enabled_reader.index('_appEnabledLastReloadTime = now;')
+    assert '[_appEnabledLastLoggedBundleID isEqualToString:bundleID]' in enabled_reader and 'now - _appEnabledLastLogTime > 30.0' in enabled_reader
+    assert '_appEnabledLastLoggedBundleID = [bundleID copy];' in enabled_reader and '_appEnabledLastLogTime = now;' in enabled_reader
+    for token in ('[bundleID isEqualToString:@"com.hydra.tlinkios"]', '[key lowercaseString]', '[bundleID lowercaseString]'):
+        assert token in enabled_reader
+    for artifact in ('PXAppEnabledState.inc', 'PXIdentifierManagerInit.inc'):
+        assert artifact in group_recipe and artifact in fixture_settings
+    assert "'- (BOOL)isApplicationEnabled:(NSString *)bundleID'," in group_recipe
+    assert "'common/PXRuntimeSnapshotReader.m'," in group_recipe, 'enabled reader/snapshot fixture must link real bool helper and snapshot'
+    assert 'TestApplicationEnabledCacheOwnership();' in fixture_settings
+    for case in ('exact manager constructor owns separate initialized reader state',
+                 'enabled cache lifetime follows its manager without static retention',
+                 'same bundle ID keeps independent cached decisions for different manager scope views',
+                 'invalid enabled-reader IDs fail before cache logging reload or snapshot work',
+                 'fresh enabled cache retains existing thirty second policy',
+                 'expired enabled cache rechecks its own scope without borrowing sibling values',
+                 'enabled reader retains case insensitive fallback and string scalar policy',
+                 'each manager gets its own first miss reload instead of sharing another instance throttle',
+                 'different negative keys retain the sixty second reload throttle within each manager',
+                 'failed manager reload still consumes only its own existing reload interval',
+                 'one manager reload failure cannot suppress another manager first reload',
+                 'scope writer invalidates its owner cache without reinterpreting another manager local view',
+                 'explicit sibling reload adopts canonical change and invalidates its own stale decision',
+                 'RootHide injected enabled reader keeps snapshot authority before owner cache throttle and file paths',
+                 'RootHide invalid IDs do not capture snapshots or mutate instance state'):
+        assert case in fixture_settings, case
     for token in ('nested writer shares staged dictionaries', 'ignored nested failure', 'rollback restores exact prior bytes',
                   'rollback preserves original source permissions', 'validate all journal paths before any recovery writes',
                   'commit marker decides complete new tuple', 'rollback restores absence',
