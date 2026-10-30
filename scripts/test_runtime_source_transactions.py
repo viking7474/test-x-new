@@ -39,7 +39,7 @@ def source_contracts():
         assert f'(^ _Nonnull PXRuntimePublication{name})' in publisher_header
     assert 'NSDictionary * _Nonnull (^ _Nonnull PXRuntimePublicationDistributor)' in publisher_header
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H5E-partial'
+    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H5F-partial'
     assert len(manifest['sources']) == 19 and len({x['field'] for x in manifest['sources']}) == 19
     for source in manifest['sources']:
         for writer in source['writers']:
@@ -346,6 +346,38 @@ def source_contracts():
     assert load.index('PXPerformRuntimeSourceWrite') < load.index('fileExistsAtPath:prefsFile')
     assert 'managerSources[@"settings"]' in load and 'managerSources[@"scope"]' in load
     assert 'PXCaptureRuntimeSources' in load
+    packet = load.split('managerSources = PXCaptureRuntimeSources(', 1)[1].split('}, &sourceError)', 1)[0]
+    assert 'dictionaryWithContentsOfFile:' not in packet
+    assert 'PXReadRuntimeSourceDictionary(settingsPath, error)' in packet
+    assert 'PXReadRuntimeSourceDictionary(scopedAppsFile, error)' in packet
+    assert packet.index('fileExistsAtPath:settingsPath') < packet.index('PXReadRuntimeSourceDictionary(settingsPath')
+    assert 'PXValidateManagerSettingsSources(settings, scope, error)' in packet
+    assert 'if (!managerSources) { self.error = sourceError; return; }' in load
+    validation = 'if (!managerSources && !PXValidateManagerSettingsSources(loadedDict, scopedAppsDict, &sourceError)) { self.error = sourceError; return; }'
+    assert validation in load
+    assert load.index(validation) < load.index('self.settings = newSettings;') < load.index('self.scopedApps = newScope;')
+    assert load.count('self.settings =') == 1 and load.count('self.scopedApps =') == 1
+    assert 'for (NSString *bundleID in apps) newScope[bundleID] = [apps[bundleID] mutableCopy];' in load
+    validator = manager.split('static BOOL PXValidateManagerSettingsSources(', 1)[1].split('static NSDictionary *PXSanitizedIdentifierSettings', 1)[0]
+    for field in ('SettingsInitialized', 'EnabledIdentifiers', 'ScopedApps', 'enabled'):
+        assert f'@"{field}"' in validator
+    assert 'code:6039' in validator and 'isKindOfClass:NSNumber.class' in validator and 'isKindOfClass:NSString.class' in validator
+    assert '![app isKindOfClass:NSDictionary.class]' in validator and '![apps isKindOfClass:NSDictionary.class]' in validator
+    assert 'writeToFile' not in validator and 'NSUserDefaults' not in validator
+    for case in ('valid manager load preserves scalar compatibility aliases and source bytes without notification',
+                 'loaded scope records are independently mutable without modifying source data',
+                 'malformed load packet preserves both live dictionaries and source bytes',
+                 'null initialization scalar is rejected before boolValue',
+                 'malformed manager plist is never converted to an empty successful load',
+                 'manager legacy fallback loads without canonical repair or marker writes',
+                 'missing optional load fields preserve legacy defaults policy',
+                 'absent manager sources retain defaults without materializing files',
+                 'RootHide injected load still exits before source access'):
+        assert case in fixture_settings, case
+    assert 'TestManagerSettingsLoading();' in fixture_settings
+    group_recipe = read('scripts/test_runtime_device_group_writers.py')
+    assert "SIGNATURES += ['- (void)loadSettings']" in group_recipe
+    assert 'static BOOL PXValidateManagerSettingsSources(NSDictionary *settings, NSDictionary *scope, NSError **error)' in group_recipe
     for token in ('nested writer shares staged dictionaries', 'ignored nested failure', 'rollback restores exact prior bytes',
                   'rollback preserves original source permissions', 'validate all journal paths before any recovery writes',
                   'commit marker decides complete new tuple', 'rollback restores absence',

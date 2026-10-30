@@ -83,3 +83,8 @@ Final source transaction contracts and git diff whitespace validation pass.
 
 These are source/fixture-generation results only. H5E native Foundation, Theos,
 rootful/RootHide package and physical-device checks remain for macOS CI/device.
+
+
+## Build acknowledgement
+
+2026-10-30: user reports H5E build pass. This is user-provided CI confirmation; local Windows did not execute native Foundation/Theos. H5F continues with malformed manager settings/scope loading and scope record ownership.

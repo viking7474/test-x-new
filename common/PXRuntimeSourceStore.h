@@ -62,7 +62,7 @@ FOUNDATION_EXPORT BOOL PXPerformRuntimeSourceWrite(
 FOUNDATION_EXPORT BOOL PXPerformStandaloneRuntimeSourceWrite(
     BOOL (^ _Nonnull body)(PXRuntimeSourceTransaction * _Nonnull transaction, NSError * _Nullable * _Nonnull error), NSError * _Nullable * _Nullable error);
 /// Bounded, immutable dictionary decoder for capture loaders. No lock/recovery:
-/// call only inside a source capture, using configured canonical source paths.
+/// call only inside a source capture, using configured source/legacy fallback paths.
 /// Missing file returns an empty dictionary; malformed/nonregular input fails.
 FOUNDATION_EXPORT NSDictionary * _Nullable PXReadRuntimeSourceDictionary(NSString *path, NSError * _Nullable * _Nullable error);
 FOUNDATION_EXPORT NSDictionary * _Nullable PXCaptureRuntimeSources(

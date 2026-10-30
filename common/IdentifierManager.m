@@ -176,6 +176,31 @@ static BOOL PXRestoreToggleBeforeImage(NSMutableDictionary *target, NSString *ke
     return YES;
 }
 
+// Validate the complete load packet before replacing either live dictionary.
+// Missing legacy fields remain valid; present structural/scalar fields must be safe.
+static BOOL PXValidateManagerSettingsSources(NSDictionary *settings, NSDictionary *scope, NSError **error) {
+    NSString *reason = nil;
+    if ((settings && ![settings isKindOfClass:NSDictionary.class]) || (scope && ![scope isKindOfClass:NSDictionary.class])) {
+        reason = @"Settings sources must be dictionaries";
+    } else {
+        id initialized = settings[@"SettingsInitialized"];
+        id flags = settings[@"EnabledIdentifiers"];
+        id apps = scope[@"ScopedApps"];
+        if (initialized && ![initialized isKindOfClass:NSNumber.class] && ![initialized isKindOfClass:NSString.class]) reason = @"Malformed SettingsInitialized scalar";
+        else if (flags && ![flags isKindOfClass:NSDictionary.class]) reason = @"Malformed EnabledIdentifiers container";
+        else if (apps && ![apps isKindOfClass:NSDictionary.class]) reason = @"Malformed ScopedApps container";
+        else for (id bundleID in apps) {
+            id app = apps[bundleID];
+            if (![bundleID isKindOfClass:NSString.class] || ![app isKindOfClass:NSDictionary.class]) { reason = @"Malformed scoped application record"; break; }
+            id enabled = app[@"enabled"];
+            if (enabled && ![enabled isKindOfClass:NSNumber.class] && ![enabled isKindOfClass:NSString.class]) { reason = @"Malformed scoped application enabled scalar"; break; }
+        }
+    }
+    if (!reason) return YES;
+    if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6039 userInfo:@{NSLocalizedDescriptionKey: reason}];
+    return NO;
+}
+
 static NSDictionary *PXSanitizedIdentifierSettings(NSDictionary *settings) {
     if (![settings isKindOfClass:NSDictionary.class]) return @{};
     NSMutableDictionary *result = [NSMutableDictionary dictionary];
@@ -3537,7 +3562,7 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
     NSString *scopedAppsFile = PXGlobalScopePath();
     
     NSFileManager *fileManager = [NSFileManager defaultManager];
-    if (![fileManager fileExistsAtPath:prefsFile]) {
+    if (!PXIdentifierManagerIsManagerProcess() && ![fileManager fileExistsAtPath:prefsFile]) {
         PXLog(@"[WeaponX] Settings not found at default path: %@", prefsFile);
         NSString *legacyPrefsFile = [PXPreferencesPath() stringByAppendingPathComponent:@"com.hydra.tlinkios.plist"];
         if ([fileManager fileExistsAtPath:legacyPrefsFile]) {
@@ -3552,9 +3577,17 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
     NSDictionary *managerSources = nil;
     if (PXIdentifierManagerIsManagerProcess()) {
         managerSources = PXCaptureRuntimeSources(^NSDictionary *(NSError **error) {
-            (void)error;
-            return @{ @"settings": [NSDictionary dictionaryWithContentsOfFile:prefsFile] ?: @{},
-                      @"scope": [NSDictionary dictionaryWithContentsOfFile:scopedAppsFile] ?: @{} };
+            // Select the legacy path under the same gate as both source reads.
+            NSString *settingsPath = PXTLinkIOSSettingsPath();
+            if (![fileManager fileExistsAtPath:settingsPath]) {
+                NSString *legacyPath = [PXPreferencesPath() stringByAppendingPathComponent:@"com.hydra.tlinkios.plist"];
+                if ([fileManager fileExistsAtPath:legacyPath]) settingsPath = legacyPath;
+            }
+            NSDictionary *settings = PXReadRuntimeSourceDictionary(settingsPath, error);
+            if (!settings) return nil;
+            NSDictionary *scope = PXReadRuntimeSourceDictionary(scopedAppsFile, error);
+            if (!scope || !PXValidateManagerSettingsSources(settings, scope, error)) return nil;
+            return @{ @"settings": settings, @"scope": scope };
         }, &sourceError);
         if (!managerSources) { self.error = sourceError; return; }
     }
@@ -3576,11 +3609,24 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
         PXLog(@"[WeaponX] Failed to load settings dictionary (file may imply empty or permission denied?)");
     }
 
+    // Load scoped apps from the same RootHide runtime publication when
+    // available so scope and identity belong to one daemon-owned generation.
+    NSDictionary *scopedAppsDict = managerSources[@"scope"];
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    if (!PXIdentifierManagerIsManagerProcess()) {
+        NSDictionary *runtimeScope = PXCaptureRuntimeSnapshot().globalScope;
+        if (runtimeScope.count) scopedAppsDict = runtimeScope;
+    }
+#endif
+    if (!scopedAppsDict) scopedAppsDict = [NSDictionary dictionaryWithContentsOfFile:scopedAppsFile];
+    if (!managerSources && !PXValidateManagerSettingsSources(loadedDict, scopedAppsDict, &sourceError)) { self.error = sourceError; return; }
+    NSMutableDictionary *newSettings = nil;
+
     // Check if settings are initialized
     if (!loadedDict || ![loadedDict[@"SettingsInitialized"] boolValue]) {
         // Initialize with default values
         PXLog(@"[WeaponX] Settings not initialized, using defaults.");
-        self.settings = [NSMutableDictionary dictionaryWithDictionary:@{
+        newSettings = [NSMutableDictionary dictionaryWithDictionary:@{
             @"IDFA": @NO,
             @"IDFV": @NO,
             @"DeviceName": @NO,
@@ -3640,11 +3686,11 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
                 }
             }];
 
-            self.settings = normalized;
-            PXLog(@"[WeaponX] ✅ Loaded %lu canonical identifier settings from EnabledIdentifiers", (unsigned long)self.settings.count);
+            newSettings = normalized;
+            PXLog(@"[WeaponX] ✅ Loaded %lu canonical identifier settings from EnabledIdentifiers", (unsigned long)newSettings.count);
         } else {
             PXLog(@"[WeaponX] ⚠️ EnabledIdentifiers key not found, using defaults");
-            self.settings = [NSMutableDictionary dictionaryWithDictionary:@{
+            newSettings = [NSMutableDictionary dictionaryWithDictionary:@{
                 @"IDFA": @NO,
                 @"IDFV": @NO,
                 @"DeviceName": @NO,
@@ -3657,26 +3703,21 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
         }
     }
     
-    // Load scoped apps from the same RootHide runtime publication when
-    // available so scope and identity belong to one daemon-owned generation.
-    NSDictionary *scopedAppsDict = managerSources[@"scope"];
-#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    if (!PXIdentifierManagerIsManagerProcess()) {
-        NSDictionary *runtimeScope = PXCaptureRuntimeSnapshot().globalScope;
-        if (runtimeScope.count) scopedAppsDict = runtimeScope;
-    }
-#endif
-    if (!scopedAppsDict) scopedAppsDict = [NSDictionary dictionaryWithContentsOfFile:scopedAppsFile];
+    NSMutableDictionary *newScope = nil;
     if (scopedAppsDict && scopedAppsDict[@"ScopedApps"]) {
-        self.scopedApps = [scopedAppsDict[@"ScopedApps"] mutableCopy];
-        PXLog(@"[WeaponX] Loaded Scoped Apps: %lu apps found.", (unsigned long)self.scopedApps.count);
-        for (NSString *appID in self.scopedApps) {
-            PXLog(@"[WeaponX] Scope App: %@ | Enabled: %@", appID, self.scopedApps[appID][@"enabled"]);
+        newScope = [NSMutableDictionary dictionary];
+        NSDictionary *apps = scopedAppsDict[@"ScopedApps"];
+        for (NSString *bundleID in apps) newScope[bundleID] = [apps[bundleID] mutableCopy];
+        PXLog(@"[WeaponX] Loaded Scoped Apps: %lu apps found.", (unsigned long)newScope.count);
+        for (NSString *appID in newScope) {
+            PXLog(@"[WeaponX] Scope App: %@ | Enabled: %@", appID, newScope[appID][@"enabled"]);
         }
     } else {
         PXLog(@"[WeaponX] No ScopedApps found or failed to load scoped apps file.");
-        self.scopedApps = [NSMutableDictionary dictionary];
+        newScope = [NSMutableDictionary dictionary];
     }
+    self.settings = newSettings;
+    self.scopedApps = newScope;
 }
 
 #pragma mark - Error Handling

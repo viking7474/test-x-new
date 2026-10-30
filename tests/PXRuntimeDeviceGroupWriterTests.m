@@ -5,6 +5,7 @@
 #import "PXSecuritySettingsStore.h"
 #import "PXRuntimeIdentifierWriter.h"
 #import "PXRuntimeGeneration.h"
+#import "PXRuntimeSnapshotReader.h"
 #import "PXRuntimeProfileSelection.h"
 #import "PXRuntimeArtifactPreparation.h"
 #import "PXRuntimeScalarPreparation.h"
@@ -69,6 +70,8 @@ BOOL PXPerformStandaloneRuntimeSourceWrite(BOOL (^body)(PXRuntimeSourceTransacti
     }
     return success;
 }
+static BOOL gManagerLoadRole = YES;
+static BOOL PXIdentifierManagerIsManagerProcess(void) { return gManagerLoadRole; }
 static NSUInteger gVerificationCaptures, gVerificationSourceReads;
 static void (^gDuringVerificationRead)(NSString *path);
 NSDictionary *PXCaptureRuntimeSources(NSDictionary *(^loader)(NSError **), NSError **error) {
@@ -464,7 +467,11 @@ ARTIFACT_SINGLETON
 }
 #define CFNotificationCenterPostNotification PXToggleFixtureNotification
 #define PXReadRuntimeSourceDictionary PXFixtureReadVerificationDictionary
+#define PX_IDENTIFIER_RUNTIME_READ_OPERATION ((void)0)
+#define PXCaptureRuntimeSnapshot() ((PXRuntimeReadSnapshot *)nil)
 #include "PXDeviceGroupMethods.inc"
+#undef PXCaptureRuntimeSnapshot
+#undef PX_IDENTIFIER_RUNTIME_READ_OPERATION
 #undef PXReadRuntimeSourceDictionary
 #undef CFNotificationCenterPostNotification
 @end
@@ -2635,6 +2642,93 @@ static void TestCoherentToggleVerification(void) {
           "failed coherent capture never acknowledges a write and still uses owned compensation");
 }
 
+static BOOL SeedManagerLoading(NSDictionary *settings, NSDictionary *scope) {
+    return [gStore performStandaloneWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        return [tx setDictionary:settings atPath:PXTLinkIOSSettingsPath() error:error] &&
+               [tx setDictionary:scope atPath:PXGlobalScopePath() error:error];
+    } error:NULL];
+}
+static void TestManagerSettingsLoading(void) {
+    PXDeviceGroupFixture *manager = [PXDeviceGroupFixture new];
+    NSDictionary *settings = @{ @"SettingsInitialized": @"YES", @"EnabledIdentifiers": @{
+        @"WiFi": @NO, @"Battery": @NO, @"DeviceTheme": @NO, @"StorageSystem": @NO, @"SystemVersion": @"YES" } };
+    NSDictionary *scope = @{ @"ScopedApps": @{ @"fixture.loaded": @{ @"enabled": @"NO", @"name": @"Loaded" } } };
+    CHECK(SeedManagerLoading(settings, scope), "manager load canonical baseline seeded");
+    NSDictionary *before = BatchSnapshot(); NSUInteger notices = gBatchNotifications;
+    [manager loadSettings];
+    CHECK(!manager.error && [manager.settings[@"IOSVersion"] boolValue] && ![manager.settings[@"WiFi"] boolValue] &&
+          [manager.scopedApps[@"fixture.loaded"][@"enabled"] isEqual:@"NO"] && notices == gBatchNotifications && [before isEqual:BatchSnapshot()],
+          "valid manager load preserves scalar compatibility aliases and source bytes without notification");
+    manager.scopedApps[@"fixture.loaded"][@"name"] = @"Memory edit";
+    CHECK([manager.scopedApps[@"fixture.loaded"] isKindOfClass:NSMutableDictionary.class] &&
+          [[[NSDictionary dictionaryWithContentsOfFile:PXGlobalScopePath()] objectForKey:@"ScopedApps"][@"fixture.loaded"][@"name"] isEqual:@"Loaded"],
+          "loaded scope records are independently mutable without modifying source data");
+    NSArray *invalidSettings = @[
+        @{ @"SettingsInitialized": @[], @"EnabledIdentifiers": @{} },
+        @{ @"SettingsInitialized": @YES, @"EnabledIdentifiers": @"bad" } ];
+    NSArray *invalidScopes = @[
+        @{ @"ScopedApps": @[] }, @{ @"ScopedApps": @{ @"fixture.bad": @YES } },
+        @{ @"ScopedApps": @{ @"fixture.bad": @{ @"enabled": @[] } } } ];
+    for (NSUInteger index = 0; index < invalidSettings.count + invalidScopes.count; index++) {
+        NSDictionary *badSettings = index < invalidSettings.count ? invalidSettings[index] : settings;
+        NSDictionary *badScope = index < invalidSettings.count ? scope : invalidScopes[index - invalidSettings.count];
+        CHECK(SeedManagerLoading(badSettings, badScope), "manager malformed structural fixture seeded");
+        manager.error = nil;
+        NSMutableDictionary *oldFlags = manager.settings, *oldScope = manager.scopedApps;
+        before = BatchSnapshot(); [manager loadSettings];
+        CHECK(manager.error.code == 6039 && manager.settings == oldFlags && manager.scopedApps == oldScope &&
+              [before isEqual:BatchSnapshot()] && notices == gBatchNotifications,
+              "malformed load packet preserves both live dictionaries and source bytes");
+    }
+    NSError *failure = nil;
+    CHECK((!PXValidateManagerSettingsSources(@{ @"SettingsInitialized": NSNull.null }, scope, &failure) && failure.code == 6039),
+          "null initialization scalar is rejected before boolValue");
+    CHECK(SeedManagerLoading(settings, scope), "manager decoder fixtures restore valid source schema");
+    for (NSString *path in @[PXTLinkIOSSettingsPath(), PXGlobalScopePath()]) {
+        NSData *saved = [NSData dataWithContentsOfFile:path];
+        @try {
+            CHECK([[@"broken plist" dataUsingEncoding:NSUTF8StringEncoding] writeToFile:path atomically:YES], "manager malformed bytes fixture seeded");
+            NSMutableDictionary *oldFlags = manager.settings, *oldScope = manager.scopedApps;
+            before = BatchSnapshot(); manager.error = nil; [manager loadSettings];
+            CHECK(manager.error && manager.settings == oldFlags && manager.scopedApps == oldScope && [before isEqual:BatchSnapshot()],
+                  "malformed manager plist is never converted to an empty successful load");
+        } @finally { CHECK([saved writeToFile:path atomically:YES], "manager malformed bytes teardown restores exact source"); }
+    }
+    // Existing legacy file fallback remains read-only and is selected under capture.
+    NSString *legacyPath = Path(gRoot, @"com.hydra.tlinkios.plist");
+    NSData *canonical = [NSData dataWithContentsOfFile:PXTLinkIOSSettingsPath()];
+    NSData *legacy = [NSData dataWithContentsOfFile:legacyPath];
+    @try {
+        CHECK([settings writeToFile:legacyPath atomically:YES] && [NSFileManager.defaultManager removeItemAtPath:PXTLinkIOSSettingsPath() error:NULL],
+              "manager legacy fallback fixture seeded");
+        before = BatchSnapshot(); manager.error = nil; [manager loadSettings];
+        CHECK(!manager.error && [manager.settings[@"IOSVersion"] boolValue] && [before isEqual:BatchSnapshot()],
+              "manager legacy fallback loads without canonical repair or marker writes");
+    } @finally {
+        CHECK([canonical writeToFile:PXTLinkIOSSettingsPath() atomically:YES], "manager legacy teardown restores canonical bytes");
+        if (legacy) CHECK([legacy writeToFile:legacyPath atomically:YES], "manager legacy teardown restores previous legacy bytes");
+        else CHECK([NSFileManager.defaultManager removeItemAtPath:legacyPath error:NULL], "manager legacy teardown restores absence");
+    }
+    CHECK(SeedManagerLoading(@{}, @{}), "manager missing legacy fields fixture seeded");
+    manager.error = nil; [manager loadSettings];
+    CHECK(!manager.error && ![manager.settings[@"IDFA"] boolValue] && !manager.scopedApps.count,
+          "missing optional load fields preserve legacy defaults policy");
+    CHECK([gStore performStandaloneWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        return [tx removeDictionaryAtPath:PXTLinkIOSSettingsPath() error:error] && [tx removeDictionaryAtPath:PXGlobalScopePath() error:error];
+    } error:NULL], "manager absent sources fixture seeded");
+    before = BatchSnapshot(); manager.error = nil; [manager loadSettings];
+    CHECK(!manager.error && ![manager.settings[@"IDFA"] boolValue] && !manager.scopedApps.count && [before isEqual:BatchSnapshot()] &&
+          ![NSFileManager.defaultManager fileExistsAtPath:PXTLinkIOSSettingsPath()] && ![NSFileManager.defaultManager fileExistsAtPath:PXGlobalScopePath()],
+          "absent manager sources retain defaults without materializing files");
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    gManagerLoadRole = NO; NSUInteger captures = gVerificationCaptures;
+    NSMutableDictionary *oldFlags = manager.settings, *oldScope = manager.scopedApps;
+    [manager loadSettings]; gManagerLoadRole = YES;
+    CHECK(captures == gVerificationCaptures && manager.settings == oldFlags && manager.scopedApps == oldScope,
+          "RootHide injected load still exits before source access");
+#endif
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
@@ -2668,6 +2762,7 @@ int main(void) {
         TestTogglePostCommitAcknowledgement();
         TestToggleAuthoritativeBeforeImages();
         TestCoherentToggleVerification();
+        TestManagerSettingsLoading();
         gStore = nil;
         [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
         printf("Runtime device group and telephony writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);
