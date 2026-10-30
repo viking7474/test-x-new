@@ -2,6 +2,7 @@
 """Profile creation, conditional activation and exclusive directory reservation."""
 from pathlib import Path
 import argparse
+import ast
 import importlib.util
 import json
 import re
@@ -394,6 +395,24 @@ def source_contracts():
     reset_source = read('TLinkIOSViewController.m')
     reset_begin, reset_advance, reset_finish, backup_entry, reset_entry, clear_entry, _ = [writers.method(reset_source, s) for s in UI_ADAPTERS['PXResetWorkflowUI.inc'][1]]
     assert 'NSThread.isMainThread' in reset_begin and 'self.dashboardResetToken' in reset_begin
+    assert 'PXBeginDashboardResetAdmission(self)' in reset_begin
+    assert reset_begin.index('captureDashboardResetInputsForBackup:') < reset_begin.index('PXBeginDashboardResetAdmission(self)') < reset_begin.index('self.dashboardResetToken = token;')
+    assert 'PXDashboardResetAdmissionMatches(self, token)' in reset_advance
+    assert reset_finish.index('PXFinishDashboardResetAdmission(self, token)') < reset_finish.index('self.dashboardResetToken = nil;')
+    shared = read('common/PXDashboardResetAdmission.m')
+    owner_declarations = re.findall(r'^static\s+(?:(?:__weak|__strong)\s+)?id\s+PXResetAdmissionOwner\s*;', shared, re.M)
+    assert owner_declarations == ['static __weak id PXResetAdmissionOwner;']
+    assert 'static NSObject *PXResetAdmissionToken;' in shared
+    assert '!NSThread.isMainThread || !owner || PXResetAdmissionOwner' in shared
+    assert 'PXResetAdmissionOwner == owner && PXResetAdmissionToken == token' in shared
+    for forbidden in ('dispatch_', 'NSLock', 'flock(', 'writeToFile:', 'addObserver', 'NSTimer', 'NSUserDefaults'):
+        assert forbidden not in shared, forbidden
+    assert '#import "PXDashboardResetAdmission.h"' in fixture
+    native_function = next(node for node in ast.parse(read('scripts/test_profile_creation_flow.py')).body
+                           if isinstance(node, ast.FunctionDef) and node.name == 'native_tests')
+    native_sources = next(node.value for node in ast.walk(native_function) if isinstance(node, ast.Assign)
+                          and any(isinstance(target, ast.Name) and target.id == 'sources' for target in node.targets))
+    assert 'common/PXDashboardResetAdmission.m' in ast.literal_eval(native_sources), 'native fixture must link the real shared admission implementation'
     for helper in (reset_advance, reset_finish):
         assert '!NSThread.isMainThread' in helper and 'self.dashboardResetToken != token' in helper
     for entry in (backup_entry, reset_entry):
@@ -431,6 +450,7 @@ def source_contracts():
                  'off-main reset entries admit one run and keep UI effects on main'):
         assert case in fixture, case
     batch_helpers = [writers.method(reset_source, s) for s in UI_ADAPTERS['PXResetBatchUI.inc'][1]]
+    assert 'PXDashboardResetAdmissionMatches(self, token)' in batch_helpers[0]
     for batch, phase in ((batch_helpers[2], 'backup'), (batch_helpers[4], 'clearing')):
         assert 'if (!NSThread.isMainThread)' in batch and '__block BOOL completed = NO;' in batch
         assert batch.count(f'isDashboardReset:resetToken inPhase:@"{phase}"') == 2
@@ -452,6 +472,17 @@ def source_contracts():
                  'off-main reset service and creation bounce do not retain the controller'):
         assert case in fixture, case
     assert 'TestResetOwnerLifetime();' in fixture
+    for case in ('shared Reset admission accepts one live owner and rejects same or different contenders',
+                 'off-main admission operations reject without changing the active owner',
+                 'stale admission release cannot revoke a newer live owner',
+                 'admission does not retain its owner and reclaims deallocated ownership without trusting stale tokens',
+                 'two live Reset controllers cannot overlap either button before backup filter or clear',
+                 'shared admission remains held through delayed restart',
+                 'normal restart finally releases shared admission for another controller',
+                 'revoked local state rejects phase work and local cleanup cannot release another owner',
+                 'deallocated controller permits a new UI run and its late callback cannot revoke that run'):
+        assert case in fixture, case
+    assert 'TestResetSharedAdmission();' in fixture
     for case in ('reset admission captures app order duplicates and mutable strings without editing live choices',
                  'reset scope and clear use the admitted list after backup while newer choices survive',
                  'reset backup metadata uses the admitted note after UI text changes',
@@ -758,7 +789,7 @@ def source_contracts():
                  'journal validation preserves legacy timestamp fallback compatibility'):
         assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4V-partial'
+    assert manifest['rollout'] == '4C.2H4W-partial'
     assert manifest['writers']['default-profile-seed']['status'] == 'enrolled'
     assert 'default-profile-seed' in next(item for item in manifest['sources'] if item['field'] == 'deviceIDs')['writers']
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
@@ -789,7 +820,7 @@ def native_tests():
         generate_native_fragments(folder)
         sources = ['common/PXProfileDeletionJournal.m', 'common/PXProfileLifecycleLease.m', 'common/PXProfileCreationReservation.m', 'common/PXRuntimeProfileSelection.m', 'common/PXRuntimeSourceStore.m', 'common/PXRuntimePublisher.m',
                    'common/PXRuntimeGeneration.m', 'common/PXRuntimeArtifactWriter.m', 'common/PXRuntimeIdentifierWriter.m',
-                   'common/PXProfileArtifactMutation.m', 'common/PXProfileMetadataWriter.m', 'common/PXDefaultProfileSeed.m',
+                   'common/PXProfileArtifactMutation.m', 'common/PXProfileMetadataWriter.m', 'common/PXDefaultProfileSeed.m', 'common/PXDashboardResetAdmission.m',
                    'tests/PXProfileCreationFlowTests.m']
         for scheme, defines in (('rootful', []), ('roothide', ['-DTHEOS_PACKAGE_SCHEME_ROOTHIDE=1'])):
             binary = folder / scheme

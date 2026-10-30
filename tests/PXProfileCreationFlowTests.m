@@ -10,6 +10,7 @@
 #import "PXProfileDeletionJournal.h"
 #import "PXProfileMetadataWriter.h"
 #import "PXDefaultProfileSeed.h"
+#import "PXDashboardResetAdmission.h"
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -2804,6 +2805,89 @@ static void TestResetOwnerLifetime(void) {
     }
 }
 
+static void TestResetSharedAdmission(void) {
+    NSObject *ownerA = [NSObject new], *ownerB = [NSObject new];
+    NSObject *tokenA = PXBeginDashboardResetAdmission(ownerA);
+    CHECK(tokenA && PXDashboardResetAdmissionMatches(ownerA, tokenA) && !PXBeginDashboardResetAdmission(ownerA) && !PXBeginDashboardResetAdmission(ownerB),
+          "shared Reset admission accepts one live owner and rejects same or different contenders");
+    CHECK(!PXBeginDashboardResetAdmission(nil) && !PXDashboardResetAdmissionMatches(nil, tokenA) && !PXFinishDashboardResetAdmission(ownerB, tokenA) && !PXFinishDashboardResetAdmission(ownerA, [NSObject new]),
+          "shared admission rejects nil wrong-owner and wrong-token operations");
+    __block BOOL began = YES, matched = YES, finished = YES;
+    dispatch_semaphore_t checked = dispatch_semaphore_create(0);
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        began = PXBeginDashboardResetAdmission(ownerB) != nil;
+        matched = PXDashboardResetAdmissionMatches(ownerA, tokenA);
+        finished = PXFinishDashboardResetAdmission(ownerA, tokenA);
+        dispatch_semaphore_signal(checked);
+    });
+    CHECK(dispatch_semaphore_wait(checked, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC)) == 0 && !began && !matched && !finished && PXDashboardResetAdmissionMatches(ownerA, tokenA),
+          "off-main admission operations reject without changing the active owner");
+    CHECK(PXFinishDashboardResetAdmission(ownerA, tokenA) && !PXFinishDashboardResetAdmission(ownerA, tokenA), "shared admission release is one-shot");
+    NSObject *tokenB = PXBeginDashboardResetAdmission(ownerB);
+    CHECK(tokenB && tokenB != tokenA && !PXFinishDashboardResetAdmission(ownerA, tokenA) && PXDashboardResetAdmissionMatches(ownerB, tokenB),
+          "stale admission release cannot revoke a newer live owner");
+    CHECK(PXFinishDashboardResetAdmission(ownerB, tokenB), "shared admission fixture releases second owner");
+    __weak NSObject *released; NSObject *staleToken;
+    @autoreleasepool {
+        NSObject *owner = [NSObject new]; released = owner; staleToken = PXBeginDashboardResetAdmission(owner);
+        CHECK(staleToken && PXDashboardResetAdmissionMatches(owner, staleToken), "weak admission owner fixture starts"); owner = nil;
+    }
+    tokenB = PXBeginDashboardResetAdmission(ownerB);
+    CHECK(!released && tokenB && tokenB != staleToken && !PXFinishDashboardResetAdmission(ownerB, staleToken) && PXDashboardResetAdmissionMatches(ownerB, tokenB),
+          "admission does not retain its owner and reclaims deallocated ownership without trusting stale tokens");
+    CHECK(PXFinishDashboardResetAdmission(ownerB, tokenB), "weak admission fixture releases ownership");
+
+    for (NSUInteger firstBackup = 0; firstBackup < 2; firstBackup++) for (NSUInteger nextBackup = 0; nextBackup < 2; nextBackup++) {
+        PXResetRunProfileManager *manager = ResetRunManager();
+        PXResetRunUIFixture *first = [PXResetRunUIFixture new], *second = [PXResetRunUIFixture new];
+        if (firstBackup) [first saveRRSThenResetTapped]; else [first resetDataTapped];
+        NSObject *firstToken = first.dashboardResetToken;
+        if (nextBackup) [second saveRRSThenResetTapped]; else [second resetDataTapped];
+        CHECK(firstToken && !second.dashboardResetToken && !second.dashboardResetInputs && second.messages == 1 && !second.shows && !second.filters && !second.backups && !second.clears && !manager.requests && PXDashboardResetAdmissionMatches(first, firstToken),
+              "two live Reset controllers cannot overlap either button before backup filter or clear");
+        if (firstBackup) { first.backupCompletion(@[], 1); CHECK(Pump(^BOOL { return first.clears == 1; }), "shared admission advances its backup owner"); }
+        void (^oldClear)(NSArray *) = first.clearCompletion;
+        CHECK([first finishDashboardReset:firstToken], "shared admission finishes first controller");
+        if (nextBackup) [second saveRRSThenResetTapped]; else [second resetDataTapped];
+        NSObject *secondToken = second.dashboardResetToken;
+        oldClear(@[]); DrainResetUI();
+        CHECK(secondToken && secondToken != firstToken && !manager.requests && ![first finishDashboardReset:firstToken] && PXDashboardResetAdmissionMatches(second, secondToken),
+              "terminal release permits another controller while old callbacks cannot affect its admission");
+        [second finishDashboardReset:secondToken]; ResetRunRelease(first, manager); ResetRunRelease(second, nil);
+    }
+    PXResetRunProfileManager *manager = ResetRunManager();
+    PXResetRunUIFixture *first = [PXResetRunUIFixture new], *second = [PXResetRunUIFixture new];
+    [first resetDataTapped]; first.clearCompletion(@[]);
+    CHECK(Pump(^BOOL { return manager.requests == 1; }), "shared admission fixture reaches pending create");
+    [second resetDataTapped]; CHECK(!second.dashboardResetToken && !second.clears, "shared admission remains held through create");
+    manager.pendingCreation(YES, nil); CHECK(Pump(^BOOL { return manager.switches == 1; }), "shared admission fixture reaches switch");
+    [second saveRRSThenResetTapped]; CHECK(!second.dashboardResetToken && !second.backups, "shared admission remains held through switch");
+    manager.pendingSwitch(YES, nil); CHECK(Pump(^BOOL { return gResetRestartSchedules == 1; }), "shared admission fixture reaches restart delay");
+    [second resetDataTapped]; CHECK(!second.dashboardResetToken && !second.clears, "shared admission remains held through delayed restart");
+    dispatch_block_t oldRestart = gResetRestart; oldRestart(); [second resetDataTapped];
+    CHECK(first.restarts == 1 && !first.dashboardResetToken && second.dashboardResetToken && second.clears == 1, "normal restart finally releases shared admission for another controller");
+    NSObject *secondToken = second.dashboardResetToken; oldRestart(); manager.pendingCreation(YES, nil); manager.pendingSwitch(YES, nil); DrainResetUI();
+    CHECK(first.restarts == 1 && manager.requests == 1 && PXDashboardResetAdmissionMatches(second, secondToken), "replayed first-controller phases cannot release or restart the new shared owner");
+    [second finishDashboardReset:secondToken]; ResetRunRelease(first, manager); ResetRunRelease(second, nil);
+
+    manager = ResetRunManager(); first = [PXResetRunUIFixture new]; second = [PXResetRunUIFixture new];
+    [first resetDataTapped]; NSObject *firstToken = first.dashboardResetToken;
+    CHECK(PXFinishDashboardResetAdmission(first, firstToken), "controlled admission revocation fixture");
+    [second resetDataTapped]; secondToken = second.dashboardResetToken; first.clearCompletion(@[]); DrainResetUI();
+    CHECK(!manager.requests && ![first advanceDashboardReset:firstToken fromPhase:@"clearing" toPhase:@"preparing"] && [first finishDashboardReset:firstToken] && PXDashboardResetAdmissionMatches(second, secondToken),
+          "revoked local state rejects phase work and local cleanup cannot release another owner");
+    [second finishDashboardReset:secondToken]; ResetRunRelease(first, manager); ResetRunRelease(second, nil);
+    manager = ResetRunManager(); __weak PXResetRunUIFixture *oldOwner; void (^lateClear)(NSArray *) = nil;
+    @autoreleasepool {
+        PXResetRunUIFixture *view = [PXResetRunUIFixture new]; oldOwner = view; [view resetDataTapped]; lateClear = view.clearCompletion; view = nil;
+    }
+    second = [PXResetRunUIFixture new]; [second resetDataTapped]; secondToken = second.dashboardResetToken;
+    lateClear(@[]); DrainResetUI();
+    CHECK(!oldOwner && secondToken && second.clears == 1 && !manager.requests && PXDashboardResetAdmissionMatches(second, secondToken),
+          "deallocated controller permits a new UI run and its late callback cannot revoke that run");
+    [second finishDashboardReset:secondToken]; ResetRunRelease(second, manager);
+}
+
 static void TestResetHardwareSnapshot(void) {
     for (NSUInteger mode = 0; mode < 6; mode++) {
         PXResetRunProfileManager *manager = ResetRunManager(); PXResetRunUIFixture *view = [PXResetRunUIFixture new];
@@ -2956,7 +3040,7 @@ int main(int argc, const char *argv[]) {
         TestUIDeletionAuthority();
         TestProfileIDAllocation();
         TestCurrentProfileCheckpoint(); TestCreationUIAdapters(); TestResetPreparationStatus(); TestResetIntentSnapshots(); TestResetRunAdmission(); TestResetPerAppCallbacks(); TestResetAdmittedInputs(); TestResetSelectionCheckpoints();
-        TestResetHardwareSnapshot(); TestHardwarePreviewProvider(); TestResetOwnerLifetime();
+        TestResetHardwareSnapshot(); TestHardwarePreviewProvider(); TestResetOwnerLifetime(); TestResetSharedAdmission();
         __block BOOL drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
         CHECK(Pump(^BOOL { return drained; }), "deferred mirror callbacks drained before source teardown");
         [NSNotificationCenter.defaultCenter removeObserver:observer]; gStore = nil;

@@ -24,6 +24,7 @@
 #import "AppDataBackupManager.h"
 #import "ToolViewController.h"
 #import "NetworkManager.h"
+#import "common/PXDashboardResetAdmission.h"
 #import "IOSBuildDB.h"
 #import "IPhoneModelDB.h"
 #import "PXPaths.h"
@@ -7899,13 +7900,17 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 }
 
 - (NSObject *)beginDashboardResetInPhase:(NSString *)phase {
-    // Main-thread admission for this controller. Keep ownership through the
-    // scheduled restart; ProfileManager's create gate starts too late for clear.
+    // Keep local state and process admission through the scheduled restart.
+    // ProfileManager's create gate starts too late to serialize backup/clear.
     if (!NSThread.isMainThread || self.dashboardResetToken || !phase.length) return nil;
     NSError *error = nil;
     NSDictionary *inputs = [self captureDashboardResetInputsForBackup:[phase isEqual:@"backup"] error:&error];
     if (!inputs) { [self showError:error]; return nil; }
-    NSObject *token = [NSObject new];
+    NSObject *token = PXBeginDashboardResetAdmission(self);
+    if (!token) {
+        [self showDashboardMessage:@"Reset đang chạy" message:@"Hãy chờ Reset Data hiện tại hoàn tất trước khi bắt đầu lần khác."];
+        return nil;
+    }
     self.dashboardResetInputs = inputs;
     self.dashboardResetToken = token;
     self.dashboardResetPhase = phase;
@@ -7914,13 +7919,16 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 
 - (BOOL)advanceDashboardReset:(NSObject *)token fromPhase:(NSString *)phase toPhase:(NSString *)nextPhase {
     if (!NSThread.isMainThread || !token || self.dashboardResetToken != token ||
-        ![self.dashboardResetPhase isEqual:phase] || !nextPhase.length) return NO;
+        ![self.dashboardResetPhase isEqual:phase] || !nextPhase.length || !PXDashboardResetAdmissionMatches(self, token)) return NO;
     self.dashboardResetPhase = nextPhase;
     return YES;
 }
 
 - (BOOL)finishDashboardReset:(NSObject *)token {
     if (!NSThread.isMainThread || !token || self.dashboardResetToken != token) return NO;
+    // A stale local owner may clear its own state, but cannot release another
+    // owner's admission. Release while the local property still owns the token.
+    PXFinishDashboardResetAdmission(self, token);
     self.dashboardResetPhase = nil;
     self.dashboardResetInputs = nil;
     self.dashboardResetToken = nil;
@@ -7928,7 +7936,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 }
 
 - (BOOL)isDashboardReset:(NSObject *)token inPhase:(NSString *)phase {
-    return NSThread.isMainThread && token && self.dashboardResetToken == token && [self.dashboardResetPhase isEqual:phase];
+    return NSThread.isMainThread && token && self.dashboardResetToken == token && [self.dashboardResetPhase isEqual:phase] && PXDashboardResetAdmissionMatches(self, token);
 }
 
 - (void)createNextProfileAndRandomizeWithWarnings:(NSArray<NSString *> *)warnings {

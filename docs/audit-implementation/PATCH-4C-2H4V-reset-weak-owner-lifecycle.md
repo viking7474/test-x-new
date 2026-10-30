@@ -2,6 +2,10 @@
 
 Ngày 2026-10-29. Người dùng xác nhận H4U build pass trước bước này.
 
+Follow-up: người dùng xác nhận H4V build pass ngày 2026-10-29. H4W thêm admission
+chung giữa các Reset controllers còn sống trong cùng process; xem
+[báo cáo H4W](PATCH-4C-2H4W-shared-reset-admission.md).
+
 ## Finding
 
 Confirmed extended ownership, severity Medium/P1, trong Reset callbacks tại
