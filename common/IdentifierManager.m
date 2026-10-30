@@ -63,10 +63,10 @@
 
 @interface IdentifierManager ()
 - (BOOL)saveSettingsWithError:(NSError **)error;
-- (BOOL)saveSettingsWithSourceCommitIdentifier:(NSString **)identifier error:(NSError **)error;
-- (void)rollbackIdentifier:(NSString *)type previous:(BOOL)previous secondaryKey:(NSString *)secondaryKey notificationName:(CFStringRef)notificationName operation:(id)operation sourceCommitIdentifier:(NSString *)identifier;
+- (BOOL)saveSettingsWithSourceCommitIdentifier:(NSString **)identifier forIdentifier:(NSString *)type beforeImage:(NSDictionary **)beforeImage error:(NSError **)error;
+- (void)rollbackIdentifier:(NSString *)type previous:(BOOL)previous beforeImage:(NSDictionary *)beforeImage secondaryKey:(NSString *)secondaryKey notificationName:(CFStringRef)notificationName operation:(id)operation sourceCommitIdentifier:(NSString *)identifier;
 - (BOOL)applyIdentifierEnabled:(BOOL)enabled forType:(NSString *)type error:(NSError **)error;
-- (BOOL)applyIdentifierEnabled:(BOOL)enabled forType:(NSString *)type operation:(id)operation primaryCommitted:(BOOL *)primaryCommitted sourceCommitIdentifier:(NSString **)sourceCommitIdentifier error:(NSError **)error;
+- (BOOL)applyIdentifierEnabled:(BOOL)enabled forType:(NSString *)type operation:(id)operation primaryCommitted:(BOOL *)primaryCommitted sourceCommitIdentifier:(NSString **)sourceCommitIdentifier beforeImage:(NSDictionary **)beforeImage error:(NSError **)error;
 - (id)beginIdentifierToggleForType:(NSString *)type;
 - (BOOL)validateIdentifierToggle:(id)operation forType:(NSString *)type error:(NSError **)error;
 - (void)finishIdentifierToggle:(id)operation forType:(NSString *)type;
@@ -127,6 +127,52 @@ static NSSet<NSString *> *PXCanonicalIdentifierToggleKeys(void) {
         ]];
     });
     return keys;
+}
+
+// Preserve source scalar representation and absence; manager memory is not an undo log.
+static NSDictionary *PXCaptureToggleBeforeImage(PXRuntimeSourceTransaction *tx, NSDictionary *settings, NSString *type, NSError **error) {
+    if (![type isKindOfClass:NSString.class] || !type.length) {
+        if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6037 userInfo:@{NSLocalizedDescriptionKey: @"Missing identifier for before-image capture"}];
+        return nil;
+    }
+    id rawFlags = settings[@"EnabledIdentifiers"];
+    if (rawFlags && ![rawFlags isKindOfClass:NSDictionary.class]) {
+        if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6037 userInfo:@{NSLocalizedDescriptionKey: @"Malformed toggle container before write"}];
+        return nil;
+    }
+    NSDictionary *flags = rawFlags ?: @{};
+    NSMutableDictionary *values = [@{ @"primary": flags[type] ?: NSNull.null } mutableCopy];
+    if ([type isEqual:@"StorageSystem"]) values[@"storage"] = settings[@"StorageSystemEnabled"] ?: NSNull.null;
+    NSString *secondaryKey = [type isEqual:@"WiFi"] ? @"wifiSpoofEnabled" :
+        ([type isEqual:@"Battery"] ? @"batterySpoofEnabled" : ([type isEqual:@"DeviceTheme"] ? @"deviceThemeSpoofEnabled" : nil));
+    BOOL filePresent = NO;
+    if (secondaryKey) {
+        NSDictionary *security = [tx dictionaryAtPath:PXSecuritySettingsPath() exists:&filePresent error:error];
+        if (!security) return nil;
+        values[@"secondary"] = security[secondaryKey] ?: NSNull.null;
+    }
+    NSMutableDictionary *image = [NSMutableDictionary dictionary];
+    for (NSString *name in values) {
+        id value = values[name]; BOOL present = value != NSNull.null;
+        if (present && ![value isKindOfClass:NSNumber.class] && ![value isKindOfClass:NSString.class]) {
+            if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6037 userInfo:@{NSLocalizedDescriptionKey: @"Malformed toggle scalar before write"}];
+            return nil;
+        }
+        image[name] = @{ @"present": @(present), @"value": present ? value : @NO };
+    }
+    if (secondaryKey) image[@"secondaryFilePresent"] = @(filePresent);
+    image[@"secondaryWritten"] = @NO;
+    return [image copy];
+}
+static BOOL PXRestoreToggleBeforeImage(NSMutableDictionary *target, NSString *key, NSDictionary *field, NSError **error) {
+    if (![field isKindOfClass:NSDictionary.class] || ![field[@"present"] isKindOfClass:NSNumber.class] ||
+        ([field[@"present"] boolValue] && ![field[@"value"] isKindOfClass:NSNumber.class] && ![field[@"value"] isKindOfClass:NSString.class])) {
+        if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6037 userInfo:@{NSLocalizedDescriptionKey: @"Missing or malformed toggle before-image"}];
+        return NO;
+    }
+    if ([field[@"present"] boolValue]) target[key] = field[@"value"];
+    else [target removeObjectForKey:key];
+    return YES;
 }
 
 static NSDictionary *PXSanitizedIdentifierSettings(NSDictionary *settings) {
@@ -1979,13 +2025,14 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     type = [type copy];
     id operation = [self beginIdentifierToggleForType:type];
     @try {
-        return [self applyIdentifierEnabled:enabled forType:type operation:operation primaryCommitted:NULL sourceCommitIdentifier:NULL error:error];
+        return [self applyIdentifierEnabled:enabled forType:type operation:operation primaryCommitted:NULL sourceCommitIdentifier:NULL beforeImage:NULL error:error];
     } @finally { [self finishIdentifierToggle:operation forType:type]; }
 }
 
-- (BOOL)applyIdentifierEnabled:(BOOL)enabled forType:(NSString *)type operation:(id)operation primaryCommitted:(BOOL *)primaryCommitted sourceCommitIdentifier:(NSString **)sourceCommitIdentifier error:(NSError **)error {
+- (BOOL)applyIdentifierEnabled:(BOOL)enabled forType:(NSString *)type operation:(id)operation primaryCommitted:(BOOL *)primaryCommitted sourceCommitIdentifier:(NSString **)sourceCommitIdentifier beforeImage:(NSDictionary **)beforeImage error:(NSError **)error {
     if (primaryCommitted) *primaryCommitted = NO;
     if (sourceCommitIdentifier) *sourceCommitIdentifier = nil;
+    if (beforeImage) *beforeImage = nil;
     if (error) *error = nil;
     if (![self validateIdentifierToggle:operation forType:type error:error]) return NO;
     // Set the enabled state in settings
@@ -2135,14 +2182,16 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     if (![self validateIdentifierToggle:operation forType:type error:error]) return NO;
     NSError *saveError = nil;
     NSString *primaryIdentifier = nil;
-    BOOL saved = sourceCommitIdentifier
-        ? [self saveSettingsWithSourceCommitIdentifier:&primaryIdentifier error:&saveError]
+    NSDictionary *capturedImage = nil;
+    BOOL saved = sourceCommitIdentifier || beforeImage
+        ? [self saveSettingsWithSourceCommitIdentifier:&primaryIdentifier forIdentifier:type beforeImage:&capturedImage error:&saveError]
         : [self saveSettingsWithError:&saveError];
     if (!saved) {
         if (error) *error = saveError;
         return NO;
     }
     if (sourceCommitIdentifier) *sourceCommitIdentifier = primaryIdentifier;
+    if (beforeImage) *beforeImage = capturedImage;
     // Separate the committed primary from later verification/secondary failure.
     // An unacknowledged primary write belongs to source-store recovery, not a blind compensating save.
     if (primaryCommitted) *primaryCommitted = YES;
@@ -2182,6 +2231,10 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
             ? PXWriteSecurityBoolWithRollbackAuthority(secondaryKey, enabled, primaryIdentifier, &secondaryIdentifier, &secondaryError)
             : PXWriteSecurityBool(secondaryKey, enabled, &secondaryError);
         if (secondaryCommitted && sourceCommitIdentifier) *sourceCommitIdentifier = secondaryIdentifier;
+        if (secondaryCommitted && beforeImage) {
+            NSMutableDictionary *updatedImage = [capturedImage mutableCopy]; updatedImage[@"secondaryWritten"] = @YES;
+            *beforeImage = [updatedImage copy];
+        }
         if (![self validateIdentifierToggle:operation forType:type error:error]) return NO;
         if (secondaryCommitted) {
             CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
@@ -2205,7 +2258,9 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     type = [type copy];
     id operation = [self beginIdentifierToggleForType:type];
     @try {
-        BOOL previous = [self.settings[type] boolValue];
+        id previousValue = self.settings[type];
+        if ([previousValue isKindOfClass:NSNumber.class] || [previousValue isKindOfClass:NSString.class]) previousValue = [previousValue copy];
+        BOOL previous = ([previousValue isKindOfClass:NSNumber.class] || [previousValue isKindOfClass:NSString.class]) ? [previousValue boolValue] : NO;
         NSString *secondaryKey = nil;
         CFStringRef notificationName = NULL;
         if ([type isEqualToString:@"WiFi"]) {
@@ -2222,7 +2277,8 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
         NSError *writeError = nil;
         BOOL primaryCommitted = NO;
         NSString *sourceIdentifier = nil;
-        BOOL writeSuccess = [self applyIdentifierEnabled:enabled forType:type operation:operation primaryCommitted:&primaryCommitted sourceCommitIdentifier:&sourceIdentifier error:&writeError];
+        NSDictionary *beforeImage = nil;
+        BOOL writeSuccess = [self applyIdentifierEnabled:enabled forType:type operation:operation primaryCommitted:&primaryCommitted sourceCommitIdentifier:&sourceIdentifier beforeImage:&beforeImage error:&writeError];
 
         // A newer call owns both the state and any subsequent recovery. In
         // particular, matching ABA values do not give the older call ownership back.
@@ -2248,46 +2304,54 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
         // An unacknowledged primary belongs to source-store recovery. For a
         // committed primary, compensate only while our exact source version owns it.
         if (primaryCommitted) {
-            [self rollbackIdentifier:type previous:previous secondaryKey:secondaryKey notificationName:notificationName
+            [self rollbackIdentifier:type previous:previous beforeImage:beforeImage secondaryKey:secondaryKey notificationName:notificationName
                            operation:operation sourceCommitIdentifier:sourceIdentifier];
         } else {
-            self.settings[type] = @(previous);
+            if (previousValue) self.settings[type] = previousValue;
+            else [self.settings removeObjectForKey:type];
         }
 
         // Rollback success must not erase the failed forward operation's result.
         if ([self validateIdentifierToggle:operation forType:type error:NULL]) self.error = failure;
-        PXLog(@"[WeaponX] Failed to persist identifier state %@=%@ (primary=%d secondary=%d committed=%d); rollback target %@",
-              type, enabled ? @"YES" : @"NO", primarySuccess, secondarySuccess, primaryCommitted, previous ? @"YES" : @"NO");
+        PXLog(@"[WeaponX] Failed to persist identifier state %@=%@ (primary=%d secondary=%d committed=%d); conditional compensation attempted",
+              type, enabled ? @"YES" : @"NO", primarySuccess, secondarySuccess, primaryCommitted);
         return NO;
     } @finally { [self finishIdentifierToggle:operation forType:type]; }
 }
 
-- (void)rollbackIdentifier:(NSString *)type previous:(BOOL)previous secondaryKey:(NSString *)secondaryKey notificationName:(CFStringRef)notificationName operation:(id)operation sourceCommitIdentifier:(NSString *)identifier {
+- (void)rollbackIdentifier:(NSString *)type previous:(BOOL)previous beforeImage:(NSDictionary *)beforeImage secondaryKey:(NSString *)secondaryKey notificationName:(CFStringRef)notificationName operation:(id)operation sourceCommitIdentifier:(NSString *)identifier {
     if (![self validateIdentifierToggle:operation forType:type error:NULL]) return;
     __block NSNumber *observed = nil;
+    __block BOOL observedMissing = NO;
     __block NSString *rollbackIdentifier = nil;
     NSError *failure = nil;
     BOOL restored = PXPerformStandaloneRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
         NSDictionary *settings = [tx dictionaryAtPath:PXTLinkIOSSettingsPath() error:error];
         if (!settings) return NO;
-        NSDictionary *flags = [settings[@"EnabledIdentifiers"] isKindOfClass:NSDictionary.class] ? settings[@"EnabledIdentifiers"] : nil;
-        id state = flags[type];
+        id rawFlags = settings[@"EnabledIdentifiers"];
+        NSDictionary *flags = rawFlags ? ([rawFlags isKindOfClass:NSDictionary.class] ? rawFlags : nil) : @{};
+        id state = flags[type]; observedMissing = flags && state == nil;
         if ([state isKindOfClass:NSNumber.class] || [state isKindOfClass:NSString.class]) observed = @([state boolValue]);
         if (!identifier || ![tx requireBaseCommitIdentifier:identifier error:error]) return NO;
-        if (!flags || !observed) {
+        if (!flags || (!observed && !observedMissing)) {
             if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6036
                                               userInfo:@{NSLocalizedDescriptionKey: @"Malformed identifier state during conditional rollback"}];
             return NO;
         }
         NSMutableDictionary *updated = [settings mutableCopy], *updatedFlags = [flags mutableCopy];
-        updatedFlags[type] = @(previous); updated[@"EnabledIdentifiers"] = updatedFlags;
-        if ([type isEqual:@"StorageSystem"]) updated[@"StorageSystemEnabled"] = @(previous);
+        if (!PXRestoreToggleBeforeImage(updatedFlags, type, beforeImage[@"primary"], error)) return NO;
+        updated[@"EnabledIdentifiers"] = updatedFlags;
+        if ([type isEqual:@"StorageSystem"] && !PXRestoreToggleBeforeImage(updated, @"StorageSystemEnabled", beforeImage[@"storage"], error)) return NO;
         if (![tx setDictionary:updated atPath:PXTLinkIOSSettingsPath() error:error]) return NO;
         if (secondaryKey) {
             NSDictionary *security = [tx dictionaryAtPath:PXSecuritySettingsPath() error:error];
             if (!security) return NO;
-            NSMutableDictionary *updatedSecurity = [security mutableCopy]; updatedSecurity[secondaryKey] = @(previous);
-            if (![tx setDictionary:updatedSecurity atPath:PXSecuritySettingsPath() error:error]) return NO;
+            NSMutableDictionary *updatedSecurity = [security mutableCopy];
+            if (!PXRestoreToggleBeforeImage(updatedSecurity, secondaryKey, beforeImage[@"secondary"], error) ||
+                ![beforeImage[@"secondaryFilePresent"] isKindOfClass:NSNumber.class]) return NO;
+            if (![beforeImage[@"secondaryFilePresent"] boolValue] && !updatedSecurity.count) {
+                if (![tx removeDictionaryAtPath:PXSecuritySettingsPath() error:error]) return NO;
+            } else if (![tx setDictionary:updatedSecurity atPath:PXSecuritySettingsPath() error:error]) return NO;
         }
         rollbackIdentifier = [tx prospectiveCommitIdentifierWithError:error];
         return rollbackIdentifier != nil;
@@ -2296,15 +2360,20 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     if (!restored) {
         // A cooperative successor's state is authoritative; never replace its
         // source tuple with this manager's stale settings/scope snapshot.
-        self.settings[type] = observed ?: @(previous);
+        if (observedMissing) [self.settings removeObjectForKey:type];
+        else self.settings[type] = observed ?: @(previous);
         PXLog(@"[WeaponX] Conditional identifier rollback skipped/failed for %@: %@", type, failure);
         return;
     }
-    self.settings[type] = @(previous);
+    NSDictionary *primary = beforeImage[@"primary"];
+    if ([primary[@"present"] boolValue]) self.settings[type] = @([primary[@"value"] boolValue]);
+    else [self.settings removeObjectForKey:type];
     [self.spoofCache removeAllObjects]; [_appEnabledCache removeAllObjects];
     PXPostSettingsChangedNotification();
     if (secondaryKey && notificationName && [self validateIdentifierToggle:operation forType:type error:NULL] &&
-        PXPublishSecurityBoolForSourceCommit(secondaryKey, previous, rollbackIdentifier) &&
+        PXPublishSecurityValueForSourceCommit(secondaryKey,
+            [beforeImage[@"secondary"][@"present"] boolValue] ? beforeImage[@"secondary"][@"value"] : nil,
+            [beforeImage[@"secondary"][@"present"] boolValue] || [beforeImage[@"secondaryWritten"] boolValue], rollbackIdentifier) &&
         [self validateIdentifierToggle:operation forType:type error:NULL]) {
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), notificationName, NULL, NULL, YES);
     }
@@ -3337,11 +3406,14 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
 }
 
 - (BOOL)saveSettingsWithError:(NSError **)error {
-    return [self saveSettingsWithSourceCommitIdentifier:NULL error:error];
+    return [self saveSettingsWithSourceCommitIdentifier:NULL forIdentifier:nil beforeImage:NULL error:error];
 }
 
-- (BOOL)saveSettingsWithSourceCommitIdentifier:(NSString **)identifier error:(NSError **)error {
+- (BOOL)saveSettingsWithSourceCommitIdentifier:(NSString **)identifier forIdentifier:(NSString *)type beforeImage:(NSDictionary **)beforeImage error:(NSError **)error {
     if (identifier) *identifier = nil;
+    if (beforeImage) *beforeImage = nil;
+    BOOL wantsBeforeImage = beforeImage != NULL;
+    __block NSDictionary *capturedImage = nil;
     __block NSString *candidate = nil;
     BOOL wantsReceipt = identifier != NULL;
     if (error) *error = nil;
@@ -3385,6 +3457,10 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
     BOOL success = PXPerformStandaloneRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *transaction, NSError **writeError) {
         NSDictionary *existing = [transaction dictionaryAtPath:prefsFile error:writeError];
         if (!existing) return NO;
+        if (wantsBeforeImage) {
+            capturedImage = PXCaptureToggleBeforeImage(transaction, existing, type, writeError);
+            if (!capturedImage) return NO;
+        }
         NSMutableDictionary *saveDict = [existing mutableCopy];
         saveDict[@"EnabledIdentifiers"] = PXSanitizedIdentifierSettings(self.settings);
         // Keep the legacy top-level storage flag synchronized in the same
@@ -3411,6 +3487,7 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
     }
 
     if (identifier) *identifier = candidate;
+    if (beforeImage) *beforeImage = capturedImage;
     [self.spoofCache removeAllObjects];
     [_appEnabledCache removeAllObjects];
     PXPostSettingsChangedNotification();

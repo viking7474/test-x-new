@@ -51,6 +51,7 @@ static BOOL Seed(NSDictionary *settings) {
 @property (nonatomic, copy) NSString *suite;
 - (instancetype)initWithSuiteName:(NSString *)suite;
 - (void)setObject:(id)value forKey:(NSString *)key;
+- (void)removeObjectForKey:(NSString *)key;
 - (id)objectForKey:(NSString *)key;
 - (BOOL)synchronize;
 @end
@@ -71,6 +72,14 @@ static BOOL Seed(NSDictionary *settings) {
         if (!suite) { suite = [NSMutableDictionary dictionary]; gSuites[self.suite] = suite; }
         suite[key] = value;
     }
+}
+- (void)removeObjectForKey:(NSString *)key {
+    void (^callback)(void) = nil; BOOL throws = NO;
+    @synchronized (gMirrorGuard) { gMirrors++; callback = gDuringMirror; gDuringMirror = nil; throws = [self.suite isEqual:gThrowMirrorSuite]; }
+    if (throws) [NSException raise:@"fixture.mirror" format:@"injected removal mirror failure"];
+    if (gCheckMirror) CHECK(Capture() != nil && !Load()[key], "security removal mirror observes committed absence outside source gate");
+    if (callback) callback();
+    @synchronized (gMirrorGuard) { [gSuites[self.suite] removeObjectForKey:key]; }
 }
 - (id)objectForKey:(NSString *)key { @synchronized (gMirrorGuard) { return gSuites[self.suite][key]; } }
 - (BOOL)synchronize { return YES; }
@@ -908,6 +917,29 @@ static void TestPostCommitSecurityAcknowledgement(void) {
     }
 }
 
+static void TestRawSecurityPublication(void) {
+    CHECK(Seed(@{}), "raw publication absent key seeded");
+    NSArray *suites = PXSecuritySuiteNames();
+    @synchronized (gMirrorGuard) {
+        for (NSString *suite in suites) gSuites[suite] = [@{ @"wifiSpoofEnabled": @"legacy" } mutableCopy];
+    }
+    NSString *identifier = Capture()[@"sourceCommitID"]; NSDictionary *before = Capture(); NSUInteger mirrors = gMirrors;
+    CHECK(PXPublishSecurityValueForSourceCommit(@"wifiSpoofEnabled", nil, NO, identifier) && mirrors == gMirrors && [before isEqual:Capture()],
+          "absence without forward mirror preserves legacy fallback and source tuple");
+    for (NSString *suite in suites) CHECK([gSuites[suite][@"wifiSpoofEnabled"] isEqual:@"legacy"], "untouched fallback mirror retains original scalar");
+    CHECK(PXPublishSecurityValueForSourceCommit(@"wifiSpoofEnabled", nil, YES, identifier) && mirrors + suites.count == gMirrors && [before isEqual:Capture()],
+          "committed absence removes all compatibility mirrors without source writes");
+    for (NSString *suite in suites) CHECK(!gSuites[suite][@"wifiSpoofEnabled"], "removed mirror key stays absent");
+    CHECK(Seed(@{ @"wifiSpoofEnabled": @"YES" }), "raw scalar publication seeded"); identifier = Capture()[@"sourceCommitID"];
+    CHECK(PXPublishSecurityValueForSourceCommit(@"wifiSpoofEnabled", @"YES", YES, identifier), "raw scalar publication succeeds");
+    for (NSString *suite in suites) CHECK([gSuites[suite][@"wifiSpoofEnabled"] isEqual:@"YES"], "raw scalar publication preserves string representation");
+    CHECK(Seed(@{}), "removal publication successor baseline seeded"); identifier = Capture()[@"sourceCommitID"];
+    BOOL checking = gCheckMirror; gCheckMirror = NO;
+    gDuringMirror = ^{ CHECK(Seed(@{ @"wifiSpoofEnabled": @YES }), "removal mirror callback commits newer source"); };
+    CHECK(!PXPublishSecurityValueForSourceCommit(@"wifiSpoofEnabled", nil, YES, identifier), "removal publisher rechecks marker after mirror reentry");
+    gCheckMirror = checking;
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
@@ -917,7 +949,7 @@ int main(void) {
         gStore = [[PXRuntimeSourceStore alloc] initWithDirectory:[gRoot stringByAppendingPathComponent:@"control"] owner:geteuid() group:getegid()
             allowsPath:^BOOL(NSString *path) { return [path isEqual:gPath] || [path isEqual:gIndicatorPath]; } error:NULL];
         CHECK(gStore != nil, "security source backend initialized");
-        TestSecurityPackets(); TestNonceAndCanvas(); TestIPMonitorWriters(); TestRegionAndTimeZoneWriters(); TestClearMetricWriters(); TestIndicatorPositionWriters(); TestSecurityScalarReaderTypes(); TestDisplayPolicyWriters(); TestConditionalSecurityWrites(); TestPostCommitSecurityAcknowledgement();
+        TestSecurityPackets(); TestNonceAndCanvas(); TestIPMonitorWriters(); TestRegionAndTimeZoneWriters(); TestClearMetricWriters(); TestIndicatorPositionWriters(); TestSecurityScalarReaderTypes(); TestDisplayPolicyWriters(); TestConditionalSecurityWrites(); TestPostCommitSecurityAcknowledgement(); TestRawSecurityPublication();
         gStore = nil; [NSFileManager.defaultManager removeItemAtPath:gRoot error:NULL];
         printf("Runtime security writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);
         return gFailures ? 1 : 0;

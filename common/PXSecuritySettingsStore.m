@@ -236,14 +236,28 @@ BOOL PXWriteSecurityBoolWithRollbackAuthority(NSString *key, BOOL value, NSStrin
     return YES;
 }
 BOOL PXPublishSecurityBoolForSourceCommit(NSString *key, BOOL value, NSString *identifier) {
+    return PXPublishSecurityValueForSourceCommit(key, @(value), YES, identifier);
+}
+BOOL PXPublishSecurityValueForSourceCommit(NSString *key, id value, BOOL updateMirrors, NSString *identifier) {
     if (![key isKindOfClass:NSString.class] || !key.length ||
-        ![identifier isKindOfClass:NSString.class] || !identifier.length) return NO;
-    key = [key copy]; identifier = [identifier copy];
+        ![identifier isKindOfClass:NSString.class] || !identifier.length ||
+        (value && ![value isKindOfClass:NSNumber.class] && ![value isKindOfClass:NSString.class])) return NO;
+    key = [key copy]; identifier = [identifier copy]; value = [value copy];
     BOOL (^current)(PXRuntimeSourceTransaction *, NSError **) = ^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
         return [tx requireBaseCommitIdentifier:identifier error:error];
     };
     if (!PXPerformStandaloneRuntimeSourceWrite(current, NULL)) return NO;
-    PXMirrorSecurityUpdates(@{key: @(value)}, PXSecuritySuiteNames());
+    if (updateMirrors) {
+        if (value) PXMirrorSecurityUpdates(@{key: value}, PXSecuritySuiteNames());
+        else for (NSString *suite in PXSecuritySuiteNames()) {
+            @try {
+                NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+                [defaults removeObjectForKey:key]; [defaults synchronize];
+            } @catch (NSException *exception) {
+                NSLog(@"[SecuritySettings] Source restored; removal mirror failed for %@: %@", suite, exception);
+            }
+        }
+    }
     return PXPerformStandaloneRuntimeSourceWrite(current, NULL);
 }
 

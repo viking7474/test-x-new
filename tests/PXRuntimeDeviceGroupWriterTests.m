@@ -35,6 +35,8 @@ static NSUInteger gStandaloneSourceAttempts;
 static void (^gDuringToggleSecurityWrite)(void);
 static void (^gDuringToggleSecurityPublication)(void);
 static NSUInteger gToggleSecurityPublications;
+static BOOL gFailNextToggleSecurityRead, gLastToggleUpdateMirrors;
+static id gLastTogglePublicationValue;
 static void (^gDuringToggleSecondaryNotification)(void);
 static BOOL gFailSerial, gThrowBatteryPublication;
 static void (^gDuringPrepare)(void);
@@ -89,6 +91,7 @@ void PXPostSettingsChangedNotification(void) {
 // Controlled security collaborator: real source commit, no defaults daemon or
 // Darwin delivery in this host fixture. Faults can leave an already matching value.
 id PXReadSecuritySetting(NSString *key) {
+    if (gFailNextToggleSecurityRead) { gFailNextToggleSecurityRead = NO; return nil; }
     return [NSDictionary dictionaryWithContentsOfFile:PXSecuritySettingsPath()][key];
 }
 BOOL PXWriteSecurityBool(NSString *key, BOOL value, NSError **error) {
@@ -138,12 +141,18 @@ BOOL PXWriteSecurityBoolWithRollbackAuthority(NSString *key, BOOL value, NSStrin
     return success;
 }
 BOOL PXPublishSecurityBoolForSourceCommit(NSString *key, BOOL value, NSString *identifier) {
+    return PXPublishSecurityValueForSourceCommit(key, @(value), YES, identifier);
+}
+BOOL PXPublishSecurityValueForSourceCommit(NSString *key, id value, BOOL updateMirrors, NSString *identifier) {
     BOOL (^current)(PXRuntimeSourceTransaction *, NSError **) = ^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
         return [tx requireBaseCommitIdentifier:identifier error:error];
     };
     if (![gStore performStandaloneWrite:current error:NULL]) return NO;
     gToggleSecurityPublications++;
-    CHECK([PXReadSecuritySetting(key) boolValue] == value, "conditional rollback mirror sees atomically restored security state");
+    gLastTogglePublicationValue = value; gLastToggleUpdateMirrors = updateMirrors;
+    id stored = PXReadSecuritySetting(key);
+    CHECK(value ? [stored isEqual:value] : stored == nil, "conditional rollback mirror sees exact restored security value or absence");
+    (void)updateMirrors; // Source/mirror semantics are exercised by the real security fixture.
     void (^callback)(void) = gDuringToggleSecurityPublication; gDuringToggleSecurityPublication = nil;
     if (callback) callback();
     return [gStore performStandaloneWrite:current error:NULL];
@@ -2271,12 +2280,12 @@ static void TestToggleFailedPrimaryOwnership(void) {
     id operation = [manager beginIdentifierToggleForType:@"WiFi"];
     BOOL primaryCommitted = NO; NSError *failure = nil;
     gToggleSecurityFailures = 1;
-    BOOL success = [manager applyIdentifierEnabled:YES forType:@"WiFi" operation:operation primaryCommitted:&primaryCommitted sourceCommitIdentifier:NULL error:&failure];
+    BOOL success = [manager applyIdentifierEnabled:YES forType:@"WiFi" operation:operation primaryCommitted:&primaryCommitted sourceCommitIdentifier:NULL beforeImage:NULL error:&failure];
     [manager finishIdentifierToggle:operation forType:@"WiFi"];
     CHECK(!success && primaryCommitted && failure.code == 71 && [manager.settings[@"WiFi"] boolValue],
           "primary acknowledgement survives a later secondary failure independently of whole apply result");
     primaryCommitted = YES; failure = nil; NSDictionary *before = BatchSnapshot();
-    CHECK(![manager applyIdentifierEnabled:NO forType:@"WiFi" operation:[NSObject new] primaryCommitted:&primaryCommitted sourceCommitIdentifier:NULL error:&failure] &&
+    CHECK(![manager applyIdentifierEnabled:NO forType:@"WiFi" operation:[NSObject new] primaryCommitted:&primaryCommitted sourceCommitIdentifier:NULL beforeImage:NULL error:&failure] &&
           !primaryCommitted && failure.code == 6035 && [before isEqual:BatchSnapshot()],
           "primary acknowledgement resets before rejected owner admission");
 }
@@ -2356,11 +2365,11 @@ static void TestConditionalToggleRollback(void) {
 
     manager = ToggleReentryFixture(); manager.settings[@"StorageSystem"] = @NO; [manager saveSettings];
     id operation = [manager beginIdentifierToggleForType:@"StorageSystem"];
-    NSString *identifier = nil; BOOL committed = NO; NSError *failure = nil;
-    CHECK([manager applyIdentifierEnabled:YES forType:@"StorageSystem" operation:operation primaryCommitted:&committed sourceCommitIdentifier:&identifier error:&failure] && committed && identifier,
+    NSString *identifier = nil; BOOL committed = NO; NSError *failure = nil; NSDictionary *beforeImage = nil;
+    CHECK([manager applyIdentifierEnabled:YES forType:@"StorageSystem" operation:operation primaryCommitted:&committed sourceCommitIdentifier:&identifier beforeImage:&beforeImage error:&failure] && committed && identifier,
           "storage conditional rollback owns exact primary receipt");
     NSData *scope = [NSData dataWithContentsOfFile:PXGlobalScopePath()];
-    [manager rollbackIdentifier:@"StorageSystem" previous:NO secondaryKey:nil notificationName:NULL operation:operation sourceCommitIdentifier:identifier];
+    [manager rollbackIdentifier:@"StorageSystem" previous:NO beforeImage:beforeImage secondaryKey:nil notificationName:NULL operation:operation sourceCommitIdentifier:identifier];
     [manager finishIdentifierToggle:operation forType:@"StorageSystem"];
     NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:PXTLinkIOSSettingsPath()];
     CHECK(![settings[@"EnabledIdentifiers"][@"StorageSystem"] boolValue] && ![settings[@"StorageSystemEnabled"] boolValue] &&
@@ -2401,6 +2410,133 @@ static void TestTogglePostCommitAcknowledgement(void) {
     }
 }
 
+static void TestToggleAuthoritativeBeforeImages(void) {
+    NSArray *cases = @[
+        @{ @"primary": @YES, @"secondary": @NO, @"memory": @NO, @"request": @YES },
+        @{ @"primary": @NO, @"secondary": @YES, @"memory": @YES, @"request": @NO },
+        @{ @"primary": @"YES", @"secondary": @"0", @"memory": @NO, @"request": @YES },
+        @{ @"memory": @YES, @"request": @YES }
+    ];
+    for (NSDictionary *test in cases) {
+        PXDeviceGroupFixture *manager = ToggleReentryFixture();
+        CHECK([gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+            NSMutableDictionary *settings = [[tx dictionaryAtPath:PXTLinkIOSSettingsPath() error:error] mutableCopy];
+            NSMutableDictionary *flags = [settings[@"EnabledIdentifiers"] mutableCopy];
+            if (test[@"primary"]) flags[@"WiFi"] = test[@"primary"]; else [flags removeObjectForKey:@"WiFi"];
+            settings[@"EnabledIdentifiers"] = flags;
+            if (![tx setDictionary:settings atPath:PXTLinkIOSSettingsPath() error:error]) return NO;
+            NSMutableDictionary *security = [[tx dictionaryAtPath:PXSecuritySettingsPath() error:error] mutableCopy];
+            if (test[@"secondary"]) security[@"wifiSpoofEnabled"] = test[@"secondary"]; else [security removeObjectForKey:@"wifiSpoofEnabled"];
+            return [tx setDictionary:security atPath:PXSecuritySettingsPath() error:error];
+        } error:NULL], "authoritative toggle before-image fixture seeded");
+        manager.settings[@"WiFi"] = test[@"memory"];
+        gToggleSecurityFailures = 1; NSUInteger publications = gToggleSecurityPublications;
+        __block NSData *scope = nil;
+        gDuringToggleSecurityWrite = ^{ scope = [NSData dataWithContentsOfFile:PXGlobalScopePath()]; };
+        BOOL success = [manager setIdentifierEnabledAndPersist:[test[@"request"] boolValue] forType:@"WiFi"];
+        NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:PXTLinkIOSSettingsPath()];
+        id primary = settings[@"EnabledIdentifiers"][@"WiFi"], secondary = PXReadSecuritySetting(@"wifiSpoofEnabled");
+        CHECK(!success && manager.error.code == 71 && (test[@"primary"] ? [primary isEqual:test[@"primary"]] : primary == nil) &&
+              (test[@"secondary"] ? [secondary isEqual:test[@"secondary"]] : secondary == nil) &&
+              (test[@"primary"] ? [manager.settings[@"WiFi"] boolValue] == [test[@"primary"] boolValue] : manager.settings[@"WiFi"] == nil) &&
+              [scope isEqual:[NSData dataWithContentsOfFile:PXGlobalScopePath()]] && publications + 1 == gToggleSecurityPublications &&
+              gLastToggleUpdateMirrors == (test[@"secondary"] != nil) &&
+              (test[@"secondary"] ? [gLastTogglePublicationValue isEqual:test[@"secondary"]] : gLastTogglePublicationValue == nil),
+              "compensation restores source scalar types and absence independently of stale memory or divergent secondary");
+    }
+    // A transient verification read failure after successful secondary commit
+    // exercises restoration/removal of the forward mirror and newly created file.
+    PXDeviceGroupFixture *manager = nil;
+    for (NSUInteger filePresent = 0; filePresent < 2; filePresent++) {
+        manager = ToggleReentryFixture();
+        CHECK([gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+            return filePresent ? [tx setDictionary:@{} atPath:PXSecuritySettingsPath() error:error] :
+                                 [tx removeDictionaryAtPath:PXSecuritySettingsPath() error:error];
+        } error:NULL], "before-image security namespace presence fixture seeded");
+        gDuringToggleSecurityWrite = ^{ gFailNextToggleSecurityRead = YES; };
+        NSUInteger publications = gToggleSecurityPublications;
+        CHECK(![manager setIdentifierEnabledAndPersist:YES forType:@"WiFi"] && manager.error.code == 6033 &&
+              [NSFileManager.defaultManager fileExistsAtPath:PXSecuritySettingsPath()] == (filePresent != 0) &&
+              !PXReadSecuritySetting(@"wifiSpoofEnabled") && publications + 1 == gToggleSecurityPublications &&
+              gLastToggleUpdateMirrors && !gLastTogglePublicationValue && ![manager.settings[@"WiFi"] boolValue],
+              "successful secondary followed by failed readback restores source file presence and removes introduced key and mirror");
+    }
+
+    NSArray *values = @[NSNull.null, @"YES", @NO];
+    for (id primary in values) for (id alias in values) {
+        manager = ToggleReentryFixture(); manager.settings[@"StorageSystem"] = @YES;
+        CHECK([gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+            NSMutableDictionary *settings = [[tx dictionaryAtPath:PXTLinkIOSSettingsPath() error:error] mutableCopy];
+            NSMutableDictionary *flags = [settings[@"EnabledIdentifiers"] mutableCopy];
+            if (primary != NSNull.null) flags[@"StorageSystem"] = primary; else [flags removeObjectForKey:@"StorageSystem"];
+            settings[@"EnabledIdentifiers"] = flags;
+            if (alias != NSNull.null) settings[@"StorageSystemEnabled"] = alias; else [settings removeObjectForKey:@"StorageSystemEnabled"];
+            return [tx setDictionary:settings atPath:PXTLinkIOSSettingsPath() error:error];
+        } error:NULL], "independent storage before-image fixture seeded");
+        id operation = [manager beginIdentifierToggleForType:@"StorageSystem"];
+        NSString *identifier = nil; NSDictionary *image = nil; BOOL committed = NO; NSError *failure = nil;
+        CHECK([manager applyIdentifierEnabled:NO forType:@"StorageSystem" operation:operation primaryCommitted:&committed sourceCommitIdentifier:&identifier beforeImage:&image error:&failure] && committed,
+              "storage before-image owner commits candidate");
+        [manager rollbackIdentifier:@"StorageSystem" previous:YES beforeImage:image secondaryKey:nil notificationName:NULL operation:operation sourceCommitIdentifier:identifier];
+        [manager finishIdentifierToggle:operation forType:@"StorageSystem"];
+        NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:PXTLinkIOSSettingsPath()];
+        id stored = settings[@"EnabledIdentifiers"][@"StorageSystem"], storedAlias = settings[@"StorageSystemEnabled"];
+        CHECK((primary == NSNull.null ? !stored : [stored isEqual:primary]) &&
+              (alias == NSNull.null ? !storedAlias : [storedAlias isEqual:alias]),
+              "storage compensation restores independent alias value type and presence without forcing equality");
+    }
+    for (NSUInteger bad = 0; bad < 3; bad++) {
+        manager = ToggleReentryFixture();
+        CHECK([gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+            if (bad == 2) return [tx setDictionary:@{ @"wifiSpoofEnabled": NSData.data } atPath:PXSecuritySettingsPath() error:error];
+            NSMutableDictionary *settings = [[tx dictionaryAtPath:PXTLinkIOSSettingsPath() error:error] mutableCopy];
+            if (bad == 0) settings[@"EnabledIdentifiers"] = @[@"invalid"];
+            else { NSMutableDictionary *flags = [settings[@"EnabledIdentifiers"] mutableCopy]; flags[@"WiFi"] = @{}; settings[@"EnabledIdentifiers"] = flags; }
+            return [tx setDictionary:settings atPath:PXTLinkIOSSettingsPath() error:error];
+        } error:NULL], "malformed before-image fixture seeded without corrupting plist root");
+        [manager seedPersistenceCaches]; NSDictionary *before = BatchSnapshot(), *cache = [manager persistenceCaches];
+        NSUInteger notices = gBatchNotifications, writes = gToggleSecurityWrites;
+        CHECK(![manager setIdentifierEnabledAndPersist:YES forType:@"WiFi"] && manager.error.code == 4006 &&
+              [before isEqual:BatchSnapshot()] && [cache isEqual:[manager persistenceCaches]] && notices == gBatchNotifications && writes == gToggleSecurityWrites,
+              "malformed canonical before-image rejects before primary staging or publication");
+    }
+    // Repair the intentionally malformed security scalar for following suites.
+    CHECK(PXWriteSecurityBool(@"wifiSpoofEnabled", NO, NULL), "before-image corruption fixture teardown repairs owned scalar");
+    for (id memory in @[NSNull.null, @"YES"]) {
+        manager = ToggleReentryFixture();
+        if (memory == NSNull.null) [manager.settings removeObjectForKey:@"WiFi"]; else manager.settings[@"WiFi"] = memory;
+        __block BOOL faulted = NO;
+        gStore.testCheckpoint = ^(NSString *stage) {
+            if (!faulted && [stage isEqual:@"source-written"]) { faulted = YES; [NSException raise:@"fixture.image" format:@"memory undo primary failed"]; }
+        };
+        BOOL success = [manager setIdentifierEnabledAndPersist:NO forType:@"WiFi"];
+        gStore.testCheckpoint = nil;
+        CHECK(!success && faulted && (memory == NSNull.null ? manager.settings[@"WiFi"] == nil : [manager.settings[@"WiFi"] isEqual:memory]),
+              "unacknowledged primary restores exact memory scalar or missing key without materializing false");
+    }
+    manager = ToggleReentryFixture(); gToggleMissingValue = @"IDFA";
+    gDuringToggleGeneration = ^{
+        CHECK([gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+            NSMutableDictionary *settings = [[tx dictionaryAtPath:PXTLinkIOSSettingsPath() error:error] mutableCopy];
+            NSMutableDictionary *flags = [settings[@"EnabledIdentifiers"] mutableCopy]; flags[@"IDFA"] = @"YES";
+            settings[@"EnabledIdentifiers"] = flags;
+            return [tx setDictionary:settings atPath:PXTLinkIOSSettingsPath() error:error];
+        } error:NULL], "provider commits fresh canonical flag before primary admission");
+    };
+    id operation = [manager beginIdentifierToggleForType:@"IDFA"];
+    NSString *identifier = nil; NSDictionary *image = nil; BOOL committed = NO; NSError *failure = nil;
+    CHECK([manager applyIdentifierEnabled:YES forType:@"IDFA" operation:operation primaryCommitted:&committed sourceCommitIdentifier:&identifier beforeImage:&image error:&failure] &&
+          committed && [image[@"primary"][@"value"] isEqual:@"YES"], "before-image captures source after providers at primary admission");
+    [manager seedPersistenceCaches]; NSDictionary *before = BatchSnapshot(), *cache = [manager persistenceCaches]; NSUInteger notices = gBatchNotifications;
+    [manager rollbackIdentifier:@"IDFA" previous:NO beforeImage:nil secondaryKey:nil notificationName:NULL operation:operation sourceCommitIdentifier:identifier];
+    CHECK([before isEqual:BatchSnapshot()] && [cache isEqual:[manager persistenceCaches]] && notices == gBatchNotifications,
+          "missing before-image fails closed without using stale memory fallback for source writes");
+    [manager rollbackIdentifier:@"IDFA" previous:NO beforeImage:image secondaryKey:nil notificationName:NULL operation:operation sourceCommitIdentifier:identifier];
+    [manager finishIdentifierToggle:operation forType:@"IDFA"];
+    CHECK([[NSDictionary dictionaryWithContentsOfFile:PXTLinkIOSSettingsPath()][@"EnabledIdentifiers"][@"IDFA"] isEqual:@"YES"],
+          "fresh provider before-image survives later compensation independently of caller previous memory");
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
@@ -2432,6 +2568,7 @@ int main(void) {
         TestToggleFailedPrimaryOwnership();
         TestConditionalToggleRollback();
         TestTogglePostCommitAcknowledgement();
+        TestToggleAuthoritativeBeforeImages();
         gStore = nil;
         [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
         printf("Runtime device group and telephony writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);

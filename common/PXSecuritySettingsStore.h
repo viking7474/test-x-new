@@ -34,6 +34,9 @@ FOUNDATION_EXPORT BOOL PXWriteSecurityBoolWithRollbackAuthority(NSString *key, B
 /// Mirror only while the cooperative source marker still matches; recheck after
 /// mirrors. No source mutation. Does not make mirrors/notifications atomic.
 FOUNDATION_EXPORT BOOL PXPublishSecurityBoolForSourceCommit(NSString *key, BOOL value, NSString *identifier);
+/// Restore a raw scalar (nil removes mirrors), or validate publication only when
+/// updateMirrors is NO so an untouched legacy fallback is preserved.
+FOUNDATION_EXPORT BOOL PXPublishSecurityValueForSourceCommit(NSString *key, id _Nullable value, BOOL updateMirrors, NSString *identifier);
 FOUNDATION_EXPORT BOOL PXWriteSecurityInteger(NSString *key, NSInteger value, NSError **error);
 
 NS_ASSUME_NONNULL_END

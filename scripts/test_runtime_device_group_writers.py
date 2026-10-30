@@ -65,12 +65,12 @@ SIGNATURES = [
     '- (void)setIdentifierEnabled:(BOOL)enabled forType:(NSString *)type',
     '- (BOOL)applyIdentifierEnabled:(BOOL)enabled forType:(NSString *)type error:(NSError **)error',
     '- (BOOL)setIdentifierEnabledAndPersist:(BOOL)enabled forType:(NSString *)type',
-    '- (BOOL)applyIdentifierEnabled:(BOOL)enabled forType:(NSString *)type operation:(id)operation primaryCommitted:(BOOL *)primaryCommitted sourceCommitIdentifier:(NSString **)sourceCommitIdentifier error:(NSError **)error',
+    '- (BOOL)applyIdentifierEnabled:(BOOL)enabled forType:(NSString *)type operation:(id)operation primaryCommitted:(BOOL *)primaryCommitted sourceCommitIdentifier:(NSString **)sourceCommitIdentifier beforeImage:(NSDictionary **)beforeImage error:(NSError **)error',
     '- (id)beginIdentifierToggleForType:(NSString *)type',
     '- (BOOL)validateIdentifierToggle:(id)operation forType:(NSString *)type error:(NSError **)error',
     '- (void)finishIdentifierToggle:(id)operation forType:(NSString *)type',
-    '- (BOOL)saveSettingsWithSourceCommitIdentifier:(NSString **)identifier error:(NSError **)error',
-    '- (void)rollbackIdentifier:(NSString *)type previous:(BOOL)previous secondaryKey:(NSString *)secondaryKey notificationName:(CFStringRef)notificationName operation:(id)operation sourceCommitIdentifier:(NSString *)identifier',
+    '- (BOOL)saveSettingsWithSourceCommitIdentifier:(NSString **)identifier forIdentifier:(NSString *)type beforeImage:(NSDictionary **)beforeImage error:(NSError **)error',
+    '- (void)rollbackIdentifier:(NSString *)type previous:(BOOL)previous beforeImage:(NSDictionary *)beforeImage secondaryKey:(NSString *)secondaryKey notificationName:(CFStringRef)notificationName operation:(id)operation sourceCommitIdentifier:(NSString *)identifier',
 ]
 STATICS = [
     'static NSString *PXWebCompatMaxIOSForDeviceMaxIOS(NSString *deviceMaxIOS)',
@@ -89,6 +89,8 @@ STATICS = [
     'static NSInteger PXMEIDLuhnCheckDigit(NSString *body)',
     'static NSSet<NSString *> *PXCanonicalIdentifierToggleKeys(void)',
     'static NSDictionary *PXSanitizedIdentifierSettings(NSDictionary *settings)',
+    'static NSDictionary *PXCaptureToggleBeforeImage(PXRuntimeSourceTransaction *tx, NSDictionary *settings, NSString *type, NSError **error)',
+    'static BOOL PXRestoreToggleBeforeImage(NSMutableDictionary *target, NSString *key, NSDictionary *field, NSError **error)',
 ]
 
 
