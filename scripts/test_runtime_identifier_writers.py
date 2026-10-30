@@ -34,6 +34,15 @@ FILES = dict(IDFA='advertising_id.plist', IDFV='vendor_id.plist', DeviceName='de
              UserDefaultsUUID='userdefaults_uuid.plist', AppGroupUUID='appgroup_uuid.plist',
              CoreDataUUID='coredata_uuid.plist', AppInstallUUID='appinstall_uuid.plist', AppContainerUUID='appcontainer_uuid.plist')
 
+READER_SIGNATURES = [
+    '- (BOOL)isIdentifierEnabled:(NSString *)type',
+    '- (NSString *)currentValueForIdentifier:(NSString *)type',
+    '- (NSInteger)attAuthorizationStatus',
+    '- (BOOL)isCanvasFingerprintProtectionEnabled',
+    '- (BOOL)setCustomDeviceName:(NSString *)value',
+    '- (BOOL)setCustomSerialNumber:(NSString *)value',
+]
+
 
 def method(source, signature):
     start = source.index(signature + ' {')
@@ -67,6 +76,33 @@ def source_contracts():
     helper = read('common/PXRuntimeIdentifierWriter.m')
     paths = read('common/PXRuntimeSources.m')
     fixture = read('tests/PXRuntimeIdentifierWriterTests.m')
+    readers = {signature: method(manager, signature) for signature in READER_SIGNATURES}
+    assert manager.index('static NSString *PXIdentifierDisplayString(id value) {') < manager.index(READER_SIGNATURES[1] + ' {'), 'C display helper must be defined before its production caller'
+    for signature in READER_SIGNATURES[:2]:
+        body = readers[signature]
+        assert body.index('isKindOfClass:NSString.class') < body.index('PX_IDENTIFIER_RUNTIME_READ_OPERATION;')
+    enabled = readers[READER_SIGNATURES[0]]
+    assert 'isKindOfClass:NSDictionary.class' in enabled
+    assert 'return [flag respondsToSelector:@selector(boolValue)] && [flag boolValue];' in enabled
+    display = readers[READER_SIGNATURES[1]]
+    assert 'PXRuntimeIdentifierSidecar(type)' in display and 'PXIdentifierDisplayString(record[@"value"])' in display
+    assert 'PXIdentifierDisplayString(batteryDict[type])' in display
+    assert '[uptimeValue isKindOfClass:NSNumber.class]' in display and '[uptimeValue isKindOfClass:NSString.class]' in display
+    assert 'PXIdentifierDisplayString(tracking[@"ATTAuthorizationStatus"])' in display
+    inference = method(manager, 'static BOOL PXRuntimeSnapshotImpliesIdentifierEnabled(NSString *type, PXRuntimeReadSnapshot *runtimeView)')
+    assert 'static NSDictionary<NSString *, NSArray<NSString *> *> *requiredKeys;' in inference
+    assert inference.count('dispatch_once(&once, ^{') == 1
+    att = readers[READER_SIGNATURES[2]]
+    for name in ('deviceIdsStatus', 'trackingDictStatus'):
+        assert att.index(f'[{name} isKindOfClass:NSNumber.class]') < att.index(f'[{name} integerValue]')
+    canvas = readers[READER_SIGNATURES[3]]
+    assert canvas.count('return PXRuntimeReadBool(') == 2
+    custom_input = method(manager, '- (BOOL)saveCustomValue:(NSString *)value forType:(NSString *)type')
+    assert custom_input.index('isKindOfClass:NSString.class') < custom_input.index('[self currentIdentifierMutation]')
+    theme = method(manager, '- (BOOL)setCustomDeviceTheme:(NSString *)value')
+    assert 'if (![value isKindOfClass:NSString.class] ||' in theme and 'code:2004' in theme
+    from test_profile_creation_flow import check_macro_arity
+    check_macro_arity(read('tests/PXIdentifierReaderTests.m'), 'PXIdentifierReaderTests.m')
     for name, _, generator, key, _ in GENERATORS:
         body = method(manager, '- (NSString *)' + name)
         assert f'[self generatePreparedIdentifierForType:@"{key}"]' in body
@@ -228,6 +264,21 @@ def generate_native_fragments(folder):
     providers.append('static NSArray *PXFixtureGeneratorCases(void) { return ' + objc_array(generator_cases) + '; }\n')
     providers.append('static NSArray *PXFixtureCustomCases(void) { return ' + objc_array(list(FILES.items())) + '; }\n')
     (folder / 'PXIdentifierFixtureProviders.inc').write_text('\n'.join(providers), encoding='utf-8')
+    reader_methods = [method(manager, signature) for signature in READER_SIGNATURES]
+    (folder / 'PXReaderDeclarations.inc').write_text('\n'.join(m.split(' {', 1)[0] + ';' for m in reader_methods), encoding='utf-8')
+    (folder / 'PXReaderMethods.inc').write_text('\n\n'.join(reader_methods), encoding='utf-8')
+    reader_statics = [method(manager, 'static NSString *PXIdentifierDisplayString(id value)'),
+                      method(manager, 'static BOOL PXRuntimeSnapshotImpliesIdentifierEnabled(NSString *type, PXRuntimeReadSnapshot *runtimeView)'),
+                      method(read('common/PXRuntimeIdentifierWriter.m'), 'static NSDictionary<NSString *, NSString *> *PXIdentifierSidecarMap(void)'),
+                      method(read('common/PXRuntimeIdentifierWriter.m'), 'NSString *PXRuntimeIdentifierSidecar(NSString *type)')]
+    (folder / 'PXReaderStatics.inc').write_text('\n\n'.join(reader_statics), encoding='utf-8')
+    reader_providers = []
+    for _, cls, _, _, setter in GENERATORS:
+        getter = setter[3:4].lower() + setter[4:]
+        reader_providers.append(f'@interface {cls} : PXReaderProvider\n- (NSString *){getter};\n@end\n'
+                                f'@implementation {cls}\n- (NSString *){getter} {{ gFallbacks++; return @"provider-fallback"; }}\n@end\n')
+    reader_providers.append('static NSArray *PXReaderSidecarCases(void) { return ' + objc_array(list(FILES.items())) + '; }\n')
+    (folder / 'PXReaderProviders.inc').write_text('\n'.join(reader_providers), encoding='utf-8')
 
 
 def native_tests():
@@ -251,6 +302,13 @@ def native_tests():
                            check=True, cwd=ROOT, timeout=60)
             for _ in range(3):
                 subprocess.run([str(binary)], check=True, cwd=ROOT, timeout=60)
+            reader_binary = folder / ('readers-' + scheme)
+            subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-fblocks', '-Wall', '-Wextra',
+                            '-Werror=implicit-function-declaration', '-I', str(ROOT / 'common'), '-I', str(folder),
+                            *defines, str(ROOT / 'common/PXRuntimeSnapshotReader.m'),
+                            str(ROOT / 'tests/PXIdentifierReaderTests.m'), '-framework', 'Foundation',
+                            '-framework', 'CoreFoundation', '-o', str(reader_binary)], check=True, cwd=ROOT, timeout=60)
+            subprocess.run([str(reader_binary)], check=True, cwd=ROOT, timeout=60)
 
 
 if __name__ == '__main__':

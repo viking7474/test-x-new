@@ -241,6 +241,18 @@ static void TestCustomAndMetadata(PXIdentifierFixture *manager, NSString *identi
     gStore.testCheckpoint = nil;
     CHECK(gCacheSets == setsBefore && [before isEqual:Snapshot(identity)], "failed custom commit cannot publish compatibility cache or counter");
     CHECK(![manager saveCustomValue:@"x" forType:@"Unknown"] && ![manager saveCustomValue:nil forType:@"IDFA"], "unsupported or nil custom payload rejected");
+    NSUInteger invalidSelections = gSelections, invalidProviders = gProviderCalls, invalidWrites = gWrites;
+    NSUInteger invalidSets = gCacheSets;
+    NSDictionary *invalidBefore = Snapshot(identity);
+    NSArray *invalidInputs = @[@1, @[], @{}, NSNull.null, NSDate.date];
+    for (id input in invalidInputs) {
+        CHECK(![manager saveCustomValue:input forType:@"DeviceName"] &&
+              ![manager saveCustomValue:@"name" forType:input], "wrong custom value or identifier type is rejected");
+        CHECK(![manager setCustomDeviceTheme:input] && manager.error.code == 2004, "wrong theme type preserves validation error contract");
+    }
+    CHECK(invalidSelections == gSelections && invalidProviders == gProviderCalls && invalidWrites == gWrites &&
+          invalidSets == gCacheSets && [invalidBefore isEqual:Snapshot(identity)],
+          "invalid custom input has no target migration provider source or compatibility cache effects");
     [manager setATTAuthorizationStatus:99];
     CHECK([IDs(identity)[@"ATTAuthorizationStatus"] isEqual:@3] && [Load(Path(identity, @"tracking_info.plist"))[@"ATTAuthorizationStatus"] isEqual:@3], "ATT clamping and sidecar schema preserved");
     [manager setATTAuthorizationStatus:-1];

@@ -319,17 +319,23 @@ static BOOL PXRuntimeSnapshotImpliesIdentifierEnabled(NSString *type, PXRuntimeR
     // DeviceModel and IOSVersion are generated as a coherent baseline even
     // when only one dashboard option is requested, so mere value presence is
     // not proof of enablement. Dashboard Reset Data persists those toggles.
-    NSDictionary<NSString *, NSArray<NSString *> *> *requiredKeys = @{
-        @"IDFA": @[@"IDFA"], @"IDFV": @[@"IDFV"], @"DeviceName": @[@"DeviceName"],
-        @"SerialNumber": @[@"SerialNumber"],
-        @"UDID": @[@"UDID"], @"IMEI": @[@"IMEI"], @"MEID": @[@"MEID"],
-        @"SystemBootUUID": @[@"SystemBootUUID"], @"DyldCacheUUID": @[@"DyldCacheUUID"],
-        @"PasteboardUUID": @[@"PasteboardUUID"], @"KeychainUUID": @[@"KeychainUUID"],
-        @"UserDefaultsUUID": @[@"UserDefaultsUUID"], @"AppGroupUUID": @[@"AppGroupUUID"],
-        @"CoreDataUUID": @[@"CoreDataUUID"], @"AppInstallUUID": @[@"AppInstallUUID"],
-        @"AppContainerUUID": @[@"AppContainerUUID"], @"SystemUptime": @[@"SystemUptime"],
-        @"BootTime": @[@"BootTime"]
-    };
+    // Constant inference schema: do not rebuild its dictionary/arrays on each
+    // missing-toggle read. This cache contains no profile or process state.
+    static NSDictionary<NSString *, NSArray<NSString *> *> *requiredKeys;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        requiredKeys = @{
+            @"IDFA": @[@"IDFA"], @"IDFV": @[@"IDFV"], @"DeviceName": @[@"DeviceName"],
+            @"SerialNumber": @[@"SerialNumber"],
+            @"UDID": @[@"UDID"], @"IMEI": @[@"IMEI"], @"MEID": @[@"MEID"],
+            @"SystemBootUUID": @[@"SystemBootUUID"], @"DyldCacheUUID": @[@"DyldCacheUUID"],
+            @"PasteboardUUID": @[@"PasteboardUUID"], @"KeychainUUID": @[@"KeychainUUID"],
+            @"UserDefaultsUUID": @[@"UserDefaultsUUID"], @"AppGroupUUID": @[@"AppGroupUUID"],
+            @"CoreDataUUID": @[@"CoreDataUUID"], @"AppInstallUUID": @[@"AppInstallUUID"],
+            @"AppContainerUUID": @[@"AppContainerUUID"], @"SystemUptime": @[@"SystemUptime"],
+            @"BootTime": @[@"BootTime"]
+        };
+    });
     NSArray<NSString *> *required = requiredKeys[type];
     if (!required.count) return NO;
     for (NSString *key in required) {
@@ -343,6 +349,14 @@ static BOOL PXRuntimeSnapshotImpliesIdentifierEnabled(NSString *type, PXRuntimeR
     (void)type;
     return NO;
 #endif
+}
+
+// Display readers accept the same scalar types as device_ids.plist. Never
+// return a plist container through an NSString API or send it numeric selectors.
+static NSString *PXIdentifierDisplayString(id value) {
+    if ([value isKindOfClass:NSString.class]) return value;
+    if ([value isKindOfClass:NSNumber.class]) return [value stringValue];
+    return nil;
 }
 
 static BOOL PXWebCompatIOSRangeEnabled(void) {
@@ -2600,8 +2614,8 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
 }
 
 - (BOOL)isIdentifierEnabled:(NSString *)type {
-    PX_IDENTIFIER_RUNTIME_READ_OPERATION;
     if (![type isKindOfClass:NSString.class] || !type.length) return NO;
+    PX_IDENTIFIER_RUNTIME_READ_OPERATION;
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     if (!PXIdentifierManagerIsManagerProcess()) {
         // Injected host processes consume the daemon-published toggle map. A
@@ -2621,12 +2635,18 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     // The TLinkIOS manager/UI process must use its live in-memory settings so a
     // just-toggled value cannot be masked by a not-yet-republished snapshot.
     NSString *lookupType = [type isEqualToString:@"WiFiAddress"] ? @"WiFi" : type;
-    return [self.settings[lookupType] boolValue];
+    id liveSettings = self.settings;
+    NSDictionary *settings = [liveSettings isKindOfClass:NSDictionary.class] ? liveSettings : nil;
+    id flag = settings[lookupType];
+    // Keep legacy live-memory bool converters (the full-save sanitizer accepts
+    // them too), while rejecting plist containers without that selector.
+    return [flag respondsToSelector:@selector(boolValue)] && [flag boolValue];
 }
 
 #pragma mark - Current Values
 
 - (NSString *)currentValueForIdentifier:(NSString *)type {
+    if (![type isKindOfClass:NSString.class] || !type.length) return nil;
     PX_IDENTIFIER_RUNTIME_READ_OPERATION;
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     // Injected App Store processes cannot rely on direct rootfs access to
@@ -2659,14 +2679,8 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
         NSDictionary *deviceIds = [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath];
         id rawValue = deviceIds[type];
         
-        // Coerce NSNumber (e.g. LowPowerMode, ATT) to string for callers expecting NSString
-        NSString *value = nil;
-        if ([rawValue isKindOfClass:[NSString class]]) {
-            value = (NSString *)rawValue;
-        } else if ([rawValue isKindOfClass:[NSNumber class]]) {
-            value = [(NSNumber *)rawValue stringValue];
-        }
-        
+        NSString *value = PXIdentifierDisplayString(rawValue);
+
         if (value) {
             PXLog(@"Found %@ value in device_ids.plist: %@", type, value);
             return value;
@@ -2681,143 +2695,21 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
             }
         }
         
-        // If not found in combined file, try type-specific files
-        if ([type isEqualToString:@"IDFA"]) {
-            NSString *idfaPath = [identityDir stringByAppendingPathComponent:@"advertising_id.plist"];
-            NSDictionary *idfaDict = [NSDictionary dictionaryWithContentsOfFile:idfaPath];
-            if (idfaDict && idfaDict[@"value"]) {
-                PXLog(@"Found IDFA in advertising_id.plist: %@", idfaDict[@"value"]);
-                return idfaDict[@"value"];
-            }
-        } 
-        else if ([type isEqualToString:@"IDFV"]) {
-            NSString *idfvPath = [identityDir stringByAppendingPathComponent:@"vendor_id.plist"];
-            NSDictionary *idfvDict = [NSDictionary dictionaryWithContentsOfFile:idfvPath];
-            if (idfvDict && idfvDict[@"value"]) {
-                PXLog(@"Found IDFV in vendor_id.plist: %@", idfvDict[@"value"]);
-                return idfvDict[@"value"];
-            }
-        }
-        else if ([type isEqualToString:@"SystemBootUUID"]) {
-            NSString *uuidPath = [identityDir stringByAppendingPathComponent:@"system_boot_uuid.plist"];
-            NSDictionary *uuidDict = [NSDictionary dictionaryWithContentsOfFile:uuidPath];
-            if (uuidDict && uuidDict[@"value"]) {
-                PXLog(@"Found SystemBootUUID in system_boot_uuid.plist: %@", uuidDict[@"value"]);
-                return uuidDict[@"value"];
-            }
-        }
-        else if ([type isEqualToString:@"UDID"]) {
-            NSString *udidPath = [identityDir stringByAppendingPathComponent:@"udid.plist"];
-            NSDictionary *udidDict = [NSDictionary dictionaryWithContentsOfFile:udidPath];
-            if (udidDict && udidDict[@"value"]) {
-                PXLog(@"Found UDID in udid.plist: %@", udidDict[@"value"]);
-                return udidDict[@"value"];
+        // Share the writer's filename registry; only the requested sidecar is
+        // opened. Keep canonical/legacy precedence and existing empty strings.
+        NSString *sidecar = PXRuntimeIdentifierSidecar(type);
+        if (sidecar) {
+            NSDictionary *record = [NSDictionary dictionaryWithContentsOfFile:[identityDir stringByAppendingPathComponent:sidecar]];
+            NSString *scalar = PXIdentifierDisplayString(record[@"value"]);
+            if (scalar) {
+                PXLog(@"Found %@ in %@: %@", type, sidecar, scalar);
+                return scalar;
             }
         }
         else if ([type isEqualToString:@"ATTAuthorizationStatus"]) {
-            NSString *trackingPath = [identityDir stringByAppendingPathComponent:@"tracking_info.plist"];
-            NSDictionary *trackingDict = [NSDictionary dictionaryWithContentsOfFile:trackingPath];
-            if (trackingDict && trackingDict[@"ATTAuthorizationStatus"] != nil) {
-                NSString *statusStr = [trackingDict[@"ATTAuthorizationStatus"] description];
-                PXLog(@"Found ATTAuthorizationStatus in tracking_info.plist: %@", statusStr);
-                return statusStr;
-            }
-        }
-        else if ([type isEqualToString:@"DyldCacheUUID"]) {
-            NSString *uuidPath = [identityDir stringByAppendingPathComponent:@"dyld_cache_uuid.plist"];
-            NSDictionary *uuidDict = [NSDictionary dictionaryWithContentsOfFile:uuidPath];
-            if (uuidDict && uuidDict[@"value"]) {
-                PXLog(@"Found DyldCacheUUID in dyld_cache_uuid.plist: %@", uuidDict[@"value"]);
-                return uuidDict[@"value"];
-            }
-        }
-        else if ([type isEqualToString:@"PasteboardUUID"]) {
-            NSString *uuidPath = [identityDir stringByAppendingPathComponent:@"pasteboard_uuid.plist"];
-            NSDictionary *uuidDict = [NSDictionary dictionaryWithContentsOfFile:uuidPath];
-            if (uuidDict && uuidDict[@"value"]) {
-                PXLog(@"Found PasteboardUUID in pasteboard_uuid.plist: %@", uuidDict[@"value"]);
-                return uuidDict[@"value"];
-            }
-        }
-        else if ([type isEqualToString:@"KeychainUUID"]) {
-            NSString *uuidPath = [identityDir stringByAppendingPathComponent:@"keychain_uuid.plist"];
-            NSDictionary *uuidDict = [NSDictionary dictionaryWithContentsOfFile:uuidPath];
-            if (uuidDict && uuidDict[@"value"]) {
-                PXLog(@"Found KeychainUUID in keychain_uuid.plist: %@", uuidDict[@"value"]);
-                return uuidDict[@"value"];
-            }
-        }
-        else if ([type isEqualToString:@"UserDefaultsUUID"]) {
-            NSString *uuidPath = [identityDir stringByAppendingPathComponent:@"userdefaults_uuid.plist"];
-            NSDictionary *uuidDict = [NSDictionary dictionaryWithContentsOfFile:uuidPath];
-            if (uuidDict && uuidDict[@"value"]) {
-                PXLog(@"Found UserDefaultsUUID in userdefaults_uuid.plist: %@", uuidDict[@"value"]);
-                return uuidDict[@"value"];
-            }
-        }
-        else if ([type isEqualToString:@"CoreDataUUID"]) {
-            NSString *uuidPath = [identityDir stringByAppendingPathComponent:@"coredata_uuid.plist"];
-            NSDictionary *uuidDict = [NSDictionary dictionaryWithContentsOfFile:uuidPath];
-            if (uuidDict && uuidDict[@"value"]) {
-                PXLog(@"Found CoreDataUUID in coredata_uuid.plist: %@", uuidDict[@"value"]);
-                return uuidDict[@"value"];
-            }
-        }
-        else if ([type isEqualToString:@"AppInstallUUID"]) {
-            NSString *uuidPath = [identityDir stringByAppendingPathComponent:@"appinstall_uuid.plist"];
-            NSDictionary *uuidDict = [NSDictionary dictionaryWithContentsOfFile:uuidPath];
-            if (uuidDict && uuidDict[@"value"]) {
-                PXLog(@"Found AppInstallUUID in appinstall_uuid.plist: %@", uuidDict[@"value"]);
-                return uuidDict[@"value"];
-            }
-        }
-        else if ([type isEqualToString:@"AppContainerUUID"]) {
-            NSString *uuidPath = [identityDir stringByAppendingPathComponent:@"appcontainer_uuid.plist"];
-            NSDictionary *uuidDict = [NSDictionary dictionaryWithContentsOfFile:uuidPath];
-            if (uuidDict && uuidDict[@"value"]) {
-                PXLog(@"Found AppContainerUUID in appcontainer_uuid.plist: %@", uuidDict[@"value"]);
-                return uuidDict[@"value"];
-            }
-        }
-        else if ([type isEqualToString:@"AppGroupUUID"]) {
-            NSString *uuidPath = [identityDir stringByAppendingPathComponent:@"appgroup_uuid.plist"];
-            NSDictionary *uuidDict = [NSDictionary dictionaryWithContentsOfFile:uuidPath];
-            if (uuidDict && uuidDict[@"value"]) {
-                PXLog(@"Found AppGroupUUID in appgroup_uuid.plist: %@", uuidDict[@"value"]);
-                return uuidDict[@"value"];
-            }
-        }
-        else if ([type isEqualToString:@"IMEI"]) {
-            NSString *imeiPath = [identityDir stringByAppendingPathComponent:@"imei.plist"];
-            NSDictionary *imeiDict = [NSDictionary dictionaryWithContentsOfFile:imeiPath];
-            if (imeiDict && imeiDict[@"value"]) {
-                PXLog(@"Found IMEI in imei.plist: %@", imeiDict[@"value"]);
-                return imeiDict[@"value"];
-            }
-        }
-        else if ([type isEqualToString:@"MEID"]) {
-            NSString *meidPath = [identityDir stringByAppendingPathComponent:@"meid.plist"];
-            NSDictionary *meidDict = [NSDictionary dictionaryWithContentsOfFile:meidPath];
-            if (meidDict && meidDict[@"value"]) {
-                PXLog(@"Found MEID in meid.plist: %@", meidDict[@"value"]);
-                return meidDict[@"value"];
-            }
-        }
-        else if ([type isEqualToString:@"DeviceName"]) {
-            NSString *deviceNamePath = [identityDir stringByAppendingPathComponent:@"device_name.plist"];
-            NSDictionary *deviceNameDict = [NSDictionary dictionaryWithContentsOfFile:deviceNamePath];
-            if (deviceNameDict && deviceNameDict[@"value"]) {
-                PXLog(@"Found DeviceName in device_name.plist: %@", deviceNameDict[@"value"]);
-                return deviceNameDict[@"value"];
-            }
-        }
-        else if ([type isEqualToString:@"SerialNumber"]) {
-            NSString *serialPath = [identityDir stringByAppendingPathComponent:@"serial_number.plist"];
-            NSDictionary *serialDict = [NSDictionary dictionaryWithContentsOfFile:serialPath];
-            if (serialDict && serialDict[@"value"]) {
-                PXLog(@"Found SerialNumber in serial_number.plist: %@", serialDict[@"value"]);
-                return serialDict[@"value"];
-            }
+            NSDictionary *tracking = [NSDictionary dictionaryWithContentsOfFile:[identityDir stringByAppendingPathComponent:@"tracking_info.plist"]];
+            NSString *status = PXIdentifierDisplayString(tracking[@"ATTAuthorizationStatus"]);
+            if (status) return status;
         }
         else if ([type isEqualToString:@"WiFi"]) {
             // Check for WiFi info in the profile
@@ -2843,17 +2735,19 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
         else if ([type isEqualToString:@"BatteryLevel"] || [type isEqualToString:@"LowPowerMode"]) {
             NSString *batteryPath = [identityDir stringByAppendingPathComponent:@"battery_info.plist"];
             NSDictionary *batteryDict = [NSDictionary dictionaryWithContentsOfFile:batteryPath];
-            if (batteryDict && batteryDict[type]) {
-                PXLog(@"Found %@ in battery_info.plist: %@", type, batteryDict[type]);
-                return batteryDict[type];
+            NSString *batteryValue = PXIdentifierDisplayString(batteryDict[type]);
+            if (batteryValue) {
+                PXLog(@"Found %@ in battery_info.plist: %@", type, batteryValue);
+                return batteryValue;
             }
         }
         else if ([type isEqualToString:@"SystemUptime"]) {
             NSString *profilePath = [self profileIdentityPath];
 NSString *uptimePath = [profilePath stringByAppendingPathComponent:@"system_uptime.plist"];
 NSDictionary *uptimeDict = [NSDictionary dictionaryWithContentsOfFile:uptimePath];
-if (uptimeDict && uptimeDict[@"value"]) {
-    NSTimeInterval uptime = [uptimeDict[@"value"] doubleValue];
+id uptimeValue = uptimeDict[@"value"];
+if ([uptimeValue isKindOfClass:NSNumber.class] || [uptimeValue isKindOfClass:NSString.class]) {
+    NSTimeInterval uptime = [uptimeValue doubleValue];
     if (uptime > 0) {
         NSString *formattedUptime = [NSString stringWithFormat:@"%.2f hours", uptime / 3600.0];
         PXLog(@"[WeaponX] 📄 Showing SystemUptime from system_uptime.plist: %@", formattedUptime);
@@ -4289,6 +4183,8 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
 }
 
 - (BOOL)saveCustomValue:(NSString *)value forType:(NSString *)type {
+    // Reject unsupported input before target resolution/migration or ownership.
+    if (![value isKindOfClass:NSString.class] || !PXRuntimeIdentifierSidecar(type)) return NO;
     value = [value copy]; type = [type copy];
     PXProfileArtifactMutation *mutation = [self currentIdentifierMutation];
     if (!mutation) return NO;
@@ -4416,8 +4312,9 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
     // Prefer device_ids.plist
     NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
     NSDictionary *deviceIds = [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath];
-    if (deviceIds[@"ATTAuthorizationStatus"] != nil) {
-        NSInteger status = [deviceIds[@"ATTAuthorizationStatus"] integerValue];
+    id deviceIdsStatus = deviceIds[@"ATTAuthorizationStatus"];
+    if ([deviceIdsStatus isKindOfClass:NSNumber.class] || [deviceIdsStatus isKindOfClass:NSString.class]) {
+        NSInteger status = [deviceIdsStatus integerValue];
         if (status >= 0 && status <= 3) {
             return status;
         }
@@ -4426,8 +4323,9 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
     // Fall back to tracking_info.plist
     NSString *trackingPath = [identityDir stringByAppendingPathComponent:@"tracking_info.plist"];
     NSDictionary *trackingDict = [NSDictionary dictionaryWithContentsOfFile:trackingPath];
-    if (trackingDict[@"ATTAuthorizationStatus"] != nil) {
-        NSInteger status = [trackingDict[@"ATTAuthorizationStatus"] integerValue];
+    id trackingDictStatus = trackingDict[@"ATTAuthorizationStatus"];
+    if ([trackingDictStatus isKindOfClass:NSNumber.class] || [trackingDictStatus isKindOfClass:NSString.class]) {
+        NSInteger status = [trackingDictStatus integerValue];
         if (status >= 0 && status <= 3) {
             return status;
         }
@@ -4702,7 +4600,7 @@ static NSInteger PXMEIDLuhnCheckDigit(NSString *body) {
 - (BOOL)setCustomSerialNumber:(NSString *)value {
     // Serial numbers have specific format requirements
     // This is a simplified validation - implement appropriate validation for serial numbers
-    if (!value || value.length < 8) return NO;
+    if (![value isKindOfClass:NSString.class] || value.length < 8) return NO;
     return [self saveCustomValue:value forType:@"SerialNumber"];
 }
 
@@ -4866,8 +4764,8 @@ static NSInteger PXMEIDLuhnCheckDigit(NSString *body) {
 }
 
 - (BOOL)setCustomDeviceTheme:(NSString *)value {
-    value = [value copy];
-    if (![value isEqualToString:@"Light"] && ![value isEqualToString:@"Dark"]) {
+    if ([value isKindOfClass:NSString.class]) value = [value copy];
+    if (![value isKindOfClass:NSString.class] || (![value isEqualToString:@"Light"] && ![value isEqualToString:@"Dark"])) {
         self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:2004 userInfo:@{NSLocalizedDescriptionKey: @"Invalid Device Theme (must be 'Light' or 'Dark')"}];
         return NO;
     }
@@ -4914,10 +4812,10 @@ static NSInteger PXMEIDLuhnCheckDigit(NSString *body) {
     
     if (settingsDict) {
         if (settingsDict[@"canvasFingerprintingEnabled"] != nil) {
-            return [settingsDict[@"canvasFingerprintingEnabled"] boolValue];
+            return PXRuntimeReadBool(settingsDict[@"canvasFingerprintingEnabled"]);
         }
         if (settingsDict[@"CanvasFingerprint"] != nil) {
-            return [settingsDict[@"CanvasFingerprint"] boolValue];
+            return PXRuntimeReadBool(settingsDict[@"CanvasFingerprint"]);
         }
     }
     
