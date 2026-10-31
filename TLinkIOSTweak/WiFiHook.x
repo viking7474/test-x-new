@@ -6,6 +6,7 @@
 #import <dlfcn.h>
 #import "TLinkIOSLogging.h"
 #import "WiFiManager.h"
+#import "PXWiFiHookResolver.h"
 #import <substrate.h>
 // #import <ellekit/ellekit.h> // Removed for rootful - using Substrate
 #import <Network/Network.h>
@@ -272,27 +273,16 @@ static NSDictionary *getProfileWiFiInfo(void) {
     }
 
     Class managerClass = resolved ? Nil : NSClassFromString(@"WiFiManager");
-    id wifiManager = [managerClass respondsToSelector:@selector(sharedManager)] ? [managerClass sharedManager] : nil;
-    if (!resolved && [wifiManager respondsToSelector:@selector(currentWiFiInfo)]) {
-        NSDictionary *managerInfo = [wifiManager currentWiFiInfo];
-        if (PXWiFiInfoHasIdentity(managerInfo)) resolved = managerInfo;
-    }
-    if (!resolved && [wifiManager respondsToSelector:@selector(generateWiFiInfo)]) {
-        NSDictionary *generated = [wifiManager generateWiFiInfo];
-        if (PXWiFiInfoHasIdentity(generated)) {
-            resolved = generated;
-            NSFileManager *fileManager = [NSFileManager defaultManager];
-            if ([fileManager fileExistsAtPath:identityDir] ||
-                [fileManager createDirectoryAtPath:identityDir withIntermediateDirectories:YES attributes:nil error:nil]) {
-                [generated writeToFile:wifiInfoPath atomically:YES];
-                NSMutableDictionary *mutableIDs = [NSMutableDictionary dictionaryWithContentsOfFile:deviceIdsPath];
-                if (!mutableIDs) mutableIDs = [NSMutableDictionary dictionary];
-                mutableIDs[@"SSID"] = generated[@"ssid"];
-                mutableIDs[@"BSSID"] = generated[@"bssid"];
-                mutableIDs[@"WiFi"] = [NSString stringWithFormat:@"%@ (%@)", generated[@"ssid"], generated[@"bssid"]];
-                [mutableIDs writeToFile:deviceIdsPath atomically:YES];
+    if (!resolved && [managerClass respondsToSelector:@selector(sharedManager)]) {
+        resolved = PXResolveHookWiFiInfo(profileId, ^NSDictionary *(NSString *target, NSError **failure) {
+            id manager = [managerClass sharedManager];
+            if (![manager respondsToSelector:@selector(cachedWiFiInfoForProfileID:)]) {
+                if (failure) *failure = [NSError errorWithDomain:@"com.hydra.tlinkios.wifi-hook" code:3024
+                    userInfo:@{NSLocalizedDescriptionKey: @"WiFi cache provider is unavailable"}];
+                return nil;
             }
-        }
+            return [manager cachedWiFiInfoForProfileID:target];
+        }, NULL);
     }
 
     return resolved ? PXWiFiPublishInfo(resolved, profileId, now, generation) : nil;

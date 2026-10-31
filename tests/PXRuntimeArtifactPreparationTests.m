@@ -8,6 +8,7 @@
 #import "PXProfileLifecycleLease.h"
 #import "PXProfileDeletionJournal.h"
 #import "PXIdentityValidator.h"
+#import "PXWiFiHookResolver.h"
 #import "PXPaths.h"
 #import "TLinkIOSLogging.h"
 #include <sys/sysctl.h>
@@ -33,9 +34,17 @@ static NSString *gLastStorageModel;
 static BOOL gWiFiManagerAvailable = YES;
 static NSString *gWiFiMemoryID;
 static void (^gDuringWiFiCopy)(void), (^gDuringWiFiWarmup)(void);
+static void (^gDuringHookWiFiPreparation)(void);
+static BOOL gInspectHookWiFiPreparation;
+static NSUInteger gHookWiFiPreparations;
 static void (^gDuringUptime)(void), (^gDuringStorageCopy)(void), (^gDuringLog)(void);
 #define CHECK(value, message) do { gChecks++; if (!(value)) { gFailures++; fprintf(stderr, "FAIL: %s\n", message); } } while (0)
 uint32_t PXPreparationFixtureRandom(uint32_t bound) {
+    if (gInspectHookWiFiPreparation) {
+        gInspectHookWiFiPreparation = NO; gHookWiFiPreparations++;
+        void (^callback)(void) = gDuringHookWiFiPreparation; gDuringHookWiFiPreparation = nil;
+        if (callback) callback();
+    }
     CHECK(bound > 0, "random preparation has bounded nonzero input");
     if (!bound) return 0;
     if (gTapeIndex < gTape.count) {
@@ -308,6 +317,7 @@ static int PXPreparationFixtureSysctl(int *name, u_int namelen, void *oldp, size
 - (NSDictionary *)generateWiFiInfo;
 - (void)adoptCommittedWiFiInfo:(NSDictionary *)wifiInfo profileID:(NSString *)profileID;
 - (NSDictionary *)currentWiFiInfo;
+- (NSDictionary *)cachedWiFiInfoForProfileID:(NSString *)profileID;
 - (void)setCurrentWiFiInfo:(NSDictionary *)wifiInfo;
 - (BOOL)isValidSSID:(NSString *)ssid;
 - (BOOL)isValidBSSID:(NSString *)bssid;
@@ -1479,6 +1489,149 @@ static void TestBorrowedArtifactScope(void) {
     CHECK(!scope && error, "released borrowed artifact capability is rejected"); CheckArtifactLeaseFree();
 }
 
+static BOOL SeedHookWiFiMissing(void) {
+    gInspectHookWiFiPreparation = NO; gDuringHookWiFiPreparation = nil; Tape(@[]);
+    return SetArtifactSelection(@"a") && [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        return [tx removeDictionaryAtPath:Path(PXProfileIdentityPath(@"a"), @"wifi_info.plist") error:error] &&
+            [tx setDictionary:@{ @"keep": @YES } atPath:PXProfileDeviceIDsPath(@"a") error:error];
+    } error:NULL];
+}
+static void ArmHookWiFi(void (^callback)(void)) {
+    Tape(@[]); gInspectHookWiFiPreparation = YES; gDuringHookWiFiPreparation = callback;
+}
+static void TestHookWiFiResolver(void) {
+    CHECK(SeedHookWiFiMissing(), "hook WiFi missing artifact and IDs seeded");
+    NSError *error = nil; __block NSUInteger cacheReads = 0, commits = 0;
+    PXWiFiHookCacheReader miss = ^NSDictionary *(NSString *target, NSError **failure) {
+        (void)failure; cacheReads++; CHECK([target isEqual:@"a"], "hook cache reader gets frozen requested ID");
+        CheckArtifactLeaseFree(); return nil;
+    };
+    ArmHookWiFi(^{ CheckArtifactLeaseHeld(); });
+    NSData *beforeB = [NSData dataWithContentsOfFile:PXProfileDeviceIDsPath(@"b")];
+    gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"commit-written"]) commits++; };
+    NSDictionary *record = PXResolveHookWiFiInfo(@"a", miss, &error); gStore.testCheckpoint = nil;
+    NSData *afterB = [NSData dataWithContentsOfFile:PXProfileDeviceIDsPath(@"b")];
+    NSDictionary *saved = [NSDictionary dictionaryWithContentsOfFile:Path(PXProfileIdentityPath(@"a"), @"wifi_info.plist")];
+    NSDictionary *ids = IDs();
+    CHECK((record && !error && commits == 1 && cacheReads == 1 && [saved isEqual:record] &&
+          [ids[@"SSID"] isEqual:record[@"ssid"]] && [ids[@"BSSID"] isEqual:record[@"bssid"]] && [ids[@"keep"] boolValue] &&
+          [ids[@"WiFi"] isEqual:[NSString stringWithFormat:@"%@ (%@)", record[@"ssid"], record[@"bssid"]]] &&
+          (beforeB == afterB || [beforeB isEqual:afterB])), "hook seed commits one paired record with display scalar and leaves B untouched");
+    CheckArtifactLeaseFree();
+    NSDictionary *before = AllArtifactFiles(); NSUInteger prepared = gHookWiFiPreparations;
+    NSDictionary *hit = PXResolveHookWiFiInfo(@"a", nil, &error);
+    CHECK([hit isEqual:record] && [before isEqual:AllArtifactFiles()] && prepared == gHookWiFiPreparations,
+          "owned source recheck reuses existing WiFi without generation or writes");
+
+    PXOwnedWiFiFixture *manager = [PXOwnedWiFiFixture new];
+    [manager adoptCommittedWiFiInfo:record profileID:@"b"];
+    NSUInteger selections = gWiFiSelections, writes = gWrites;
+    CHECK(![manager cachedWiFiInfoForProfileID:@"a"] && [[manager cachedWiFiInfoForProfileID:@"b"] isEqual:record] &&
+          selections == gWiFiSelections && writes == gWrites, "read-only WiFi cache never resolves current profile or generates or persists");
+    CHECK(SeedHookWiFiMissing(), "hook cache-only fallback seeded");
+    NSMutableString *name = [@"Cached A" mutableCopy];
+    NSDictionary *candidate = @{ @"ssid": name, @"bssid": @"02:11:22:33:44:55" };
+    before = AllArtifactFiles();
+    hit = PXResolveHookWiFiInfo(@"a", ^NSDictionary *(NSString *target, NSError **failure) {
+        (void)target; (void)failure; return candidate;
+    }, &error);
+    [name setString:@"mutated"];
+    CHECK([hit[@"ssid"] isEqual:@"Cached A"] && [before isEqual:AllArtifactFiles()],
+          "matching cache candidate remains detached read-only fallback without seed acknowledgement");
+    CHECK(SeedHookWiFiMissing(), "hook source arrival baseline seeded"); prepared = gHookWiFiPreparations;
+    NSDictionary *arrived = @{ @"ssid": @"Arrived A", @"bssid": @"02:22:33:44:55:66" };
+    hit = PXResolveHookWiFiInfo(@"a", ^NSDictionary *(NSString *target, NSError **failure) {
+        (void)target; (void)failure; CHECK(SetWiFiFixture(@"a", arrived), "new typed source arrives during provider warmup"); return candidate;
+    }, &error);
+    CHECK([hit isEqual:arrived] && prepared == gHookWiFiPreparations, "owned source reread wins over older matching cache candidate");
+    CHECK(SeedHookWiFiMissing(), "hook provider error baseline seeded"); before = AllArtifactFiles();
+    CHECK(!PXResolveHookWiFiInfo(@"a", ^NSDictionary *(NSString *target, NSError **failure) {
+        (void)target; if (failure) *failure = [NSError errorWithDomain:@"fixture" code:3024 userInfo:nil]; return nil;
+    }, &error) && error.code == 3024 && [before isEqual:AllArtifactFiles()], "unavailable cache provider does not generate or write a seed");
+    CHECK(!PXResolveHookWiFiInfo(@"a", ^NSDictionary *(NSString *target, NSError **failure) {
+        (void)target; (void)failure; [NSException raise:@"fixture" format:@"warmup failed"]; return nil;
+    }, &error) && error.code == 3023 && [before isEqual:AllArtifactFiles()], "cache provider exception cannot leak resolver admission or ownership");
+    CheckArtifactLeaseFree();
+    before = AllArtifactFiles(); cacheReads = 0; prepared = gHookWiFiPreparations;
+    CHECK(!PXResolveHookWiFiInfo(@"b", miss, &error) && error.code == 3021 && !cacheReads && prepared == gHookWiFiPreparations &&
+          [before isEqual:AllArtifactFiles()], "stale requested active ID rejects before cache provider or generation");
+    writes = gWrites;
+    CHECK(!PXResolveHookWiFiInfo((id)NSNull.null, miss, &error) && error.code == 3020 && writes == gWrites,
+          "invalid hook target fails before source admission");
+    BOOL outer = [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **failure) {
+        (void)tx; (void)failure; NSError *nested = nil;
+        CHECK(!PXResolveHookWiFiInfo(@"a", miss, &nested) && nested && !cacheReads,
+              "nested hook resolution rejects before provider and poisons ignored staging");
+        return YES;
+    } error:&error];
+    CHECK(!outer && [before isEqual:AllArtifactFiles()], "nested hook resolution cannot acknowledge an uncommitted seed");
+    CHECK(SeedHookWiFiMissing(), "hook warmup reentry baseline seeded");
+    __block BOOL reentryRejected = NO;
+    ArmHookWiFi(nil);
+    hit = PXResolveHookWiFiInfo(@"a", ^NSDictionary *(NSString *target, NSError **failure) {
+        (void)target; (void)failure; NSError *nested = nil;
+        reentryRejected = PXResolveHookWiFiInfo(@"a", nil, &nested) == nil && nested.code == 3025;
+        return nil;
+    }, &error);
+    CHECK(hit && reentryRejected && !error, "singleton warmup reentry stops before another provider or recursive lifecycle acquisition");
+    CHECK(SeedHookWiFiMissing(), "hook mutable target baseline seeded");
+    NSMutableString *requested = [@"a" mutableCopy]; ArmHookWiFi(nil);
+    hit = PXResolveHookWiFiInfo(requested, ^NSDictionary *(NSString *target, NSError **failure) {
+        (void)failure; CHECK([target isEqual:@"a"], "hook resolver froze caller target before callback"); [requested setString:@"b"]; return nil;
+    }, &error);
+    CHECK(hit && [[NSDictionary dictionaryWithContentsOfFile:Path(PXProfileIdentityPath(@"a"), @"wifi_info.plist")] isEqual:hit],
+          "provider mutation of caller ID cannot retarget hook seed");
+    CHECK(SeedHookWiFiMissing(), "hook busy baseline seeded"); before = AllArtifactFiles();
+    PXProfileLifecycleLease *busy = [PXProfileLifecycleLease acquireInDirectory:gRoot error:NULL];
+    CHECK(busy && !PXResolveHookWiFiInfo(@"a", nil, &error) && error.code == 12 && [before isEqual:AllArtifactFiles()],
+          "busy hook target never generates or changes source bytes"); [busy invalidate];
+    CHECK(SetArtifactIntent(YES), "hook pending deletion seeded"); before = AllArtifactFiles();
+    CHECK(!PXResolveHookWiFiInfo(@"a", nil, &error) && error.code == 27 && [before isEqual:AllArtifactFiles()],
+          "pending deletion blocks hook seed without directory repair"); CHECK(SetArtifactIntent(NO), "hook pending deletion cleared");
+
+    for (NSUInteger stop = 1; stop <= 2; stop++) {
+        CHECK(SeedHookWiFiMissing(), "hook fault baseline seeded"); before = AllArtifactFiles();
+        __block NSUInteger files = 0;
+        gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"source-written"] && ++files == stop) [NSException raise:@"fixture" format:@"hook seed fault"]; };
+        ArmHookWiFi(nil); hit = PXResolveHookWiFiInfo(@"a", nil, &error); gStore.testCheckpoint = nil;
+        CHECK(!hit && error && [before isEqual:AllArtifactFiles()], "hook faults after either file restore bytes and absence without returning generated data");
+        CheckArtifactLeaseFree();
+    }
+    CHECK(SeedHookWiFiMissing(), "hook marker acknowledgement seeded");
+    gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"commit-written"]) [NSException raise:@"fixture" format:@"after hook ACK"]; };
+    ArmHookWiFi(nil); hit = PXResolveHookWiFiInfo(@"a", nil, &error); gStore.testCheckpoint = nil;
+    CHECK(hit && !error && [[NSDictionary dictionaryWithContentsOfFile:Path(PXProfileIdentityPath(@"a"), @"wifi_info.plist")] isEqual:hit],
+          "post-marker housekeeping fault preserves committed hook seed success");
+
+    CHECK(SeedHookWiFiMissing(), "hook source drift baseline seeded"); __block NSDictionary *competitor = nil;
+    ArmHookWiFi(^{
+        BOOL changed = [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **failure) {
+            return [tx setDictionary:@{ @"newer": @YES } atPath:PXProfileDeviceIDsPath(@"a") error:failure];
+        } error:NULL];
+        CHECK(changed, "uncooperative IDs writer changes preparation basis"); competitor = AllArtifactFiles();
+    });
+    CHECK(!PXResolveHookWiFiInfo(@"a", nil, &error) && error.code == 3022 && [competitor isEqual:AllArtifactFiles()],
+          "hook refuses changed source basis without overwriting competitor");
+    CHECK(SeedHookWiFiMissing(), "hook selection drift baseline seeded");
+    ArmHookWiFi(^{ CHECK(SetArtifactSelection(@"b"), "uncooperative newer active selection written"); competitor = AllArtifactFiles(); });
+    CHECK(!PXResolveHookWiFiInfo(@"a", nil, &error) && error && [competitor isEqual:AllArtifactFiles()],
+          "hook preparation cannot commit against a newer selection");
+    CHECK(SeedHookWiFiMissing(), "hook exception baseline seeded"); before = AllArtifactFiles();
+    ArmHookWiFi(^{ [NSException raise:@"fixture" format:@"hook provider failed"]; });
+    CHECK(!PXResolveHookWiFiInfo(@"a", nil, &error) && error.code == 3023 && [before isEqual:AllArtifactFiles()],
+          "hook preparation exception releases ownership without source or cache success"); CheckArtifactLeaseFree();
+
+    NSString *identity = PXProfileIdentityPath(@"a"), *moved = Path(PXProfileRootPath(@"a"), @"hook-held-identity");
+    BOOL missing = [NSFileManager.defaultManager moveItemAtPath:identity toPath:moved error:NULL];
+    CHECK(missing, "hook missing identity fixture prepared");
+    @try {
+        prepared = gHookWiFiPreparations; ArmHookWiFi(nil);
+        CHECK(!PXResolveHookWiFiInfo(@"a", nil, &error) && error && prepared == gHookWiFiPreparations && ![NSFileManager.defaultManager fileExistsAtPath:identity],
+              "hook seed never recreates a removed identity directory");
+    } @finally { if (missing) CHECK([NSFileManager.defaultManager moveItemAtPath:moved toPath:identity error:NULL], "hook identity fixture restored"); }
+    gInspectHookWiFiPreparation = NO; gDuringHookWiFiPreparation = nil; Tape(@[]); CheckArtifactLeaseFree();
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
@@ -1489,7 +1642,7 @@ int main(void) {
         CHECK(gStore != nil && [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
             return [tx setDictionary:@{ @"keep": @YES } atPath:Path(PXProfileIdentityPath(@"a"), @"device_ids.plist") error:error];
         } error:NULL], "preparation source backend seeded");
-        TestPurePreparation(); TestManagerWrappers(); TestCompositionAndUptime(); TestStorageLifecycle(); TestStorageDisplayCommit(); TestStorageReadBoundaries(); TestStoragePreferenceWriters(); TestUptimeLifecycle(); TestWiFiLifecycle(); TestBatteryLifecycle(); TestBorrowedArtifactScope(); TestUptimeReadOnly();
+        TestPurePreparation(); TestManagerWrappers(); TestCompositionAndUptime(); TestStorageLifecycle(); TestStorageDisplayCommit(); TestStorageReadBoundaries(); TestStoragePreferenceWriters(); TestUptimeLifecycle(); TestWiFiLifecycle(); TestBatteryLifecycle(); TestBorrowedArtifactScope(); TestUptimeReadOnly(); TestHookWiFiResolver();
         gStore = nil; [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
         printf("Runtime artifact preparation: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);
         return gFailures ? 1 : 0;

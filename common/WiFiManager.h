@@ -12,6 +12,9 @@
 // when the selected profile has no readable WiFi record.
 - (NSDictionary *)generateWiFiInfo;
 - (NSDictionary *)currentWiFiInfo;
+// Read-only compatibility fallback for a fixed target. Never reloads, generates,
+// persists or resolves the active profile; nil means missing/mismatched cache.
+- (NSDictionary *)cachedWiFiInfoForProfileID:(NSString *)profileID;
 - (void)setCurrentWiFiInfo:(NSDictionary *)wifiInfo;
 // Cache adoption after an explicit-target source commit; never saves.
 - (void)adoptCommittedWiFiInfo:(NSDictionary *)wifiInfo profileID:(NSString *)profileID;

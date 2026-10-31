@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #import <os/lock.h>
+#import "PXWiFiHookResolver.h"
 #include <stdint.h>
 #include <math.h>
 #include <time.h>
@@ -135,17 +136,38 @@ static NSMutableDictionary *gFiles;
 static void (^gDuringRead)(void);
 static NSString *gActiveID;
 static id gManagerInfo, gGenerated;
+static NSString *gManagerID;
+static NSUInteger gResolverCalls;
+static BOOL gResolverFails;
 static Class gProviderClass;
 @interface WiFiManager : NSObject
 + (instancetype)sharedManager;
 - (NSDictionary *)currentWiFiInfo;
 - (NSDictionary *)generateWiFiInfo;
+- (NSDictionary *)cachedWiFiInfoForProfileID:(NSString *)profileID;
 @end
 @implementation WiFiManager
 + (instancetype)sharedManager { gFactoryCalls++; return [self new]; }
 - (NSDictionary *)currentWiFiInfo { gManagerReads++; return gManagerInfo; }
 - (NSDictionary *)generateWiFiInfo { gGenerations++; return gGenerated; }
+- (NSDictionary *)cachedWiFiInfoForProfileID:(NSString *)profileID { gManagerReads++; return [gManagerID isEqual:profileID] ? gManagerInfo : nil; }
 @end
+@interface PXLegacyWiFiProvider : NSObject
++ (instancetype)sharedManager;
+@end
+@implementation PXLegacyWiFiProvider
++ (instancetype)sharedManager { gFactoryCalls++; return [self new]; }
+@end
+// Reader wiring collaborator only. Real lifecycle/source behavior is exercised
+// by the artifact-preparation binary linked with PXWiFiHookResolver.m.
+NSDictionary *PXResolveHookWiFiInfo(NSString *profileID, PXWiFiHookCacheReader reader, NSError **error) {
+    gResolverCalls++;
+    if (gResolverFails || ![profileID isEqual:gActiveID]) return nil;
+    NSError *failure = nil;
+    id cached = reader ? reader(profileID, &failure) : nil;
+    if (failure) { if (error) *error = failure; return nil; }
+    return PXWiFiInfoHasIdentity(cached) ? cached : gGenerated;
+}
 @interface PXWiFiFileManager : NSObject
 - (BOOL)fileExistsAtPath:(NSString *)path;
 - (BOOL)createDirectoryAtPath:(NSString *)path withIntermediateDirectories:(BOOL)create attributes:(NSDictionary *)attributes error:(NSError **)error;
@@ -202,6 +224,7 @@ static Class PXWiFiFixtureClassFromString(NSString *name) { (void)name; gClassLo
 static void ResetReader(void) {
     PXWiFiInvalidateCache(); gFiles = [NSMutableDictionary dictionary]; gActiveID = @"a";
     gManagerInfo = nil; gGenerated = nil; gProviderClass = WiFiManager.class;
+    gManagerID = @"a"; gResolverCalls = 0; gResolverFails = NO;
     gDuringRead = nil;
     gView = [PXRuntimeReadSnapshot new]; gView.deviceIDs = @{}; gView.artifacts = @{};
     gReads = gWrites = gFactoryCalls = gClassLookups = gManagerReads = gGenerations = gFileManagers = gSelections = gCaptures = 0;
@@ -246,12 +269,18 @@ static void TestReader(void) {
     ResetReader(); gProviderClass = NSObject.class;
     CHECK(!getProfileWiFiInfo() && gClassLookups == 1 && !gFactoryCalls && !gWrites,
           "optional class without sharedManager is never sent an unsupported selector");
-    ResetReader(); gManagerInfo = NSNull.null; gGenerated = @{ @"ssid": @"bad", @"bssid": @7 };
-    CHECK(!getProfileWiFiInfo() && gGenerations == 1 && !gWrites && !gFileManagers,
-          "malformed provider results never reach CFString consumers or generation persistence");
+    ResetReader(); gProviderClass = PXLegacyWiFiProvider.class; gGenerated = Packet(@"must-not-generate");
+    CHECK(!getProfileWiFiInfo() && gResolverCalls == 1 && gFactoryCalls == 1 && !gGenerations && !gWrites,
+          "older optional provider without read-only selector fails closed without legacy generation");
+    ResetReader(); gResolverFails = YES;
+    CHECK(!getProfileWiFiInfo() && gResolverCalls == 1 && !gFactoryCalls && !gGenerations && !gWrites && !cachedWifiInfo,
+          "owned resolver failure never falls back to legacy generation or raw writes or cache adoption");
     ResetReader(); gGenerated = Packet(@"generated");
-    CHECK([getProfileWiFiInfo()[@"ssid"] isEqual:@"generated"] && gGenerations == 1 && gFileManagers == 1 && gWrites == 2 &&
-          [gFiles[idsPath][@"SSID"] isEqual:@"generated"], "valid legacy generation preserves its existing two raw file writes");
+    CHECK([getProfileWiFiInfo()[@"ssid"] isEqual:@"generated"] && gResolverCalls == 1 && !gGenerations && !gFileManagers && !gWrites,
+          "hook accepts owned resolver result without repeating generation or raw file writes");
+    ResetReader(); gManagerID = @"b"; gManagerInfo = Packet(@"wrong-b"); gGenerated = Packet(@"fixed-a");
+    CHECK([getProfileWiFiInfo()[@"ssid"] isEqual:@"fixed-a"] && gResolverCalls == 1 && !gGenerations && !gWrites,
+          "hook asks for fixed-profile read-only cache instead of a live current-profile getter");
     ResetReader(); gActiveID = nil;
     CHECK(!getProfileWiFiInfo() && !gReads && !gFactoryCalls && !gWrites, "missing profile exits before artifacts or optional providers");
 #endif

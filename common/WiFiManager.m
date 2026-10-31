@@ -175,6 +175,13 @@
     return [self.wifiInfo copy];
 }
 
+- (NSDictionary *)cachedWiFiInfoForProfileID:(NSString *)profileID {
+    NSString *target = [PXValidatedProfileID(profileID) copy];
+    if (!target || ![self.currentProfileId isEqualToString:target]) return nil;
+    NSDictionary *info = [self.wifiInfo copy];
+    return [self.currentProfileId isEqualToString:target] ? info : nil;
+}
+
 - (void)setCurrentWiFiInfo:(NSDictionary *)wifiInfo {
     if (!wifiInfo) return;
     

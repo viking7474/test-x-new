@@ -52,7 +52,7 @@ WRAPPERS = {
         '- (void)loadWiFiInfoFromCurrentProfile', '- (void)loadWiFiInfoForProfileID:(NSString *)profileID',
         '- (void)saveWiFiInfoToCurrentProfile', '- (NSDictionary *)generateWiFiInfo',
         '- (void)adoptCommittedWiFiInfo:(NSDictionary *)wifiInfo profileID:(NSString *)profileID',
-        '- (NSDictionary *)currentWiFiInfo', '- (void)setCurrentWiFiInfo:(NSDictionary *)wifiInfo',
+        '- (NSDictionary *)currentWiFiInfo', '- (NSDictionary *)cachedWiFiInfoForProfileID:(NSString *)profileID', '- (void)setCurrentWiFiInfo:(NSDictionary *)wifiInfo',
         '- (BOOL)isValidSSID:(NSString *)ssid', '- (BOOL)isValidBSSID:(NSString *)bssid', '- (void)dealloc']),
     'PXPreparedBatteryMethods.inc': ('common/BatteryManager.m', ['- (NSString *)randomizeBatteryLevel', '- (NSDictionary *)generateBatteryInfo', '- (void)adoptCommittedBatteryInfo:(NSDictionary *)batteryInfo', '- (void)publishCommittedBatteryInfo:(NSDictionary *)batteryInfo timestamp:(NSDate *)timestamp',
         '- (NSDictionary *)batteryRecordForLevel:(NSString *)level lowPowerMode:(BOOL)enabled',
@@ -120,9 +120,28 @@ def source_contracts():
     assert 'cacheTimestamp' not in wifi_hooks and 'CLOCK_MONOTONIC' in wifi_hooks
     assert 'resolved ? Nil : NSClassFromString(@"WiFiManager")' in wifi_reader and wifi_reader.count('NSClassFromString(@"WiFiManager")') == 1
     assert 'respondsToSelector:@selector(sharedManager)' in wifi_reader
-    for candidate in ('wifiInfo', 'managerInfo', 'generated'): assert 'PXWiFiInfoHasIdentity(' + candidate + ')' in wifi_reader
+    assert 'PXWiFiInfoHasIdentity(wifiInfo)' in wifi_reader
+    assert 'PXResolveHookWiFiInfo(profileId,' in wifi_reader and '[manager cachedWiFiInfoForProfileID:target]' in wifi_reader
+    for forbidden in ('currentWiFiInfo]', 'generateWiFiInfo]', 'writeToFile:', 'createDirectoryAtPath:'):
+        assert forbidden not in wifi_reader
+    cached_wifi = identifier.method(wifi_source, '- (NSDictionary *)cachedWiFiInfoForProfileID:(NSString *)profileID')
+    assert cached_wifi.count('[self.currentProfileId isEqualToString:target]') == 2
+    for forbidden in ('generateWiFiInfo', 'saveWiFi', 'loadWiFi', 'getCurrentProfileID'): assert forbidden not in cached_wifi
+    hook_resolver = read('common/PXWiFiHookResolver.m')
+    owner = identifier.method(hook_resolver, 'NSDictionary *PXResolveHookWiFiInfo(NSString *profileID, PXWiFiHookCacheReader cacheReader, NSError **error)')
+    assert owner.index('PXPerformStandaloneRuntimeSourceWrite(') < owner.index('cacheReader(target, &cacheError)') < owner.index('acquireWithIdentityResolver:')
+    assert owner.index('PXWiFiHookSelection(tx, target, failure)') < owner.index('PXPrepareRuntimeWiFiInfo()')
+    assert owner.index('PXRuntimeProfileSelectionMatches(') < owner.index('PXStageRuntimeWiFi(')
+    assert 'nowWifi != wifiExists || nowIDs != idsExist' in owner and '![currentWifi isEqual:wifi] || ![currentIDs isEqual:ids]' in owner
+    assert 'return committed ? prepared : nil;' in owner and '@finally { [mutation invalidate]; }' in owner
+    assert owner.index('PXPerformStandaloneRuntimeSourceWrite(') < owner.index('if (gWiFiHookResolving)') < owner.index('cacheReader(target, &cacheError)')
+    assert '@finally { gWiFiHookResolving = NO; }' in owner
+    assert 'merged[@"WiFi"]' in owner and 'PXWiFiHookFreeze(PXPrepareRuntimeWiFiInfo())' in owner
+    for forbidden in ('createDirectoryAtPath:', 'writeToFile:', 'sharedManager', 'currentWiFiInfo', 'postNotification', 'dispatch_'):
+        assert forbidden not in hook_resolver
     for field in ('SSID', 'BSSID'): assert f'[deviceIds[@"{field}"] isKindOfClass:NSString.class]' in wifi_reader
     check_macro_arity(read('tests/PXWiFiHookCacheTests.m'), 'PXWiFiHookCacheTests.m')
+    assert read('tests/PXRuntimeArtifactPreparationTests.m').count('TestHookWiFiResolver();') == 1
     observer = identifier.method(wifi_source, '- (void)registerForProfileNotifications')
     assert '@synchronized (self)' in observer and 'if (self.profileChangeObserver) return;' in observer
     assert '__weak typeof(self) weakSelf' in observer and '__strong typeof(weakSelf) owner' in observer
@@ -214,6 +233,11 @@ def source_contracts():
     assert 'method_getNumberOfArguments(entry) != 4' in abi and "returnType[0] == 'Q' && returnType[1] == 0" in abi
     for name in ('result', 'url', 'error'): assert f'{name}[sizeof({name}) - 1] = 0;' in abi
     check_macro_arity(read('tests/PXStorageObjCHookTests.m'), 'PXStorageObjCHookTests.m')
+    for file in ('tests/PXWiFiHookCacheTests.m', 'tests/PXRuntimeArtifactPreparationTests.m'):
+        declarations = re.findall(r'^@(interface|implementation)\s+(\w+)(?:[ \t]*\(([^)]*)\))?', read(file), re.M)
+        assert len(declarations) == len(set(declarations)), 'duplicate native fixture class declaration: ' + file
+    for label in ('hook source arrival baseline seeded', 'hook mutable target baseline seeded'):
+        assert read('tests/PXRuntimeArtifactPreparationTests.m').count(label) == 1
     assert 'return bytes / blockSize + (bytes % blockSize != 0);' in hooks
     assert 'convertGBStringToBytes(' not in hooks and 'normalizeStorageBytes(' not in hooks
     clock = identifier.method(hooks, 'static NSTimeInterval PXStorageCacheTime(void)')
@@ -407,9 +431,9 @@ def source_contracts():
     assert manifest['rollout'] == '4C.2H5S-partial'
     assert manifest['writers']['identifier-artifacts']['status'] == 'enrolled'
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
-    assert manifest['writers']['wifi-hook-legacy']['status'] == 'pending'
+    assert manifest['writers']['wifi-hook-legacy']['status'] == 'enrolled'
     wifi_field = next(row for row in manifest['sources'] if row['field'] == 'wifiInfo')
-    assert wifi_field['status'] == 'partial' and 'wifi-hook-legacy' in wifi_field['writers']
+    assert wifi_field['status'] == 'enrolled' and 'wifi-hook-legacy' in wifi_field['writers']
     print('PASS: Artifact preparation and battery/WiFi/storage/uptime ownership contracts (remaining writers partial; native runtime not implied)')
 
 
@@ -464,7 +488,7 @@ def native_tests():
         sources = ['common/PXRuntimeArtifactPreparation.m', 'common/PXRuntimeArtifactWriter.m',
                    'common/PXRuntimeSourceStore.m', 'common/PXRuntimePublisher.m', 'common/PXIdentityValidator.m',
                    'common/PXProfileArtifactMutation.m', 'common/PXProfileLifecycleLease.m',
-                   'common/PXProfileDeletionJournal.m', 'common/PXRuntimeProfileSelection.m',
+                   'common/PXProfileDeletionJournal.m', 'common/PXRuntimeProfileSelection.m', 'common/PXWiFiHookResolver.m',
                    'tests/PXRuntimeArtifactPreparationTests.m']
         for scheme, defines in (('rootful', []), ('roothide', ['-DTHEOS_PACKAGE_SCHEME_ROOTHIDE=1'])):
             binary = folder / scheme
@@ -496,7 +520,7 @@ def native_tests():
             subprocess.run([str(objc_binary)], check=True, cwd=ROOT, timeout=60)
             wifi_binary = folder / ('wifi-hook-cache-' + scheme)
             subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions',
-                            '-Wall', '-Wextra', '-Werror=implicit-function-declaration', '-I', str(folder), *defines,
+                            '-Wall', '-Wextra', '-Werror=implicit-function-declaration', '-I', str(folder), '-I', str(ROOT / 'common'), *defines,
                             str(ROOT / 'tests/PXWiFiHookCacheTests.m'), '-framework', 'Foundation',
                             '-o', str(wifi_binary)], check=True, cwd=ROOT, timeout=60)
             subprocess.run([str(wifi_binary)], check=True, cwd=ROOT, timeout=60)
