@@ -263,6 +263,60 @@
         PXLog(@"[StorageManager] Failed to commit storage for %@: %@", profileId, error);
 }
 
+- (BOOL)commitDisplayStorageInfo:(NSDictionary *)values updateFilesystem:(BOOL)updateFilesystem error:(NSError **)error {
+    if (error) *error = nil;
+    if (![values isKindOfClass:NSDictionary.class]) {
+        if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios.storage-display" code:1 userInfo:@{NSLocalizedDescriptionKey: @"Invalid storage display values"}];
+        return NO;
+    }
+    id rawTotal = values[@"TotalStorage"], rawFree = values[@"FreeStorage"], rawFilesystem = values[@"FilesystemType"];
+    if (![rawTotal isKindOfClass:NSString.class] || ![rawFree isKindOfClass:NSString.class] ||
+        (updateFilesystem && rawFilesystem && ![rawFilesystem isKindOfClass:NSString.class])) {
+        if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios.storage-display" code:1 userInfo:@{NSLocalizedDescriptionKey: @"Invalid storage display scalar"}];
+        return NO;
+    }
+    // Freeze caller-owned strings before target resolution. Generation and
+    // display formatting stay outside this API; no setter can autosave a prefix.
+    NSString *total = [rawTotal copy], *free = [rawFree copy];
+    NSString *filesystem = updateFilesystem ? [rawFilesystem copy] : nil;
+    // A nested SourceStore body can only promise staged success. Reject it
+    // before lifecycle/target/cache work, so YES below always acknowledges commit.
+    if (!PXPerformStandaloneRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **admissionError) {
+        (void)tx; (void)admissionError; return YES;
+    }, error)) return NO;
+    PXProfileArtifactMutation *mutation = [PXProfileArtifactMutation acquireWithProfileIDResolver:^NSString *{
+        NSDictionary *selection = [NSDictionary dictionaryWithContentsOfFile:PXCurrentProfileInfoPath()];
+        return PXValidatedProfileID(selection[@"ProfileId"]);
+    } error:error];
+    @try {
+        if (!mutation) return NO;
+        id base = [_storageSettings copy] ?: @{};
+        if (![base isKindOfClass:NSDictionary.class]) {
+            if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios.storage-display" code:2 userInfo:@{NSLocalizedDescriptionKey: @"Invalid storage cache root"}];
+            return NO;
+        }
+        NSMutableDictionary *candidate = [base mutableCopy];
+        candidate[@"TotalStorage"] = total; candidate[@"FreeStorage"] = free;
+        if (updateFilesystem) candidate[@"FilesystemType"] = filesystem;
+        NSString *path = [mutation.profileDirectory stringByAppendingPathComponent:@"storage.plist"];
+        __block NSMutableDictionary *adoptable = nil;
+        BOOL committed = [mutation performSourceWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+            if (![tx setDictionary:candidate atPath:path error:writeError]) return NO;
+            NSDictionary *staged = [tx dictionaryAtPath:path error:writeError];
+            if (!staged) return NO;
+            // Allocate the detached cache before acknowledgement; failure here
+            // still aborts staging. After commit only the private pointer changes.
+            adoptable = [staged mutableCopy];
+            return adoptable != nil;
+        } error:error];
+        if (!committed) return NO;
+        // Keep lifecycle ownership through this direct cache adoption. No
+        // overridable provider/setter/notification callback runs in this step.
+        _storageSettings = adoptable;
+        return YES;
+    } @finally { [mutation invalidate]; }
+}
+
 - (BOOL)persistStorageToProfile:(NSString *)profileID current:(BOOL)current error:(NSError **)error {
     NSString *explicitID = PXValidatedProfileID(profileID);
     PXProfileArtifactMutation *mutation = [PXProfileArtifactMutation acquireWithProfileIDResolver:^NSString *{

@@ -18,6 +18,11 @@
 - (void)adoptCommittedStorageInfo:(NSDictionary *)storageInfo;
 /// Snapshot only; callers freeze the candidate before a source commit.
 - (NSDictionary *)currentStorageInfo;
+/// One owned commit for IdentifierManager's legacy display fallback. Values are
+/// strings for TotalStorage/FreeStorage and optional FilesystemType. Other cache
+/// keys survive. updateFilesystem=YES with no filesystem removes that field;
+/// NO preserves it. On failure source/cache are unchanged. No notifications.
+- (BOOL)commitDisplayStorageInfo:(NSDictionary *)values updateFilesystem:(BOOL)updateFilesystem error:(NSError * _Nullable * _Nullable)error;
 
 /**
  * Randomly choose a realistic device capacity

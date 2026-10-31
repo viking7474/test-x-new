@@ -179,6 +179,7 @@ static void (^gDuringStoragePreferenceMirror)(void);
 - (void)adoptCommittedStorageInfo:(NSDictionary *)storageInfo;
 - (NSDictionary *)fixtureStorage;
 - (NSDictionary *)currentStorageInfo;
+- (BOOL)commitDisplayStorageInfo:(NSDictionary *)values updateFilesystem:(BOOL)updateFilesystem error:(NSError **)error;
 - (void)setFixtureSnapshot:(NSDictionary *)record;
 - (void)saveToCurrentProfile;
 - (void)saveToProfile:(NSString *)profileId;
@@ -704,6 +705,151 @@ static void TestStorageLifecycle(void) {
     CheckArtifactLeaseFree();
 }
 
+static void TestStorageDisplayCommit(void) {
+    PXPreparedStorageFixture *manager = [PXPreparedStorageFixture new];
+    NSDictionary *base = @{ @"TotalStorage": @"64", @"FreeStorage": @"18", @"FilesystemType": @"old", @"keep": @[@"metadata"] };
+    NSDictionary *values = @{ @"TotalStorage": @"128", @"FreeStorage": @"32", @"FilesystemType": @"0x1A" };
+    [manager adoptCommittedStorageInfo:base];
+    CHECK(SetArtifactSelection(@"a"), "display storage canonical target seeded");
+    NSString *path = Path(PXProfileRootPath(@"a"), @"storage.plist");
+    NSString *identityPath = Path(PXProfileIdentityPath(@"a"), @"storage.plist");
+    NSData *identityBefore = [NSData dataWithContentsOfFile:identityPath];
+    NSData *otherBefore = [NSData dataWithContentsOfFile:Path(PXProfileRootPath(@"b"), @"storage.plist")];
+    NSError *error = [NSError errorWithDomain:@"stale" code:99 userInfo:nil];
+    NSUInteger writes = gWrites, local = gLocal, darwin = gDarwin;
+    __block NSUInteger commits = 0;
+    gStore.testCheckpoint = ^(NSString *phase) {
+        if ([phase isEqual:@"commit-written"]) {
+            commits++;
+            CHECK([[manager fixtureStorage] isEqual:base], "display storage cache remains old until source commit returns");
+        }
+    };
+    CHECK([manager commitDisplayStorageInfo:values updateFilesystem:YES error:&error] && !error && gWrites == writes + 3 && commits == 1,
+          "display storage commits one complete packet instead of three setter writes");
+    gStore.testCheckpoint = nil;
+    NSDictionary *stored = [NSDictionary dictionaryWithContentsOfFile:path];
+    CHECK([stored isEqual:[manager currentStorageInfo]] && [stored[@"TotalStorage"] isEqual:@"128"] &&
+          [stored[@"FreeStorage"] isEqual:@"32"] && [stored[@"FilesystemType"] isEqual:@"0x1A"] && [stored[@"keep"] isEqual:base[@"keep"]],
+          "display storage adopts the detached committed packet and preserves unrelated cache fields");
+    NSData *identityAfter = [NSData dataWithContentsOfFile:identityPath];
+    NSData *otherAfter = [NSData dataWithContentsOfFile:Path(PXProfileRootPath(@"b"), @"storage.plist")];
+    CHECK((identityBefore == identityAfter || [identityBefore isEqual:identityAfter]) &&
+          (otherBefore == otherAfter || [otherBefore isEqual:otherAfter]) && local == gLocal && darwin == gDarwin,
+          "display storage preserves root artifact location inactive target and notification policy");
+    CheckArtifactLeaseFree();
+
+    NSDictionary *withoutFilesystem = @{ @"TotalStorage": @"256", @"FreeStorage": @"80" };
+    CHECK([manager commitDisplayStorageInfo:withoutFilesystem updateFilesystem:NO error:&error] &&
+          [[manager currentStorageInfo][@"FilesystemType"] isEqual:@"0x1A"], "display storage can preserve unowned filesystem metadata");
+    CHECK([manager commitDisplayStorageInfo:withoutFilesystem updateFilesystem:YES error:&error] &&
+          ![manager currentStorageInfo][@"FilesystemType"] && ![NSDictionary dictionaryWithContentsOfFile:path][@"FilesystemType"],
+          "display storage absent owned filesystem retains removal semantics");
+
+    NSDictionary *before = AllArtifactFiles(), *cache = [manager currentStorageInfo];
+    NSData *marker = [NSData dataWithContentsOfFile:Path(Path(gRoot, @"control"), @"commit.plist")];
+    __block BOOL interrupted = NO;
+    gStore.testCheckpoint = ^(NSString *phase) {
+        if ([phase isEqual:@"source-written"] && !interrupted) { interrupted = YES; [NSException raise:@"fixture" format:@"display storage fault"]; }
+    };
+    CHECK(![manager commitDisplayStorageInfo:values updateFilesystem:YES error:&error] && error && interrupted,
+          "display storage reports a pre-marker source fault");
+    gStore.testCheckpoint = nil;
+    CHECK([before isEqual:AllArtifactFiles()] && [cache isEqual:[manager currentStorageInfo]] &&
+          [marker isEqual:[NSData dataWithContentsOfFile:Path(Path(gRoot, @"control"), @"commit.plist")]],
+          "display storage failure restores source bytes and marker without adopting cache");
+    CheckArtifactLeaseFree();
+    gStore.testCheckpoint = ^(NSString *phase) {
+        if ([phase isEqual:@"commit-written"]) [NSException raise:@"fixture" format:@"display post-marker housekeeping fault"];
+    };
+    CHECK([manager commitDisplayStorageInfo:values updateFilesystem:YES error:&error] && !error &&
+          [[manager currentStorageInfo] isEqual:[NSDictionary dictionaryWithContentsOfFile:path]],
+          "display storage acknowledged commit still adopts cache after post-marker housekeeping exception");
+    gStore.testCheckpoint = nil;
+    CheckArtifactLeaseFree();
+    before = AllArtifactFiles(); cache = [manager currentStorageInfo];
+
+    writes = gWrites;
+    NSArray *bad = @[@[], NSNull.null, @1, @{}, @{ @"TotalStorage": @[], @"FreeStorage": @"1" },
+        @{ @"TotalStorage": @"1", @"FreeStorage": @"1", @"FilesystemType": @[] }];
+    for (id invalid in bad) {
+        CHECK(![manager commitDisplayStorageInfo:invalid updateFilesystem:YES error:&error] && error.code == 1,
+              "display storage rejects malformed input before ownership and source writes");
+    }
+    CHECK(writes == gWrites && [cache isEqual:[manager currentStorageInfo]] && [before isEqual:AllArtifactFiles()],
+          "invalid display storage leaves cache and source untouched");
+    BOOL outer = [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+        (void)tx; (void)writeError;
+        NSError *nested = nil;
+        CHECK(![manager commitDisplayStorageInfo:values updateFilesystem:YES error:&nested] && nested,
+              "nested display storage rejects staged success before lifecycle target and cache work");
+        return YES; // Ignoring the inner NO must not allow the outer commit.
+    } error:&error];
+    CHECK(!outer && error && [before isEqual:AllArtifactFiles()] && [cache isEqual:[manager currentStorageInfo]],
+          "nested display storage poisons outer transaction without source or cache publication");
+    writes = gWrites;
+    [manager setFixtureSnapshot:cache];
+    NSUInteger copies = gStorageCopies;
+    PXProfileLifecycleLease *owner = [PXProfileLifecycleLease acquireInDirectory:gRoot error:NULL];
+    CHECK(owner && ![manager commitDisplayStorageInfo:values updateFilesystem:YES error:&error] && error.code == 12 && copies == gStorageCopies && gWrites == writes + 1,
+          "busy display storage performs only standalone admission before rejecting ownership");
+    [owner invalidate];
+    CHECK(SetArtifactIntent(YES), "display storage pending deletion seeded");
+    CHECK(![manager commitDisplayStorageInfo:values updateFilesystem:YES error:&error] && error.code == 27 && copies == gStorageCopies,
+          "pending deletion blocks display storage before cache preparation");
+    CHECK(SetArtifactIntent(NO), "display storage pending deletion cleared");
+    gDuringStorageCopy = ^{
+        CheckArtifactLeaseHeld();
+        NSError *nested = nil;
+        CHECK(![manager commitDisplayStorageInfo:values updateFilesystem:YES error:&nested] && nested.code == 12,
+              "display storage preparation rejects reentry without deadlock");
+    };
+    CHECK([manager commitDisplayStorageInfo:values updateFilesystem:YES error:&error] && !error, "display storage outer owner survives rejected reentry");
+    CheckArtifactLeaseFree();
+
+    NSMutableString *total = [@"512" mutableCopy], *free = [@"123" mutableCopy];
+    NSMutableDictionary *mutableValues = [@{ @"TotalStorage": total, @"FreeStorage": free } mutableCopy];
+    [manager setFixtureSnapshot:[manager currentStorageInfo]];
+    gDuringStorageCopy = ^{
+        [total setString:@"changed"]; [free setString:@"changed"]; [mutableValues removeAllObjects];
+        CHECK(SetArtifactSelection(@"b"), "display storage external selection drift seeded");
+    };
+    otherBefore = [NSData dataWithContentsOfFile:Path(PXProfileRootPath(@"b"), @"storage.plist")];
+    CHECK([manager commitDisplayStorageInfo:mutableValues updateFilesystem:NO error:&error] &&
+          [[NSDictionary dictionaryWithContentsOfFile:path][@"TotalStorage"] isEqual:@"512"] &&
+          [[NSDictionary dictionaryWithContentsOfFile:path][@"FreeStorage"] isEqual:@"123"] &&
+          [otherBefore isEqual:[NSData dataWithContentsOfFile:Path(PXProfileRootPath(@"b"), @"storage.plist")]],
+          "display storage freezes caller values and keeps one canonical target through selection drift");
+    CHECK(SetArtifactSelection(@"a"), "display storage canonical target restored");
+    CheckArtifactLeaseFree();
+    before = AllArtifactFiles();
+    [manager setFixtureSnapshot:[manager currentStorageInfo]];
+    gDuringStorageCopy = ^{ [NSException raise:@"fixture" format:@"display cache copy failure"]; };
+    BOOL threw = NO;
+    @try { [manager commitDisplayStorageInfo:values updateFilesystem:YES error:&error]; }
+    @catch (NSException *exception) { (void)exception; threw = YES; }
+    CHECK(threw && [before isEqual:AllArtifactFiles()], "display storage cache-copy exception releases ownership before propagating");
+    CheckArtifactLeaseFree();
+    CHECK(SetArtifactSelection(@"c"), "display storage legacy root-only target selected");
+    CHECK([manager commitDisplayStorageInfo:values updateFilesystem:YES error:&error] &&
+          ![NSFileManager.defaultManager fileExistsAtPath:PXProfileIdentityPath(@"c")], "display storage root-only profile requires no identity directory");
+    NSString *legacyRoot = PXProfileRootPath(@"c"), *displaced = Path(gRoot, @"display-displaced-c");
+    CHECK([NSFileManager.defaultManager moveItemAtPath:legacyRoot toPath:displaced error:NULL], "display storage missing-root fixture moved");
+    @try {
+        [manager setFixtureSnapshot:[manager currentStorageInfo]]; copies = gStorageCopies; before = AllArtifactFiles();
+        CHECK(![manager commitDisplayStorageInfo:values updateFilesystem:YES error:&error] && error && copies == gStorageCopies &&
+              ![NSFileManager.defaultManager fileExistsAtPath:legacyRoot] && [before isEqual:AllArtifactFiles()],
+              "display storage cannot recreate a removed profile or copy cache for it");
+    } @finally {
+        CHECK([NSFileManager.defaultManager moveItemAtPath:displaced toPath:legacyRoot error:NULL], "display storage missing-root fixture restored");
+    }
+    CHECK(SetArtifactSelection(nil), "display storage missing selection seeded");
+    writes = gWrites;
+    CHECK(![manager commitDisplayStorageInfo:values updateFilesystem:YES error:&error] && error && gWrites == writes + 2,
+          "display storage never invents a target for missing canonical selection");
+    CHECK(SetArtifactSelection(@"a"), "display storage fixture restores selection for following suites");
+    gDuringStorageCopy = nil; CheckArtifactLeaseFree();
+}
+
 static void TestUptimeLifecycle(void) {
     Tape(@[]);
     PXObservedUptimeFixture *manager = [PXObservedUptimeFixture new];
@@ -1205,7 +1351,7 @@ int main(void) {
         CHECK(gStore != nil && [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
             return [tx setDictionary:@{ @"keep": @YES } atPath:Path(PXProfileIdentityPath(@"a"), @"device_ids.plist") error:error];
         } error:NULL], "preparation source backend seeded");
-        TestPurePreparation(); TestManagerWrappers(); TestCompositionAndUptime(); TestStorageLifecycle(); TestStoragePreferenceWriters(); TestUptimeLifecycle(); TestWiFiLifecycle(); TestBatteryLifecycle(); TestBorrowedArtifactScope(); TestUptimeReadOnly();
+        TestPurePreparation(); TestManagerWrappers(); TestCompositionAndUptime(); TestStorageLifecycle(); TestStorageDisplayCommit(); TestStoragePreferenceWriters(); TestUptimeLifecycle(); TestWiFiLifecycle(); TestBatteryLifecycle(); TestBorrowedArtifactScope(); TestUptimeReadOnly();
         gStore = nil; [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
         printf("Runtime artifact preparation: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);
         return gFailures ? 1 : 0;

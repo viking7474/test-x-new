@@ -16,6 +16,9 @@ static NSDictionary *gProviderValues;
 static id gStorageOverride;
 static NSMutableArray *gStorageWrites;
 static NSUInteger gBatteryReloads, gBatteryGenerations;
+static NSUInteger gAtomicStorageCalls;
+static BOOL gAtomicStorageResult, gAtomicStorageFilesystem;
+static NSDictionary *gAtomicStorageValues;
 static BOOL gNoIdentity;
 static id PXReaderProviderValue(NSString *key, id fallback) { return gProviderValues[key] ?: fallback; }
 #define CHECK(value, label) do { gChecks++; if (!(value)) { gFailures++; fprintf(stderr, "FAIL: %s\n", label); } } while (0)
@@ -61,6 +64,7 @@ static PXIdentitySnapshot *PXFixtureCurrentIdentitySnapshot(void) { gCaptures++;
 - (NSDictionary *)currentIOSVersionInfo { gFallbacks++; return PXReaderProviderValue(@"ios", nil); }
 @end
 @interface PXReaderProvider (OptionalSelectors)
+- (BOOL)commitDisplayStorageInfo:(NSDictionary *)values updateFilesystem:(BOOL)updateFilesystem error:(NSError **)error;
 - (void)loadBatteryInfoFromDisk;
 - (NSString *)currentSSID;
 - (NSString *)currentBSSID;
@@ -103,6 +107,15 @@ static PXIdentitySnapshot *PXFixtureCurrentIdentitySnapshot(void) { gCaptures++;
 - (void)setFilesystemType:(NSString *)value { [gStorageWrites addObject:@[@"filesystem", value ?: NSNull.null]]; }
 @end
 // Deliberately lacks all setters. Its generated values must still be displayable.
+@interface PXReaderAtomicStorage : StorageManager
+@end
+@implementation PXReaderAtomicStorage
+- (BOOL)commitDisplayStorageInfo:(NSDictionary *)values updateFilesystem:(BOOL)updateFilesystem error:(NSError **)error {
+    gAtomicStorageCalls++; gAtomicStorageValues = [values copy]; gAtomicStorageFilesystem = updateFilesystem;
+    if (error) *error = gAtomicStorageResult ? nil : [NSError errorWithDomain:@"fixture.storage" code:1 userInfo:nil];
+    return gAtomicStorageResult;
+}
+@end
 @interface PXReaderStorageWithoutSetters : PXReaderProvider
 - (NSDictionary *)generateStorageForCapacity:(NSString *)capacity;
 @end
@@ -321,6 +334,31 @@ static void TestProviderFallbacks(PXReaderFixture *reader) {
         gProviderValues = @{ @"storage": @{ @"TotalStorage": @[], @"FreeStorage": @"32" } };
         (void)[reader currentValueForIdentifier:@"StorageSystem"];
         CHECK(gStorageWrites.count == 3 && ![gStorageWrites[0][1] isEqual:@[]], "invalid storage member is never partially adopted");
+
+        [gStorageWrites removeAllObjects];
+        gStorageOverride = [PXReaderAtomicStorage new];
+        gProviderValues = @{ @"storage": storage };
+        gAtomicStorageResult = YES;
+        NSUInteger atomicCalls = gAtomicStorageCalls;
+        CHECK([[reader currentValueForIdentifier:@"StorageSystem"] isEqual:@"Total: 128 GB, Free: 32 GB"] && gAtomicStorageCalls == atomicCalls + 1 &&
+              gAtomicStorageFilesystem && [gAtomicStorageValues isEqual:storage] && !gStorageWrites.count,
+              "modern generated storage commits one complete packet without invoking legacy setters");
+        gAtomicStorageResult = NO; atomicCalls = gAtomicStorageCalls;
+        CHECK([[reader currentValueForIdentifier:@"StorageSystem"] isEqual:@"Total: 128 GB, Free: 32 GB"] && gAtomicStorageCalls == atomicCalls + 1 && !gStorageWrites.count,
+              "failed modern storage commit retains candidate display without retrying legacy persistence");
+        gProviderValues = @{ @"storage": @{ @"TotalStorage": @"128", @"FreeStorage": @"32", @"FilesystemType": @[] } };
+        (void)[reader currentValueForIdentifier:@"StorageSystem"];
+        CHECK(!gAtomicStorageFilesystem && !gAtomicStorageValues[@"FilesystemType"], "modern packet preserves filesystem on malformed optional input");
+        gProviderValues = @{ @"storage": @{ @"TotalStorage": @"128", @"FreeStorage": @"32" } };
+        (void)[reader currentValueForIdentifier:@"StorageSystem"];
+        CHECK(gAtomicStorageFilesystem && !gAtomicStorageValues[@"FilesystemType"], "modern packet retains absent-filesystem removal intent");
+        gProviderValues = @{}; atomicCalls = gAtomicStorageCalls;
+        NSString *modernFallback = [reader currentValueForIdentifier:@"StorageSystem"];
+        NSString *expectedFallback = [NSString stringWithFormat:@"Total: %@ GB, Free: %@ GB", gAtomicStorageValues[@"TotalStorage"], gAtomicStorageValues[@"FreeStorage"]];
+        CHECK([modernFallback isEqual:expectedFallback] && gAtomicStorageCalls == atomicCalls + 1 && gAtomicStorageFilesystem &&
+              [gAtomicStorageValues[@"FilesystemType"] isEqual:@"0x1A"] && !gStorageWrites.count,
+              "modern final fallback also attempts exactly one complete commit on failure");
+        gAtomicStorageResult = YES; gStorageOverride = nil;
 
         gProviderValues = @{ @"batteryLevel": @0.5 };
         NSUInteger generated = gBatteryGenerations, reloads = gBatteryReloads;

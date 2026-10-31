@@ -136,6 +136,9 @@ def source_contracts():
         assert f'[{packet} isKindOfClass:NSDictionary.class]' in display
     for setter in ('setTotalStorageCapacity:', 'setFreeStorageSpace:', 'setFilesystemType:'):
         assert display.count(f'respondsToSelector:@selector({setter})') == 2
+    assert display.count('respondsToSelector:@selector(commitDisplayStorageInfo:updateFilesystem:error:)') == 2
+    assert display.count('[sharedManager commitDisplayStorageInfo:values updateFilesystem:') == 2
+    assert 'if (![sharedManager commitDisplayStorageInfo:' in display
     assert '(!rawFilesystem || filesystem)' in display
     for receiver, keys in (('wifiInfo', ('ssid', 'bssid')), ('storageDict', ('TotalStorage', 'FreeStorage'))):
         for key in keys:

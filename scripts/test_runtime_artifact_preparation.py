@@ -36,6 +36,7 @@ WRAPPERS = {
         '- (NSDictionary *)batteryRecordForLevel:(NSString *)level lowPowerMode:(BOOL)enabled',
         '- (BOOL)persistBatteryRecord:(NSDictionary *)record', '- (BOOL)mirrorBatteryRecord:(NSDictionary *)record error:(NSError **)error']),
     'PXPreparedStorageMethod.inc': ('common/StorageManager.m', ['- (NSDictionary *)generateStorageForCapacity:(NSString *)capacity', '- (void)adoptCommittedStorageInfo:(NSDictionary *)storageInfo', '- (NSDictionary *)currentStorageInfo',
+        '- (BOOL)commitDisplayStorageInfo:(NSDictionary *)values updateFilesystem:(BOOL)updateFilesystem error:(NSError **)error',
         '- (void)saveToCurrentProfile', '- (void)saveToProfile:(NSString *)profileId',
         '- (BOOL)persistStorageToProfile:(NSString *)profileID current:(BOOL)current error:(NSError **)error',
         '- (void)setTotalStorageCapacity:(NSString *)capacity', '- (void)setFreeStorageSpace:(NSString *)freeSpace', '- (void)setFilesystemType:(NSString *)fsType',
@@ -118,6 +119,16 @@ def source_contracts():
                  'legacy uptime getters retain safe default policy when generation is busy'):
         assert case in read('tests/PXRuntimeArtifactPreparationTests.m'), case
     storage = read('common/StorageManager.m')
+    display = identifier.method(storage, '- (BOOL)commitDisplayStorageInfo:(NSDictionary *)values updateFilesystem:(BOOL)updateFilesystem error:(NSError **)error')
+    assert display.index('[rawTotal copy]') < display.index('acquireWithProfileIDResolver:') < display.index('dictionaryWithContentsOfFile:PXCurrentProfileInfoPath()') < display.index('[_storageSettings copy]')
+    assert 'PXActiveProfileID()' not in display and 'mutation.identityDirectory' not in display
+    assert display.count('[mutation performSourceWrite:') == 1 and display.count('[tx setDictionary:') == 1
+    assert display.index('PXPerformStandaloneRuntimeSourceWrite') < display.index('acquireWithProfileIDResolver:')
+    assert 'mutation.profileDirectory' in display and 'if (updateFilesystem) candidate[@"FilesystemType"] = filesystem;' in display
+    assert display.index('adoptable = [staged mutableCopy]') < display.index('if (!committed) return NO;') < display.index('_storageSettings = adoptable;') < display.index('@finally { [mutation invalidate]; }')
+    assert 'saveToCurrentProfile' not in display and 'adoptCommittedStorageInfo:' not in display and 'PostNotification' not in display
+    from test_profile_creation_flow import check_macro_arity
+    check_macro_arity(read('tests/PXRuntimeArtifactPreparationTests.m'), 'PXRuntimeArtifactPreparationTests.m')
     persist = identifier.method(storage, '- (BOOL)persistStorageToProfile:(NSString *)profileID current:(BOOL)current error:(NSError **)error')
     assert persist.index('acquireWithProfileIDResolver:') < persist.index('dictionaryWithContentsOfFile:PXCurrentProfileInfoPath()') < persist.index('[_storageSettings copy]')
     assert 'mutation.profileDirectory' in persist and 'mutation.identityDirectory' not in persist
@@ -136,6 +147,11 @@ def source_contracts():
     assert 'PostNotification' not in flag and 'dispatch_' not in flag and 'writeToFile:' not in flag
     assert '@synchronized (self)' in identifier.method(storage, '- (BOOL)isStorageSpoofingEnabled')
     fixture = read('tests/PXRuntimeArtifactPreparationTests.m')
+    for case in ('display storage commits one complete packet instead of three setter writes',
+                 'display storage failure restores source bytes and marker without adopting cache',
+                 'nested display storage poisons outer transaction without source or cache publication',
+                 'display storage freezes caller values and keeps one canonical target through selection drift'):
+        assert case in fixture, case
     assert 'gWrites++; return [gStore performStandaloneWrite:body error:error];' in fixture
     assert '#define NSUserDefaults PXStoragePreferenceDefaultsFixture' in fixture
     for case in ('storage flag mirror observes committed source and cache after source unlock',

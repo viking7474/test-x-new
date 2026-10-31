@@ -2899,9 +2899,17 @@ return @"Not Set";
                     if (total && free) {
                         id rawFilesystem = storageInfo[@"FilesystemType"];
                         NSString *filesystem = PXIdentifierDisplayString(rawFilesystem);
-                        if ([sharedManager respondsToSelector:@selector(setTotalStorageCapacity:)]) [sharedManager setTotalStorageCapacity:total];
-                        if ([sharedManager respondsToSelector:@selector(setFreeStorageSpace:)]) [sharedManager setFreeStorageSpace:free];
-                        if ((!rawFilesystem || filesystem) && [sharedManager respondsToSelector:@selector(setFilesystemType:)]) [sharedManager setFilesystemType:filesystem];
+                        if ([sharedManager respondsToSelector:@selector(commitDisplayStorageInfo:updateFilesystem:error:)]) {
+                            NSMutableDictionary *values = [@{ @"TotalStorage": total, @"FreeStorage": free } mutableCopy];
+                            if (filesystem) values[@"FilesystemType"] = filesystem;
+                            NSError *storageError = nil;
+                            if (![sharedManager commitDisplayStorageInfo:values updateFilesystem:(!rawFilesystem || filesystem != nil) error:&storageError])
+                                PXLog(@"[StorageManager] Display storage commit failed: %@", storageError);
+                        } else {
+                            if ([sharedManager respondsToSelector:@selector(setTotalStorageCapacity:)]) [sharedManager setTotalStorageCapacity:total];
+                            if ([sharedManager respondsToSelector:@selector(setFreeStorageSpace:)]) [sharedManager setFreeStorageSpace:free];
+                            if ((!rawFilesystem || filesystem) && [sharedManager respondsToSelector:@selector(setFilesystemType:)]) [sharedManager setFilesystemType:filesystem];
+                        }
                         return [NSString stringWithFormat:@"Total: %@ GB, Free: %@ GB", total, free];
                     }
                 }
@@ -2917,9 +2925,16 @@ return @"Not Set";
         if (storageManager && [storageManager respondsToSelector:@selector(sharedManager)]) {
             id sharedManager = [storageManager sharedManager];
             if (sharedManager) {
-                if ([sharedManager respondsToSelector:@selector(setTotalStorageCapacity:)]) [sharedManager setTotalStorageCapacity:storageCapacity];
-                if ([sharedManager respondsToSelector:@selector(setFreeStorageSpace:)]) [sharedManager setFreeStorageSpace:freeSpaceValue];
-                if ([sharedManager respondsToSelector:@selector(setFilesystemType:)]) [sharedManager setFilesystemType:@"0x1A"];
+                if ([sharedManager respondsToSelector:@selector(commitDisplayStorageInfo:updateFilesystem:error:)]) {
+                    NSDictionary *values = @{ @"TotalStorage": storageCapacity, @"FreeStorage": freeSpaceValue, @"FilesystemType": @"0x1A" };
+                    NSError *storageError = nil;
+                    if (![sharedManager commitDisplayStorageInfo:values updateFilesystem:YES error:&storageError])
+                        PXLog(@"[StorageManager] Display fallback commit failed: %@", storageError);
+                } else {
+                    if ([sharedManager respondsToSelector:@selector(setTotalStorageCapacity:)]) [sharedManager setTotalStorageCapacity:storageCapacity];
+                    if ([sharedManager respondsToSelector:@selector(setFreeStorageSpace:)]) [sharedManager setFreeStorageSpace:freeSpaceValue];
+                    if ([sharedManager respondsToSelector:@selector(setFilesystemType:)]) [sharedManager setFilesystemType:@"0x1A"];
+                }
             }
         }
         
