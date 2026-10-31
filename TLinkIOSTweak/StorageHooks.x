@@ -4,6 +4,8 @@
 #import "TLinkIOSLogging.h"
 #import "PXNativeHookCoordinator.h"
 #import <Foundation/Foundation.h>
+#import <objc/runtime.h>
+#include <string.h>
 #import <dispatch/dispatch.h>
 #import <sys/mount.h>
 #import <dlfcn.h>
@@ -52,8 +54,6 @@ static CFTypeRef (*orig_IORegistryEntryCreateCFProperty)(io_registry_entry_t ent
 
 // Forward declarations
 static NSString *getCurrentBundleID(void);
-static NSDictionary *loadScopedApps(void);
-static BOOL isInScopedAppsList(void);
 static void PXStorageRefreshNativeSnapshot(void);
 static void PXStorageScheduleNativeRefresh(dispatch_queue_t queue);
 
@@ -96,41 +96,6 @@ static NSString *getCurrentBundleID(void) {
         return [mainBundle bundleIdentifier];
     } @catch (NSException *e) {
         return nil;
-    }
-}
-
-// Load scoped apps from the plist file
-static NSDictionary *loadScopedApps(void) {
-    PX_RUNTIME_READ_OPERATION;
-    return PXScopedAppsSnapshot();
-}
-
-// Check if the current app is in the scoped apps list
-static BOOL isInScopedAppsList(void) {
-    PX_RUNTIME_READ_OPERATION;
-    @try {
-        NSString *bundleID = getCurrentBundleID();
-        if (!bundleID || [bundleID length] == 0) {
-            return NO;
-        }
-        
-        NSDictionary *scopedApps = loadScopedApps();
-        if (!scopedApps || scopedApps.count == 0) {
-            return NO;
-        }
-        
-        // Check if this bundle ID is in the scoped apps dictionary
-        id appEntry = scopedApps[bundleID];
-        if (!appEntry || ![appEntry isKindOfClass:[NSDictionary class]]) {
-            return NO;
-        }
-        
-        // Check if the app is enabled
-        BOOL isEnabled = [appEntry[@"enabled"] boolValue];
-        return isEnabled;
-        
-    } @catch (NSException *e) {
-        return NO;
     }
 }
 
@@ -558,6 +523,98 @@ static int PXStorageBoundedMountCount(int result, int bufsize, size_t entrySize)
 #define NSFileSystemFreeNodes @"NSFileSystemFreeNodes"
 #define NSFileSystemFreeOperationCount @"NSFileSystemFreeOperationCount"
 
+// Classify only supported capacity keys before touching runtime/profile state.
+static NSUInteger PXStorageCapacityKeyKind(id key) {
+    if (![key isKindOfClass:NSString.class]) return 0;
+    if ([key isEqualToString:NSURLVolumeTotalCapacityKey]) return 1;
+    if ([key isEqualToString:NSURLVolumeAvailableCapacityKey] ||
+        [key isEqualToString:@"NSURLVolumeAvailableCapacityForImportantUsageKey"]) return 2;
+    if ([key isEqualToString:@"NSURLVolumeAvailableCapacityForOpportunisticUsageKey"]) return 3;
+    return 0;
+}
+
+static BOOL PXStorageKeysContainCapacity(id keys) {
+    if (![keys isKindOfClass:NSArray.class]) return NO;
+    for (id key in keys) if (PXStorageCapacityKeyKind(key)) return YES;
+    return NO;
+}
+
+static BOOL PXStorageAttributesHaveCapacity(id values) {
+    return [values isKindOfClass:NSDictionary.class] &&
+        ([values[NSFileSystemSize] isKindOfClass:NSNumber.class] || [values[NSFileSystemFreeSize] isKindOfClass:NSNumber.class]);
+}
+
+static BOOL PXStorageResourceValuesHaveCapacity(id values, id keys) {
+    if (![values isKindOfClass:NSDictionary.class] || ![keys isKindOfClass:NSArray.class]) return NO;
+    for (id key in keys) if (PXStorageCapacityKeyKind(key) && [values[key] isKindOfClass:NSNumber.class]) return YES;
+    return NO;
+}
+
+static NSNumber *PXStorageCapacityValue(NSUInteger kind, uint64_t total, uint64_t free) {
+    if (!total || free > total) return nil;
+    if (kind == 1) return @(total);
+    if (kind == 2) return @(free); // Zero is a valid full-disk result.
+    if (kind == 3) return @((uint64_t)((double)free * 0.9));
+    return nil;
+}
+
+static NSDictionary *PXStorageAttributesWithCapacity(NSDictionary *original, uint64_t total, uint64_t free) {
+    if (!PXStorageAttributesHaveCapacity(original) || !total || free > total) return original;
+    NSMutableDictionary *modified = nil;
+    id existing = original[NSFileSystemSize];
+    NSNumber *value = [existing isKindOfClass:NSNumber.class] ? @(total) : nil;
+    if (value && ![existing isEqualToNumber:value]) { modified = [original mutableCopy]; modified[NSFileSystemSize] = value; }
+    existing = original[NSFileSystemFreeSize];
+    value = [existing isKindOfClass:NSNumber.class] ? @(free) : nil;
+    if (value && ![existing isEqualToNumber:value]) {
+        if (!modified) modified = [original mutableCopy];
+        modified[NSFileSystemFreeSize] = value;
+    }
+    return modified ?: original;
+}
+
+static NSDictionary *PXStorageResourceValuesWithCapacity(NSDictionary *original, NSArray *keys, uint64_t total, uint64_t free) {
+    if (!PXStorageResourceValuesHaveCapacity(original, keys) || !total || free > total) return original;
+    NSMutableDictionary *modified = nil;
+    for (id key in keys) {
+        NSUInteger kind = PXStorageCapacityKeyKind(key);
+        if (!kind) continue;
+        id existing = (modified ?: original)[key];
+        if (![existing isKindOfClass:NSNumber.class]) continue;
+        NSNumber *value = PXStorageCapacityValue(kind, total, free);
+        if (value && ![existing isEqualToNumber:value]) {
+            if (!modified) modified = [original mutableCopy];
+            modified[key] = value;
+        }
+    }
+    return modified ?: original;
+}
+
+static const char *PXStorageSkipTypeQualifiers(const char *type) {
+    while (type && *type && strchr("rnNoORV", *type)) type++;
+    return type;
+}
+
+static BOOL PXStorageObjectEncoding(const char *type) {
+    type = PXStorageSkipTypeQualifiers(type);
+    return type && type[0] == '@' && (type[1] == 0 || type[1] == '"');
+}
+
+// Optional compatibility selectors have no stable SDK contract. Admit only
+// the original uint64/object/NSError** ABI; never install a null-%orig method.
+static BOOL PXStorageCapacityCompatibilityMatches(Class cls, SEL selector) {
+    Method entry = cls && selector ? class_getInstanceMethod(cls, selector) : NULL;
+    if (!entry || method_getNumberOfArguments(entry) != 4) return NO;
+    char result[128] = {0}, url[128] = {0}, error[128] = {0};
+    method_getReturnType(entry, result, sizeof(result)); result[sizeof(result) - 1] = 0;
+    method_getArgumentType(entry, 2, url, sizeof(url)); url[sizeof(url) - 1] = 0;
+    method_getArgumentType(entry, 3, error, sizeof(error)); error[sizeof(error) - 1] = 0;
+    const char *returnType = PXStorageSkipTypeQualifiers(result);
+    const char *errorType = PXStorageSkipTypeQualifiers(error);
+    return returnType[0] == 'Q' && returnType[1] == 0 && PXStorageObjectEncoding(url) &&
+        errorType[0] == '^' && PXStorageObjectEncoding(errorType + 1);
+}
+
 // Function pointer for statfs
 static int (*orig_statfs)(const char *path, struct statfs *buf);
 
@@ -807,43 +864,20 @@ static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t en
 - (NSDictionary *)attributesOfFileSystemForPath:(NSString *)path error:(NSError **)error {
     PX_RUNTIME_READ_OPERATION;
     NSDictionary *originalAttributes = %orig;
-    
-    if (!originalAttributes || !shouldApplyStorageSpoofing()) {
-        return originalAttributes;
-    }
-    
+    if (!PXStorageAttributesHaveCapacity(originalAttributes) || !shouldApplyStorageSpoofing()) return originalAttributes;
     @try {
-        // Create a mutable copy of the attributes
-        NSMutableDictionary *modifiedAttributes = [originalAttributes mutableCopy];
-        
-        // Get storage values with appropriate units for this app
-        uint64_t totalBytes, freeBytes;
+        uint64_t totalBytes = 0, freeBytes = 0;
         getStorageValuesForApp(&totalBytes, &freeBytes);
-        
-        // Update the total size
-        if (totalBytes > 0) {
-            modifiedAttributes[NSFileSystemSize] = @(totalBytes);
-        }
-        
-        // Update the free size
-        if (freeBytes > 0) {
-            modifiedAttributes[NSFileSystemFreeSize] = @(freeBytes);
-        }
-        
-        return modifiedAttributes;
-    } @catch (NSException *exception) {
-        // If an error occurs, return original attributes
-        return originalAttributes;
-    }
+        return PXStorageAttributesWithCapacity(originalAttributes, totalBytes, freeBytes);
+    } @catch (NSException *exception) { return originalAttributes; }
 }
 
-// Add new method for iOS 13+ support
-- (NSURL *)URLForDirectory:(NSSearchPathDirectory)directory inDomain:(NSSearchPathDomainMask)domain appropriateForURL:(NSURL *)url create:(BOOL)shouldCreate error:(NSError **)error {
-    NSURL *originalURL = %orig;
-    return originalURL;
-}
+%end
 
-// Hook the direct volume capacity method added in iOS 11+
+%group PXStorageImportantCapacity
+%hook NSFileManager
+
+// Optional compatibility selector; initialization validates its runtime ABI.
 - (unsigned long long)volumeAvailableCapacityForImportantUsageForURL:(NSURL *)url error:(NSError **)error {
     PX_RUNTIME_READ_OPERATION;
     unsigned long long originalCapacity = %orig;
@@ -857,7 +891,7 @@ static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t en
         uint64_t totalBytes, freeBytes;
         getStorageValuesForApp(&totalBytes, &freeBytes);
         
-        if (freeBytes > 0) {
+        if (totalBytes > 0 && freeBytes <= totalBytes) {
             return freeBytes;
         }
     } @catch (NSException *exception) {
@@ -867,7 +901,13 @@ static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t en
     return originalCapacity;
 }
 
-// Hook the direct total capacity method added in iOS 11+
+%end
+%end
+
+%group PXStorageTotalCapacity
+%hook NSFileManager
+
+// Optional compatibility selector.
 - (unsigned long long)volumeTotalCapacityForURL:(NSURL *)url error:(NSError **)error {
     PX_RUNTIME_READ_OPERATION;
     unsigned long long originalCapacity = %orig;
@@ -891,7 +931,13 @@ static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t en
     return originalCapacity;
 }
 
-// Add iOS 13+ method
+%end
+%end
+
+%group PXStorageOpportunisticCapacity
+%hook NSFileManager
+
+// Optional compatibility selector.
 - (unsigned long long)volumeAvailableCapacityForOpportunisticUsageForURL:(NSURL *)url error:(NSError **)error {
     PX_RUNTIME_READ_OPERATION;
     unsigned long long originalCapacity = %orig;
@@ -905,7 +951,7 @@ static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t en
         uint64_t totalBytes, freeBytes;
         getStorageValuesForApp(&totalBytes, &freeBytes);
         
-        if (freeBytes > 0) {
+        if (totalBytes > 0 && freeBytes <= totalBytes) {
             // Calculate 90% of free space with high precision
             return (uint64_t)((double)freeBytes * 0.9);
         }
@@ -917,112 +963,37 @@ static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t en
 }
 
 %end
+%end
 
 %hook NSURL
 
 // Hook NSURL's getResourceValue:forKey:error: method for iOS 15+ compatibility
 - (BOOL)getResourceValue:(id *)value forKey:(NSURLResourceKey)key error:(NSError **)error {
+    NSUInteger kind = PXStorageCapacityKeyKind(key);
+    if (!kind) return %orig;
     PX_RUNTIME_READ_OPERATION;
     BOOL result = %orig;
-    
-    if (!result || !value || !*value || !key || !shouldApplyStorageSpoofing()) {
-        return result;
-    }
-    
+    if (!result || !value || ![*value isKindOfClass:NSNumber.class] || !shouldApplyStorageSpoofing()) return result;
     @try {
-        // Get storage values with appropriate units for this app
-        uint64_t totalBytes, freeBytes;
+        uint64_t totalBytes = 0, freeBytes = 0;
         getStorageValuesForApp(&totalBytes, &freeBytes);
-        
-        // Check if this is a volume resource key related to storage
-        if ([key isEqualToString:NSURLVolumeTotalCapacityKey]) {
-            if (totalBytes > 0) {
-                // First check if the existing value is a number
-                if ([*value isKindOfClass:[NSNumber class]]) {
-                    *value = @(totalBytes);
-                }
-            }
-        }
-        else if ([key isEqualToString:NSURLVolumeAvailableCapacityKey]) {
-            if (freeBytes > 0) {
-                // First check if the existing value is a number
-                if ([*value isKindOfClass:[NSNumber class]]) {
-                    *value = @(freeBytes);
-                }
-            }
-        }
-        // iOS 11+ key
-        else if ([key isEqualToString:@"NSURLVolumeAvailableCapacityForImportantUsageKey"]) {
-            if (freeBytes > 0) {
-                // First check if the existing value is a number
-                if ([*value isKindOfClass:[NSNumber class]]) {
-                    *value = @(freeBytes);
-                }
-            }
-        }
-        // iOS 11+ key
-        else if ([key isEqualToString:@"NSURLVolumeAvailableCapacityForOpportunisticUsageKey"]) {
-            if (freeBytes > 0) {
-                // First check if the existing value is a number
-                if ([*value isKindOfClass:[NSNumber class]]) {
-                    *value = @((uint64_t)((double)freeBytes * 0.9)); // Use 90% of available space for opportunistic usage
-                }
-            }
-        }
-    } @catch (NSException *exception) {
-        // If an error occurs, just leave the value unchanged
-    }
-    
+        NSNumber *replacement = PXStorageCapacityValue(kind, totalBytes, freeBytes);
+        if (replacement && ![*value isEqualToNumber:replacement]) *value = replacement;
+    } @catch (NSException *exception) { }
     return result;
 }
 
 // Hook NSURL's resourceValuesForKeys:error: method for iOS 15+ compatibility
 - (NSDictionary<NSURLResourceKey, id> *)resourceValuesForKeys:(NSArray<NSURLResourceKey> *)keys error:(NSError **)error {
+    if (!PXStorageKeysContainCapacity(keys)) return %orig;
     PX_RUNTIME_READ_OPERATION;
-    NSDictionary<NSURLResourceKey, id> *originalValues = %orig;
-    
-    if (!originalValues || !keys || !shouldApplyStorageSpoofing()) {
-        return originalValues;
-    }
-    
+    NSDictionary *originalValues = %orig;
+    if (!PXStorageResourceValuesHaveCapacity(originalValues, keys) || !shouldApplyStorageSpoofing()) return originalValues;
     @try {
-        // Get storage values with appropriate units for this app
-        uint64_t totalBytes, freeBytes;
+        uint64_t totalBytes = 0, freeBytes = 0;
         getStorageValuesForApp(&totalBytes, &freeBytes);
-        
-        NSMutableDictionary *modifiedValues = [originalValues mutableCopy];
-        
-        // Check if any of the keys are storage-related
-        for (NSURLResourceKey key in keys) {
-            if ([key isEqualToString:NSURLVolumeTotalCapacityKey]) {
-                if (totalBytes > 0) {
-                    modifiedValues[key] = @(totalBytes);
-                }
-            }
-            else if ([key isEqualToString:NSURLVolumeAvailableCapacityKey]) {
-                if (freeBytes > 0) {
-                    modifiedValues[key] = @(freeBytes);
-                }
-            }
-            // iOS 11+ key
-            else if ([key isEqualToString:@"NSURLVolumeAvailableCapacityForImportantUsageKey"]) {
-                if (freeBytes > 0) {
-                    modifiedValues[key] = @(freeBytes);
-                }
-            }
-            // iOS 11+ key
-            else if ([key isEqualToString:@"NSURLVolumeAvailableCapacityForOpportunisticUsageKey"]) {
-                if (freeBytes > 0) {
-                    modifiedValues[key] = @((uint64_t)((double)freeBytes * 0.9)); // Use 90% of available space for opportunistic usage
-                }
-            }
-        }
-        
-        return modifiedValues;
-    } @catch (NSException *exception) {
-        // If an error occurs, return original values
-        return originalValues;
-    }
+        return PXStorageResourceValuesWithCapacity(originalValues, keys, totalBytes, freeBytes);
+    } @catch (NSException *exception) { return originalValues; }
 }
 
 %end
@@ -1143,6 +1114,16 @@ static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t en
             // Initialize Objective-C hooks for scoped apps only
             PXFileDebugAIDA64Log("[Storage.ctor] before %%init");
             %init;
+            Class fileManagerClass = objc_getClass("NSFileManager");
+            if (PXStorageCapacityCompatibilityMatches(fileManagerClass, @selector(volumeAvailableCapacityForImportantUsageForURL:error:))) {
+                %init(PXStorageImportantCapacity);
+            }
+            if (PXStorageCapacityCompatibilityMatches(fileManagerClass, @selector(volumeTotalCapacityForURL:error:))) {
+                %init(PXStorageTotalCapacity);
+            }
+            if (PXStorageCapacityCompatibilityMatches(fileManagerClass, @selector(volumeAvailableCapacityForOpportunisticUsageForURL:error:))) {
+                %init(PXStorageOpportunisticCapacity);
+            }
             PXFileDebugAIDA64Log("[Storage.ctor] after %%init");
             
             PXLog(@"[StorageHooks] Storage hooks successfully initialized for scoped app: %@", currentBundleID);

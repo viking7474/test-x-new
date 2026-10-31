@@ -27,6 +27,23 @@ STORAGE_READ_SIGNATURES = [
     '- (void)setDefaultStorage', '- (void)setDefaultStorageForProfile:(NSString *)profileID',
     '- (void)loadFromCurrentProfile', '- (BOOL)loadFromProfile:(NSString *)profileId',
 ]
+STORAGE_OBJC_METHODS = [
+    ('- (NSDictionary *)attributesOfFileSystemForPath:(NSString *)path error:(NSError **)error', '[self fixtureAttributes:path error:error]'),
+    ('- (unsigned long long)volumeAvailableCapacityForImportantUsageForURL:(NSURL *)url error:(NSError **)error', '[self fixtureCapacity:url error:error]'),
+    ('- (unsigned long long)volumeTotalCapacityForURL:(NSURL *)url error:(NSError **)error', '[self fixtureCapacity:url error:error]'),
+    ('- (unsigned long long)volumeAvailableCapacityForOpportunisticUsageForURL:(NSURL *)url error:(NSError **)error', '[self fixtureCapacity:url error:error]'),
+    ('- (BOOL)getResourceValue:(id *)value forKey:(NSURLResourceKey)key error:(NSError **)error', '[self fixtureResource:value key:key error:error]'),
+    ('- (NSDictionary<NSURLResourceKey, id> *)resourceValuesForKeys:(NSArray<NSURLResourceKey> *)keys error:(NSError **)error', '[self fixtureResources:keys error:error]'),
+]
+STORAGE_OBJC_HELPERS = [
+    'static NSUInteger PXStorageCapacityKeyKind(id key)', 'static BOOL PXStorageKeysContainCapacity(id keys)',
+    'static BOOL PXStorageAttributesHaveCapacity(id values)', 'static BOOL PXStorageResourceValuesHaveCapacity(id values, id keys)',
+    'static NSNumber *PXStorageCapacityValue(NSUInteger kind, uint64_t total, uint64_t free)',
+    'static NSDictionary *PXStorageAttributesWithCapacity(NSDictionary *original, uint64_t total, uint64_t free)',
+    'static NSDictionary *PXStorageResourceValuesWithCapacity(NSDictionary *original, NSArray *keys, uint64_t total, uint64_t free)',
+    'static const char *PXStorageSkipTypeQualifiers(const char *type)', 'static BOOL PXStorageObjectEncoding(const char *type)',
+    'static BOOL PXStorageCapacityCompatibilityMatches(Class cls, SEL selector)',
+]
 WRAPPERS = {
     'PXPreparedWiFiMethod.inc': ('common/WiFiManager.m', ['- (NSDictionary *)generateWiFiInfo', '- (void)adoptCommittedWiFiInfo:(NSDictionary *)wifiInfo profileID:(NSString *)profileID']),
     'PXOwnedWiFiMethods.inc': ('common/WiFiManager.m', [
@@ -154,6 +171,25 @@ def source_contracts():
     targeted = identifier.method(storage, '- (NSString *)randomizeStorageCapacityForProfile:(NSString *)profileID')
     assert 'PXProfileIdentityPath(target)' in targeted and 'PXActiveProfileID' not in targeted
     hooks = read('TLinkIOSTweak/StorageHooks.x')
+    import re
+    for group, selector in (('PXStorageImportantCapacity', 'volumeAvailableCapacityForImportantUsageForURL:error:'),
+                            ('PXStorageTotalCapacity', 'volumeTotalCapacityForURL:error:'),
+                            ('PXStorageOpportunisticCapacity', 'volumeAvailableCapacityForOpportunisticUsageForURL:error:')):
+        assert hooks.count('%group ' + group) == 1 and hooks.count('%init(' + group + ')') == 1
+        pattern = r'if \(PXStorageCapacityCompatibilityMatches\(fileManagerClass, @selector\(' + re.escape(selector) + r'\)\)\) \{\s*%init\(' + group + r'\);'
+        assert re.search(pattern, hooks), 'optional hook must be gated independently by ABI'
+    assert 'URLForDirectory:' not in hooks and 'isInScopedAppsList' not in hooks and 'loadScopedApps' not in hooks
+    single = identifier.method(hooks, STORAGE_OBJC_METHODS[4][0]); batch = identifier.method(hooks, STORAGE_OBJC_METHODS[5][0])
+    assert single.index('if (!kind) return %orig;') < single.index('PX_RUNTIME_READ_OPERATION;')
+    assert batch.index('if (!PXStorageKeysContainCapacity(keys)) return %orig;') < batch.index('PX_RUNTIME_READ_OPERATION;')
+    assert batch.index('PXStorageResourceValuesHaveCapacity(originalValues, keys)') < batch.index('getStorageValuesForApp(')
+    value_helper = identifier.method(hooks, STORAGE_OBJC_HELPERS[4])
+    assert 'if (kind == 2) return @(free);' in value_helper and 'if (!total || free > total) return nil;' in value_helper
+    for index in (1, 3): assert 'if (totalBytes > 0 && freeBytes <= totalBytes)' in identifier.method(hooks, STORAGE_OBJC_METHODS[index][0])
+    abi = identifier.method(hooks, STORAGE_OBJC_HELPERS[-1])
+    assert 'method_getNumberOfArguments(entry) != 4' in abi and "returnType[0] == 'Q' && returnType[1] == 0" in abi
+    for name in ('result', 'url', 'error'): assert f'{name}[sizeof({name}) - 1] = 0;' in abi
+    check_macro_arity(read('tests/PXStorageObjCHookTests.m'), 'PXStorageObjCHookTests.m')
     assert 'return bytes / blockSize + (bytes % blockSize != 0);' in hooks
     assert 'convertGBStringToBytes(' not in hooks and 'normalizeStorageBytes(' not in hooks
     clock = identifier.method(hooks, 'static NSTimeInterval PXStorageCacheTime(void)')
@@ -378,6 +414,13 @@ def generate_native_fragments(folder):
     cache_start = hooks.index('static os_unfair_lock gStorageCacheLock =')
     cache_end = hooks.index('static void PXStorageSettingsChanged(', cache_start)
     (folder / 'PXStorageObjectCache.inc').write_text(hooks[cache_start:cache_end], encoding='utf-8')
+    objc_constants = [line for line in hooks.splitlines() if line.startswith('#define NSFileSystem')]
+    (folder / 'PXStorageObjCHelpers.inc').write_text('\n\n'.join(objc_constants + [identifier.method(hooks, sig) for sig in STORAGE_OBJC_HELPERS]), encoding='utf-8')
+    for name, rows in (('FileManager', STORAGE_OBJC_METHODS[:4]), ('URL', STORAGE_OBJC_METHODS[4:])):
+        methods = [identifier.method(hooks, sig) for sig, _ in rows]
+        (folder / ('PXStorage' + name + 'Declarations.inc')).write_text('\n'.join(m.split(' {', 1)[0] + ';' for m in methods), encoding='utf-8')
+        adapted = [body.replace('%orig', expression) for body, (_, expression) in zip(methods, rows)]
+        (folder / ('PXStorage' + name + 'Methods.inc')).write_text('\n\n'.join(adapted), encoding='utf-8')
 
 
 def native_tests():
@@ -412,6 +455,12 @@ def native_tests():
                             str(ROOT / 'tests/PXStorageObjectCacheTests.m'), '-framework', 'Foundation',
                             '-o', str(cache_binary)], check=True, cwd=ROOT, timeout=60)
             subprocess.run([str(cache_binary)], check=True, cwd=ROOT, timeout=60)
+            objc_binary = folder / ('storage-objc-' + scheme)
+            subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions',
+                            '-Wall', '-Wextra', '-Werror=implicit-function-declaration', '-I', str(folder), *defines,
+                            str(ROOT / 'tests/PXStorageObjCHookTests.m'), '-framework', 'Foundation',
+                            '-o', str(objc_binary)], check=True, cwd=ROOT, timeout=60)
+            subprocess.run([str(objc_binary)], check=True, cwd=ROOT, timeout=60)
 
 
 if __name__ == '__main__':
