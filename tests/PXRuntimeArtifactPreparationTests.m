@@ -77,6 +77,10 @@ NSString *PXProfileIdentityPath(NSString *profile) {
     NSString *root = PXProfileRootPath(profile);
     return root ? Path(root, @"identity") : nil;
 }
+NSString *PXProfileDeviceIDsPath(NSString *profile) {
+    NSString *identity = PXProfileIdentityPath(profile);
+    return identity ? Path(identity, @"device_ids.plist") : nil;
+}
 BOOL PXPerformRuntimeSourceWrite(BOOL (^body)(PXRuntimeSourceTransaction *, NSError **), NSError **error) {
     gWrites++; return [gStore performWrite:body error:error];
 }

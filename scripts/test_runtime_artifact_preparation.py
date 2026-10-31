@@ -16,8 +16,8 @@ identifier = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(identifier)
 STORAGE_READ_SIGNATURES = [
     '- (NSString *)totalStorageCapacity', '- (NSString *)freeStorageSpace', '- (NSString *)filesystemType',
-    '- (uint64_t)convertGBStringToBytes:(NSString *)gbString', '- (uint64_t)normalizeStorageBytes:(uint64_t)bytes',
-    '- (uint64_t)convertGBStringToBytes:(NSString *)gbString useBinaryUnits:(BOOL)useBinary',
+    '- (uint64_t)convertGBStringToBytes:(id)gbString', '- (uint64_t)normalizeStorageBytes:(uint64_t)bytes',
+    '- (uint64_t)convertGBStringToBytes:(id)gbString useBinaryUnits:(BOOL)useBinary',
     '- (uint64_t)normalizeStorageBytes:(uint64_t)bytes useMarketingUnits:(BOOL)useMarketingUnits',
     '- (uint64_t)totalStorageCapacityInBinaryBytes', '- (uint64_t)totalStorageCapacityInMarketingBytes',
     '- (uint64_t)freeStorageSpaceInBinaryBytes', '- (uint64_t)freeStorageSpaceInMarketingBytes',
@@ -253,7 +253,7 @@ def source_contracts():
     scalar = identifier.method(storage, 'static NSString *PXStorageScalarField(id settings, NSString *key)')
     assert 'if (![settings isKindOfClass:NSDictionary.class]) return nil;' in scalar
     assert 'isKindOfClass:NSString.class' in scalar and 'isKindOfClass:NSNumber.class' in scalar
-    conversion = identifier.method(storage, '- (uint64_t)convertGBStringToBytes:(NSString *)gbString')
+    conversion = identifier.method(storage, '- (uint64_t)convertGBStringToBytes:(id)gbString')
     assert 'isKindOfClass:NSString.class' in conversion and 'isKindOfClass:NSNumber.class' in conversion
     assert conversion.index('!isfinite(bytes) || bytes >= 0x1p64') < conversion.index('(uint64_t)bytes')
     normalization = identifier.method(storage, '- (uint64_t)normalizeStorageBytes:(uint64_t)bytes')

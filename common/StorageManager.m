@@ -205,7 +205,7 @@ static NSString *PXStorageScalarField(id settings, NSString *key) {
 
 #pragma mark - Unit Conversion Helpers
 
-- (uint64_t)convertGBStringToBytes:(NSString *)gbString {
+- (uint64_t)convertGBStringToBytes:(id)gbString {
     if (![gbString isKindOfClass:NSString.class] && ![gbString isKindOfClass:NSNumber.class]) return 0;
     double gbValue = [gbString doubleValue];
     if (!isfinite(gbValue) || gbValue <= 0) return 0;
@@ -253,7 +253,7 @@ static NSString *PXStorageScalarField(id settings, NSString *key) {
 }
 
 // For backward compatibility - these methods are kept but simplified
-- (uint64_t)convertGBStringToBytes:(NSString *)gbString useBinaryUnits:(BOOL)useBinary {
+- (uint64_t)convertGBStringToBytes:(id)gbString useBinaryUnits:(BOOL)useBinary {
     return [self convertGBStringToBytes:gbString];
 }
 
