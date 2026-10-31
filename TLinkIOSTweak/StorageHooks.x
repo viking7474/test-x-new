@@ -4,6 +4,7 @@
 #import "TLinkIOSLogging.h"
 #import "PXNativeHookCoordinator.h"
 #import <Foundation/Foundation.h>
+#import <dispatch/dispatch.h>
 #import <sys/mount.h>
 #import <dlfcn.h>
 #import <substrate.h>
@@ -19,6 +20,7 @@
 #import <os/lock.h>
 #import <stdatomic.h>
 #import <stdbool.h>
+#include <math.h>
 
 // Constants for proper size calculations - use only marketing units (1000-based)
 #define BYTES_PER_KB (1000ULL)
@@ -52,6 +54,7 @@ static NSString *getCurrentBundleID(void);
 static NSDictionary *loadScopedApps(void);
 static BOOL isInScopedAppsList(void);
 static void PXStorageRefreshNativeSnapshot(void);
+static void PXStorageScheduleNativeRefresh(dispatch_queue_t queue);
 
 // Native statfs/getfsstat providers run while CoreServices may hold its
 // non-recursive MountInfo lock. Their call path must remain Foundation-free.
@@ -59,6 +62,28 @@ static _Atomic(bool) gStorageProcessAllowed = false;
 static _Atomic(bool) gStorageNativeRefreshInProgress = false;
 static _Atomic(uint64_t) gStorageNativeTotalBytes = 0;
 static _Atomic(uint64_t) gStorageNativeFreeBytes = 0;
+// SC versioning makes the separately stored C scalars one observed generation.
+// Producers claim refresh ownership; native readers never spin or acquire a lock.
+static _Atomic(uint64_t) gStorageNativeRevision = 0;
+static _Atomic(bool) gStorageRefreshScheduled = false;
+
+static BOOL PXStorageBeginNativeRefresh(void) {
+    bool expected = false;
+    if (!atomic_compare_exchange_strong_explicit(&gStorageNativeRefreshInProgress, &expected, true,
+                                                 memory_order_seq_cst, memory_order_seq_cst)) return NO;
+    atomic_fetch_add_explicit(&gStorageNativeRevision, 1, memory_order_seq_cst);
+    return YES;
+}
+
+static void PXStorageEndNativeRefresh(uint64_t total, uint64_t free, BOOL allowed) {
+    allowed = allowed && total > 0 && free <= total;
+    atomic_store_explicit(&gStorageNativeTotalBytes, allowed ? total : 0, memory_order_seq_cst);
+    atomic_store_explicit(&gStorageNativeFreeBytes, allowed ? free : 0, memory_order_seq_cst);
+    atomic_store_explicit(&gStorageProcessAllowed, allowed, memory_order_seq_cst);
+    atomic_fetch_add_explicit(&gStorageNativeRevision, 1, memory_order_seq_cst);
+    atomic_store_explicit(&gStorageNativeRefreshInProgress, false, memory_order_seq_cst);
+}
+
 
 // Get the current bundle ID
 static NSString *getCurrentBundleID(void) {
@@ -163,10 +188,7 @@ static void PXStorageSettingsChanged(CFNotificationCenterRef center,
         refreshQueue = dispatch_queue_create("com.hydra.tlinkios.storage-native-refresh",
                                              DISPATCH_QUEUE_SERIAL);
     });
-    dispatch_async(refreshQueue, ^{
-    PX_RUNTIME_READ_OPERATION;
-        PXStorageRefreshNativeSnapshot();
-    });
+    PXStorageScheduleNativeRefresh(refreshQueue);
 }
 
 // Helper function to get consistent storage values directly from storage.plist.
@@ -298,6 +320,11 @@ static BOOL PXStorageBundleIsProblematic(NSString *bundleID) {
     return bundleID.length && [problematicApps containsObject:bundleID];
 }
 
+static void PXStorageSetSafeByteDefaults(uint64_t *totalBytes, uint64_t *freeBytes) {
+    *totalBytes = 128ULL * BYTES_PER_GB;
+    *freeBytes = 38ULL * BYTES_PER_GB;
+}
+
 // Function to get storage values with universal compatibility
 static void getStorageValuesForApp(uint64_t *totalBytes, uint64_t *freeBytes) {
     PX_RUNTIME_READ_OPERATION;
@@ -313,11 +340,16 @@ static void getStorageValuesForApp(uint64_t *totalBytes, uint64_t *freeBytes) {
         if (!storageInfo) return;
         
         // Get total storage value as string
-        NSString *totalSpaceStr = storageInfo[@"TotalStorage"];
-        if (!totalSpaceStr || [totalSpaceStr length] == 0) return;
+        id totalSpaceStr = storageInfo[@"TotalStorage"];
+        if (!totalSpaceStr) return;
+        if (![totalSpaceStr isKindOfClass:NSString.class] && ![totalSpaceStr isKindOfClass:NSNumber.class]) {
+            PXStorageSetSafeByteDefaults(totalBytes, freeBytes); return;
+        }
+        if ([totalSpaceStr isKindOfClass:NSString.class] && ![totalSpaceStr length]) return;
         
         // Convert to numeric value
         double totalStorageGB = [totalSpaceStr doubleValue];
+        if (!isfinite(totalStorageGB)) { PXStorageSetSafeByteDefaults(totalBytes, freeBytes); return; }
         if (totalStorageGB <= 0) return;
         
         // Get app info for detection
@@ -380,72 +412,93 @@ static void getStorageValuesForApp(uint64_t *totalBytes, uint64_t *freeBytes) {
             }
         } else {
             // Custom size
-            if (isTechnicalApp) {
-                storageCapacity = (uint64_t)(totalStorageGB * BYTES_PER_GB_BINARY);
-            } else if (isSettingsApp) {
-                storageCapacity = (uint64_t)(totalStorageGB * BYTES_PER_GB * 0.93);
-            } else {
-                storageCapacity = (uint64_t)(totalStorageGB * BYTES_PER_GB);
-            }
+            double scaled = isTechnicalApp ? totalStorageGB * BYTES_PER_GB_BINARY :
+                (isSettingsApp ? totalStorageGB * BYTES_PER_GB * 0.93 : totalStorageGB * BYTES_PER_GB);
+            if (!isfinite(scaled) || scaled >= 0x1p64) { PXStorageSetSafeByteDefaults(totalBytes, freeBytes); return; }
+            storageCapacity = (uint64_t)scaled;
         }
         
         // Set total bytes
         *totalBytes = storageCapacity;
         
         // Calculate free space based on percentage
-        NSString *freeSpaceStr = storageInfo[@"FreeStorage"];
-        if (freeSpaceStr && [freeSpaceStr length] > 0) {
+        id freeSpaceStr = storageInfo[@"FreeStorage"];
+        if (freeSpaceStr && ![freeSpaceStr isKindOfClass:NSString.class] && ![freeSpaceStr isKindOfClass:NSNumber.class]) {
+            PXStorageSetSafeByteDefaults(totalBytes, freeBytes); return;
+        }
+        if ([freeSpaceStr isKindOfClass:NSNumber.class] ||
+            ([freeSpaceStr isKindOfClass:NSString.class] && [freeSpaceStr length] > 0)) {
             double freeGbValue = [freeSpaceStr doubleValue];
-            if (freeGbValue >= 0 && freeGbValue <= totalStorageGB) {
+            if (isfinite(freeGbValue) && freeGbValue >= 0 && freeGbValue <= totalStorageGB) {
                 // Apply the free space as a percentage of total
                 double freePercent = freeGbValue / totalStorageGB;
-                *freeBytes = (uint64_t)(*totalBytes * freePercent);
+                double scaledFree = *totalBytes * freePercent;
+                if (isfinite(scaledFree) && scaledFree >= 0 && scaledFree < 0x1p64)
+                    *freeBytes = (uint64_t)scaledFree;
             }
         }
     } @catch (NSException *exception) {
-        // If any error occurs, use safe defaults (marketing units for consistency)
-        *totalBytes = 128ULL * BYTES_PER_GB;
-        *freeBytes = 38ULL * BYTES_PER_GB;
+        // Keep enabled-feature fallback rather than exposing physical capacity.
+        PXStorageSetSafeByteDefaults(totalBytes, freeBytes);
     }
 }
 
 static void PXStorageRefreshNativeSnapshot(void) {
     PX_RUNTIME_READ_OPERATION;
-    atomic_store_explicit(&gStorageNativeRefreshInProgress, true, memory_order_release);
-
-    uint64_t totalBytes = 0;
-    uint64_t freeBytes = 0;
-    NSString *bundleID = getCurrentBundleID();
-    NSString *processName = [NSProcessInfo processInfo].processName;
-    BOOL allowed = bundleID.length &&
-        !PXStorageBundleIsProblematic(bundleID) &&
-        PXProcessIsAllowedForSpoofing(bundleID,
-                                      processName,
-                                      PXScopeOptionAllowSafariAuthStack);
-    if (allowed) {
-        getStorageValuesForApp(&totalBytes, &freeBytes);
-        allowed = totalBytes > 0;
+    if (!PXStorageBeginNativeRefresh()) return;
+    uint64_t totalBytes = 0, freeBytes = 0;
+    BOOL allowed = NO;
+    @try {
+        NSString *bundleID = getCurrentBundleID();
+        NSString *processName = [NSProcessInfo processInfo].processName;
+        allowed = bundleID.length && !PXStorageBundleIsProblematic(bundleID) &&
+            PXProcessIsAllowedForSpoofing(bundleID, processName, PXScopeOptionAllowSafariAuthStack);
+        if (allowed) {
+            getStorageValuesForApp(&totalBytes, &freeBytes);
+            allowed = totalBytes > 0;
+        }
+    } @catch (NSException *exception) {
+        (void)exception;
+        allowed = NO;
+    } @finally {
+        PXStorageEndNativeRefresh(totalBytes, freeBytes, allowed);
     }
+}
 
-    atomic_store_explicit(&gStorageNativeTotalBytes, totalBytes, memory_order_release);
-    atomic_store_explicit(&gStorageNativeFreeBytes, freeBytes, memory_order_release);
-    atomic_store_explicit(&gStorageProcessAllowed, allowed, memory_order_release);
-    atomic_store_explicit(&gStorageNativeRefreshInProgress, false, memory_order_release);
+static void PXStorageScheduleNativeRefresh(dispatch_queue_t queue) {
+    bool expected = false;
+    if (!atomic_compare_exchange_strong_explicit(&gStorageRefreshScheduled, &expected, true,
+                                                 memory_order_acq_rel, memory_order_acquire)) return;
+    dispatch_async(queue, ^{
+        // Clear before capture/compute: an event during refresh gets one follow-up.
+        atomic_store_explicit(&gStorageRefreshScheduled, false, memory_order_release);
+        @autoreleasepool {
+            PX_RUNTIME_READ_OPERATION;
+            PXStorageRefreshNativeSnapshot();
+        }
+    });
 }
 
 static BOOL PXStorageCopyNativeSnapshot(uint64_t *totalBytes, uint64_t *freeBytes) {
     if (!totalBytes || !freeBytes ||
-        atomic_load_explicit(&gStorageNativeRefreshInProgress, memory_order_acquire) ||
-        !atomic_load_explicit(&gStorageProcessAllowed, memory_order_acquire)) {
-        return NO;
-    }
-
-    uint64_t total = atomic_load_explicit(&gStorageNativeTotalBytes, memory_order_acquire);
-    uint64_t free = atomic_load_explicit(&gStorageNativeFreeBytes, memory_order_acquire);
-    if (total == 0) return NO;
-    *totalBytes = total;
-    *freeBytes = free;
+        atomic_load_explicit(&gStorageNativeRefreshInProgress, memory_order_seq_cst)) return NO;
+    uint64_t revision = atomic_load_explicit(&gStorageNativeRevision, memory_order_seq_cst);
+    if (revision & 1) return NO;
+    BOOL allowed = atomic_load_explicit(&gStorageProcessAllowed, memory_order_seq_cst);
+    uint64_t total = atomic_load_explicit(&gStorageNativeTotalBytes, memory_order_seq_cst);
+    uint64_t free = atomic_load_explicit(&gStorageNativeFreeBytes, memory_order_seq_cst);
+    if (!allowed || total == 0 || free > total ||
+        revision != atomic_load_explicit(&gStorageNativeRevision, memory_order_seq_cst) ||
+        atomic_load_explicit(&gStorageNativeRefreshInProgress, memory_order_seq_cst)) return NO;
+    *totalBytes = total; *freeBytes = free;
     return YES;
+}
+
+// Clamp provider iteration to entries actually addressable in the caller buffer.
+static int PXStorageBoundedMountCount(int result, int bufsize, size_t entrySize) {
+    if (result <= 0 || bufsize <= 0 || entrySize == 0) return 0;
+    size_t capacity = (size_t)bufsize / entrySize;
+    return capacity < (size_t)result ? (int)capacity : result;
 }
 
 // Define NSFileSystem constants as strings since they're just string constants
@@ -470,22 +523,17 @@ static int (*orig_getfsstat64)(PXStatfs64Buf *buf, int bufsize, int flags);
 static void PXStorageModifyStatfsWithValues(struct statfs *buf,
                                             uint64_t totalBytes,
                                             uint64_t freeBytes) {
-    if (!buf) return;
+    if (!buf || totalBytes == 0 || freeBytes > totalBytes) return;
     
     // Ensure block size is valid
     if (buf->f_bsize == 0) {
         buf->f_bsize = DEFAULT_BLOCK_SIZE; // Standard block size for APFS
     }
     
-    // Calculate blocks
-    if (totalBytes > 0) {
-        buf->f_blocks = calculateBlockCount(totalBytes, buf->f_bsize);
-    }
-    
-    if (freeBytes > 0) {
-        buf->f_bfree = calculateBlockCount(freeBytes, buf->f_bsize);
-        buf->f_bavail = buf->f_bfree; // Available blocks = free blocks for non-root
-    }
+    buf->f_blocks = calculateBlockCount(totalBytes, buf->f_bsize);
+    // Zero is valid; never retain physical free-space values for a full fake disk.
+    buf->f_bfree = calculateBlockCount(freeBytes, buf->f_bsize);
+    buf->f_bavail = buf->f_bfree; // Available blocks = free blocks for non-root
 }
 
 static void modifyStatfsWithSpoofedValues(struct statfs *buf) {
@@ -579,7 +627,7 @@ static int replaced_getfsstat(struct statfs *buf, int bufsize, int flags) {
     if (ret > 0 && buf != NULL && shouldApplyStorageSpoofing()) {
         @try {
             // Loop through all filesystems returned
-            for (int i = 0; i < ret; i++) {
+            for (int i = 0, count = PXStorageBoundedMountCount(ret, bufsize, sizeof(*buf)); i < count; i++) {
                 // Safely check mount points - first ensure the string is valid
                 const char *mountPoint = buf[i].f_mntonname;
                 if (mountPoint && mountPoint[0] != '\0') {
@@ -614,7 +662,7 @@ static int replaced_getfsstat64(PXStatfs64Buf *buf, int bufsize, int flags) {
     if (ret > 0 && buf != NULL && shouldApplyStorageSpoofing()) {
         @try {
             // Loop through all filesystems returned
-            for (int i = 0; i < ret; i++) {
+            for (int i = 0, count = PXStorageBoundedMountCount(ret, bufsize, sizeof(*buf)); i < count; i++) {
                 // Safely check mount points - first ensure the string is valid
                 const char *mountPoint = buf[i].f_mntonname;
                 if (mountPoint && mountPoint[0] != '\0') {
@@ -1013,11 +1061,11 @@ static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t en
                     }
                 }];
                 [coord registerGetfsstatProvider:@"storage.getfsstat" priority:PXNativeHookPriorityNetworkStorage post:^(struct statfs * _Nullable buf, int bufsize, int flags, int * _Nonnull inoutResult) {
-                    (void)bufsize; (void)flags;
+                    (void)flags;
                     uint64_t totalBytes = 0, freeBytes = 0;
                     if (*inoutResult <= 0 || !buf ||
                         !PXStorageCopyNativeSnapshot(&totalBytes, &freeBytes)) return;
-                    for (int i = 0; i < *inoutResult; i++) {
+                    for (int i = 0, count = PXStorageBoundedMountCount(*inoutResult, bufsize, sizeof(*buf)); i < count; i++) {
                         const char *mountPoint = buf[i].f_mntonname;
                         if (mountPoint && mountPoint[0] &&
                             (strcmp(mountPoint, "/") == 0 || strcmp(mountPoint, "/var") == 0 || strcmp(mountPoint, "/private/var") == 0)) {
@@ -1026,11 +1074,11 @@ static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t en
                     }
                 }];
                 [coord registerGetfsstat64Provider:@"storage.getfsstat64" priority:PXNativeHookPriorityNetworkStorage post:^(PXStatfs64Buf * _Nullable buf, int bufsize, int flags, int * _Nonnull inoutResult) {
-                    (void)bufsize; (void)flags;
+                    (void)flags;
                     uint64_t totalBytes = 0, freeBytes = 0;
                     if (*inoutResult <= 0 || !buf ||
                         !PXStorageCopyNativeSnapshot(&totalBytes, &freeBytes)) return;
-                    for (int i = 0; i < *inoutResult; i++) {
+                    for (int i = 0, count = PXStorageBoundedMountCount(*inoutResult, bufsize, sizeof(*buf)); i < count; i++) {
                         const char *mountPoint = buf[i].f_mntonname;
                         if (mountPoint && mountPoint[0] &&
                             (strcmp(mountPoint, "/") == 0 || strcmp(mountPoint, "/var") == 0 || strcmp(mountPoint, "/private/var") == 0)) {

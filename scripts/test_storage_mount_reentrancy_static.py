@@ -32,8 +32,12 @@ for required in (
     "PXStorageCopyNativeSnapshot",
     "PXStorageModifyStatfsWithValues",
     "gStorageNativeRefreshInProgress",
+    "PXStorageBoundedMountCount",
 ):
     if required not in SOURCE:
         raise AssertionError(f"missing mount reentrancy safeguard: {required}")
+
+if providers.count('count = PXStorageBoundedMountCount(') != 2:
+    raise AssertionError('both active getfsstat providers must bound iteration by caller buffer capacity')
 
 print("storage mount reentrancy static test: PASS")

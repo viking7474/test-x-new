@@ -66,6 +66,7 @@ WRAPPERS = {
 
 
 def source_contracts():
+    from test_profile_creation_flow import check_macro_arity
     preparation = read('common/PXRuntimeArtifactPreparation.m')
     for forbidden in ('PXActiveProfile', 'PXProfile', 'NSFileManager', 'writeToFile:', 'dictionaryWithContentsOfFile:',
                       'PXPerformRuntimeSourceWrite', 'dispatch_', 'NSNotification', 'PXLog(', 'self.', 'sharedManager', 'sysctl('):
@@ -155,6 +156,28 @@ def source_contracts():
     hooks = read('TLinkIOSTweak/StorageHooks.x')
     assert 'return bytes / blockSize + (bytes % blockSize != 0);' in hooks
     assert 'convertGBStringToBytes(' not in hooks and 'normalizeStorageBytes(' not in hooks
+    native_copy = identifier.method(hooks, 'static BOOL PXStorageCopyNativeSnapshot(uint64_t *totalBytes, uint64_t *freeBytes)')
+    assert native_copy.count('atomic_load_explicit(&gStorageNativeRevision, memory_order_seq_cst)') == 2
+    assert 'free > total' in native_copy and 'revision & 1' in native_copy
+    for token in ('while (', 'for (', 'os_unfair_lock', 'NSBundle', 'PX_RUNTIME_READ_OPERATION', 'dispatch_'):
+        assert token not in native_copy, 'native mount snapshot must remain bounded pure C'
+    scheduler = identifier.method(hooks, 'static void PXStorageScheduleNativeRefresh(dispatch_queue_t queue)')
+    assert 'atomic_compare_exchange_strong_explicit' in scheduler and scheduler.count('dispatch_async(') == 1
+    assert scheduler.index('gStorageRefreshScheduled, false') < scheduler.index('PXStorageRefreshNativeSnapshot();')
+    callback = hooks[hooks.index('static void PXStorageSettingsChanged('):hooks.index('// Helper function to get consistent storage values')]
+    assert 'PXStorageScheduleNativeRefresh(refreshQueue);' in callback and 'dispatch_async(' not in callback
+    begin = identifier.method(hooks, 'static BOOL PXStorageBeginNativeRefresh(void)')
+    end = identifier.method(hooks, 'static void PXStorageEndNativeRefresh(uint64_t total, uint64_t free, BOOL allowed)')
+    assert 'atomic_compare_exchange_strong_explicit' in begin and 'atomic_fetch_add_explicit(&gStorageNativeRevision' in begin
+    assert end.index('gStorageNativeFreeBytes') < end.index('gStorageNativeRevision') < end.index('gStorageNativeRefreshInProgress')
+    for body in (begin, end, native_copy):
+        assert 'memory_order_relaxed' not in body and 'memory_order_acquire' not in body and 'memory_order_release' not in body
+    refresh = identifier.method(hooks, 'static void PXStorageRefreshNativeSnapshot(void)')
+    assert 'if (!PXStorageBeginNativeRefresh()) return;' in refresh and '@finally' in refresh and 'PXStorageEndNativeRefresh(' in refresh
+    assert 'if (freeBytes > 0)' not in identifier.method(hooks, 'static void PXStorageModifyStatfsWithValues(struct statfs *buf,\n                                            uint64_t totalBytes,\n                                            uint64_t freeBytes)')
+    assert hooks.count('count = PXStorageBoundedMountCount(') == 4
+    assert 'if (!isfinite(scaled) || scaled >= 0x1p64) { PXStorageSetSafeByteDefaults(totalBytes, freeBytes); return; }' in hooks
+    check_macro_arity(read('tests/PXStorageNativeSnapshotTests.m'), 'PXStorageNativeSnapshotTests.m')
     display = identifier.method(storage, '- (BOOL)commitDisplayStorageInfo:(NSDictionary *)values updateFilesystem:(BOOL)updateFilesystem error:(NSError **)error')
     assert display.index('[rawTotal copy]') < display.index('acquireWithProfileIDResolver:') < display.index('dictionaryWithContentsOfFile:PXCurrentProfileInfoPath()') < display.index('[_storageSettings copy]')
     assert 'PXActiveProfileID()' not in display and 'mutation.identityDirectory' not in display
@@ -163,7 +186,6 @@ def source_contracts():
     assert 'mutation.profileDirectory' in display and 'if (updateFilesystem) candidate[@"FilesystemType"] = filesystem;' in display
     assert display.index('adoptable = [staged mutableCopy]') < display.index('if (!committed) return NO;') < display.index('_storageSettings = adoptable;') < display.index('@finally { [mutation invalidate]; }')
     assert 'saveToCurrentProfile' not in display and 'adoptCommittedStorageInfo:' not in display and 'PostNotification' not in display
-    from test_profile_creation_flow import check_macro_arity
     check_macro_arity(read('tests/PXRuntimeArtifactPreparationTests.m'), 'PXRuntimeArtifactPreparationTests.m')
     persist = identifier.method(storage, '- (BOOL)persistStorageToProfile:(NSString *)profileID current:(BOOL)current error:(NSError **)error')
     assert persist.index('acquireWithProfileIDResolver:') < persist.index('dictionaryWithContentsOfFile:PXCurrentProfileInfoPath()') < persist.index('[_storageSettings copy]')
@@ -322,6 +344,20 @@ def generate_native_fragments(folder):
                    identifier.method(storage, 'static NSString *PXStorageScalarField(id settings, NSString *key)'),
                    identifier.method(hooks, 'static uint64_t calculateBlockCount(uint64_t bytes, uint32_t blockSize)')]
     (folder / 'PXStorageReadHelpers.inc').write_text('\n\n'.join(definitions), encoding='utf-8')
+    globals_and_publishers = [line for line in hooks.splitlines() if line.startswith('static _Atomic(')]
+    globals_and_publishers += [identifier.method(hooks, 'static BOOL PXStorageBeginNativeRefresh(void)'),
+                              identifier.method(hooks, 'static void PXStorageEndNativeRefresh(uint64_t total, uint64_t free, BOOL allowed)')]
+    (folder / 'PXStorageNativePublish.inc').write_text('\n\n'.join(globals_and_publishers), encoding='utf-8')
+    (folder / 'PXStorageNativeCopy.inc').write_text(identifier.method(hooks, 'static BOOL PXStorageCopyNativeSnapshot(uint64_t *totalBytes, uint64_t *freeBytes)'), encoding='utf-8')
+    constants = [line for line in hooks.splitlines() if line.startswith('#define BYTES_PER_') or line.startswith('#define DEFAULT_BLOCK_SIZE ')]
+    native_signatures = ['static NSString *getCurrentBundleID(void)', 'static BOOL PXStorageBundleIsProblematic(NSString *bundleID)',
+                         'static void PXStorageSetSafeByteDefaults(uint64_t *totalBytes, uint64_t *freeBytes)',
+                         'static void getStorageValuesForApp(uint64_t *totalBytes, uint64_t *freeBytes)',
+                         'static void PXStorageRefreshNativeSnapshot(void)', 'static void PXStorageScheduleNativeRefresh(dispatch_queue_t queue)',
+                         'static uint64_t calculateBlockCount(uint64_t bytes, uint32_t blockSize)',
+                         'static int PXStorageBoundedMountCount(int result, int bufsize, size_t entrySize)',
+                         'static void PXStorageModifyStatfsWithValues(struct statfs *buf,\n                                            uint64_t totalBytes,\n                                            uint64_t freeBytes)']
+    (folder / 'PXStorageNativeWork.inc').write_text('\n\n'.join(constants + [identifier.method(hooks, sig) for sig in native_signatures]), encoding='utf-8')
 
 
 def native_tests():
@@ -344,6 +380,12 @@ def native_tests():
                             '-o', str(binary)], check=True, cwd=ROOT, timeout=60)
             for _ in range(3):
                 subprocess.run([str(binary)], check=True, cwd=ROOT, timeout=60)
+            native_binary = folder / ('storage-native-' + scheme)
+            subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions',
+                            '-Wall', '-Wextra', '-Werror=implicit-function-declaration', '-I', str(folder), *defines,
+                            str(ROOT / 'tests/PXStorageNativeSnapshotTests.m'), '-framework', 'Foundation',
+                            '-o', str(native_binary)], check=True, cwd=ROOT, timeout=60)
+            subprocess.run([str(native_binary)], check=True, cwd=ROOT, timeout=60)
 
 
 if __name__ == '__main__':
