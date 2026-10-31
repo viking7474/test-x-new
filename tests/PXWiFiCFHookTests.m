@@ -65,11 +65,15 @@ static id OriginalScan(id self, SEL command, id input) {
     if (gThrowOriginal) [NSException raise:@"fixture.original" format:@"original failed"];
     return gScanOriginal;
 }
-static CFTypeRef PXFixtureBridge(id value) CF_RETURNS_RETAINED;
-static CFTypeRef PXFixtureBridge(id value) {
+// Borrowed C input matches the bridge operation. An ARC-strong id parameter
+// can itself retain the copied dictionary at -O0 and leak that reference when
+// the injected exception unwinds without -fobjc-arc-exceptions. The caller's
+// explicit cleanup cannot release a callee-owned parameter reference.
+static CFTypeRef PXFixtureBridge(CFTypeRef value) CF_RETURNS_RETAINED;
+static CFTypeRef PXFixtureBridge(CFTypeRef value) {
     gBridgeCalls++;
     if (gThrowBridge) [NSException raise:@"fixture.bridge" format:@"retain failed"];
-    return gFailBridge ? NULL : CFRetain((__bridge CFTypeRef)value);
+    return gFailBridge ? NULL : CFRetain(value);
 }
 static void PXFixtureRelease(CFTypeRef value) {
     gSourceReleases++;
@@ -94,7 +98,7 @@ static void PXFixtureRelease(CFTypeRef value) {
 // The seven bodies and five original-pointer declarations are exact source.
 // Only external CF retain/release and mutable-copy collaborators are controlled.
 #undef CFBridgingRetain
-#define CFBridgingRetain PXFixtureBridge
+#define CFBridgingRetain(value) PXFixtureBridge((__bridge CFTypeRef)(value))
 #define CFRelease PXFixtureRelease
 #define mutableCopy px_cfMutableCopy
 #include "PXWiFiCFHooks.inc"
@@ -112,6 +116,17 @@ static void Reset(void) {
     orig_CNCopySupportedInterfaces = OriginalInterfaces;
     orig_Apple80211GetInfoCopy = OriginalApple;
     orig_dictionaryWithScanResult = OriginalScan;
+}
+static void TestLifetimeOracle(void) {
+    Reset();
+    @autoreleasepool {
+        CFDictionaryRef original = OriginalDictionary();
+        CFTypeRef extraOwner = CFRetain(original);
+        CFRelease(original);
+        CHECK(gDeaths == 0, "lifetime oracle detects a deliberately surviving CF owner");
+        CFRelease(extraOwner);
+    }
+    CHECK(gDeaths == 1, "lifetime oracle requires destruction after the final real CF owner releases");
 }
 static void TestNetworkCopy(void) {
     Reset();
@@ -204,6 +219,12 @@ static void TestAppleOutput(void) {
                   [((__bridge NSDictionary *)output)[@"SSID"] isEqual:@"real"], "Apple preparation failures preserve original owned output and original status");
             CFRelease(output);
         }
+        if (gDeaths != 1) {
+            const char *faultNames[] = {"provider throw", "bridge NULL", "bridge throw", "mutableCopy throw"};
+            fprintf(stderr, "DETAIL: Apple fault=%lu (%s), deaths=%lu expected=1, bridge=%lu copies=%lu source-releases=%lu\n",
+                (unsigned long)fault, faultNames[fault], (unsigned long)gDeaths, (unsigned long)gBridgeCalls,
+                (unsigned long)gCopies, (unsigned long)gSourceReleases);
+        }
         CHECK(gDeaths == 1, "preserved Apple output has no ownership leak after caller release");
     }
     Reset();
@@ -259,7 +280,7 @@ static void TestScan(void) {
 }
 int main(void) {
     @autoreleasepool {
-        @try { TestNetworkCopy(); TestInterfaces(); TestAppleOutput(); TestScan(); }
+        @try { TestLifetimeOracle(); TestNetworkCopy(); TestInterfaces(); TestAppleOutput(); TestScan(); }
         @catch (NSException *exception) { gFailures++; fprintf(stderr, "FAIL: unexpected WiFi CF exception: %s\n", exception.description.UTF8String); }
         printf("WiFi CF boundaries: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);
         return gFailures ? 1 : 0;

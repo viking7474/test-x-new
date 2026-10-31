@@ -141,3 +141,53 @@ output, generation and fixture negative controls pass. Final regression/targeted
 checks are rerun after lexical-scope review. Foundation/Theos/package/device
 execution is unavailable locally; H6D requires macOS CI/device verification.
 Full Patch 4 and private ownership/compatibility coverage remain partial.
+
+
+## Native CI follow-up: review of three user fixes (2026-10-31)
+
+Reviewed the complete inclusive range `e3b3c38..0193520` (three commits).
+All three fixes are retained:
+
+| Commit | Verdict and scope |
+| --- | --- |
+| `e3b3c38` | Correct: `id` matches the converter's existing NSString/NSNumber handling without changing its Objective-C object ABI. Extracted signatures match. The missing `PXProfileDeviceIDsPath` fixture helper is supplied without creating directories. |
+| `99876d9` | Correct: the early double-domain guard preserves values near UINT64_MAX that round to 2^64 before tier arithmetic; the final guard protects the cast. The file rollback assertion now handles an originally absent file instead of sending equality to nil. |
+| `0193520` | Correct: explicit `@finally` clears five caller-owned preparation references on exceptional paths. Full `802.11ax/ac/n` matching avoids interpreting `unknown` as n. The repository producer emits these canonical strings. Bare legacy `ax/ac/n` aliases would now pass through; no producer of those aliases was found. |
+
+The reported run successfully compiled the fixture and passed 58/59 CF checks;
+this is a native test assertion failure, not a compiler/linker diagnostic. The
+unused WiFi snapshot stub warning and MethodSwizzler's intentional incompatible
+method messages are unrelated: their suites pass in the supplied log.
+
+The remaining ownership diagnosis is inferred from the code and compiler rules;
+the log does not identify which of the four preparation faults failed. The bridge
+mock accepted an unqualified Objective-C `id` parameter. At -O0 that callee can
+hold its own strong reference to the copied dictionary before injecting an
+exception. Under Objective-C's default ARC exception policy that reference need
+not be released during unwinding. Clearing the caller's variables in `@finally`
+cannot release a separate callee-owned reference. The copied dictionary keeps the
+original probe descendant alive, matching the single failing destruction check.
+See [Clang ARC exceptions](https://clang.llvm.org/docs/AutomaticReferenceCounting.html#exceptions).
+
+The mock now accepts a borrowed `CFTypeRef`, with an explicit non-owning bridge at
+the call site, and still performs exactly one CFRetain on successful calls. NULL
+and throwing cases still occur before that retain. This removes unintended ARC
+parameter ownership from the injected failure. The existing `gDeaths == 1`
+assertion is unchanged. A separate lifetime oracle deliberately adds an owner,
+checks that the probe survives, then checks destruction after releasing the last
+owner. Failure-only output names the injected fault and ownership counters.
+
+The native recipe now explicitly compiles this CF fixture at -O0 in both
+`-fno-objc-arc-exceptions` and `-fobjc-arc-exceptions` modes for each of rootful and
+RootHide. Production Makefile flags, WiFiHook.x, StorageManager.m and all three
+user fixes are unchanged by this follow-up. No global ARC exception flag is added
+to hide an ownership issue. This fixture correction does not establish arbitrary
+Foundation/private API exception safety or settle private Get ownership.
+
+Local checks: artifact source contracts, four native fragment generators, seven
+exact CF body extractions, five in-memory source-contract negative controls,
+release source hardening and RootHide metadata/static gates pass. Regression:
+62/63 Python and 4/4 Node suites pass. The remaining Python suite is the existing
+Keychain retirement Git Bash fixture mkdir permission failure on this Windows
+host. Native macOS/Foundation, Theos builds and device execution remain pending;
+CI must confirm the ownership diagnosis in the four explicit CF configurations.

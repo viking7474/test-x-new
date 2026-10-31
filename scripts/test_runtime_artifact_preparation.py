@@ -53,6 +53,7 @@ WIFI_CF_SIGNATURES = [
     'static int replaced_Apple80211GetInfoCopy(void *handle, CFDictionaryRef *info)',
     'static id replaced_dictionaryWithScanResult(id self, SEL _cmd, id arg1)',
 ]
+CF_EXCEPTION_MODES = (('plain-arc', '-fno-objc-arc-exceptions'), ('arc-eh', '-fobjc-arc-exceptions'))
 WRAPPERS = {
     'PXPreparedWiFiMethod.inc': ('common/WiFiManager.m', ['- (NSDictionary *)generateWiFiInfo', '- (void)adoptCommittedWiFiInfo:(NSDictionary *)wifiInfo profileID:(NSString *)profileID']),
     'PXOwnedWiFiMethods.inc': ('common/WiFiManager.m', [
@@ -200,6 +201,15 @@ def source_contracts():
     assert all(token in scan for token in ('containsString:@"802.11ax"', 'containsString:@"802.11ac"', 'containsString:@"802.11n"'))
     assert 'containsString:@"n"' not in scan
     check_macro_arity(read('tests/PXWiFiCFHookTests.m'), 'PXWiFiCFHookTests.m')
+    cf_fixture = read('tests/PXWiFiCFHookTests.m')
+    bridge = identifier.method(cf_fixture, 'static CFTypeRef PXFixtureBridge(CFTypeRef value)')
+    assert 'CFRetain(value)' in bridge and 'PXFixtureBridge(id value)' not in cf_fixture
+    assert '#define CFBridgingRetain(value) PXFixtureBridge((__bridge CFTypeRef)(value))' in cf_fixture
+    assert cf_fixture.count('TestLifetimeOracle();') == 1
+    assert 'gDeaths == 0, "lifetime oracle detects a deliberately surviving CF owner"' in cf_fixture
+    assert 'gDeaths == 1, "preserved Apple output has no ownership leak after caller release"' in cf_fixture
+    assert 'faultNames[fault]' in cf_fixture
+    assert CF_EXCEPTION_MODES == (('plain-arc', '-fno-objc-arc-exceptions'), ('arc-eh', '-fobjc-arc-exceptions'))
     assert read('tests/PXRuntimeArtifactPreparationTests.m').count('TestHookWiFiResolver();') == 1
     observer = identifier.method(wifi_source, '- (void)registerForProfileNotifications')
     assert '@synchronized (self)' in observer and 'if (self.profileChangeObserver) return;' in observer
@@ -595,12 +605,14 @@ def native_tests():
                             str(ROOT / 'TLinkIOSTweak/MethodSwizzler.m'), str(ROOT / 'tests/PXMethodSwizzlerTests.m'),
                             '-framework', 'Foundation', '-o', str(swizzle_binary)], check=True, cwd=ROOT, timeout=60)
             subprocess.run([str(swizzle_binary)], check=True, cwd=ROOT, timeout=60)
-            cf_binary = folder / ('wifi-cf-hooks-' + scheme)
-            subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions',
-                            '-Wall', '-Wextra', '-Werror=implicit-function-declaration', '-I', str(folder), *defines,
-                            str(ROOT / 'tests/PXWiFiCFHookTests.m'), '-framework', 'Foundation', '-framework', 'CoreFoundation',
-                            '-o', str(cf_binary)], check=True, cwd=ROOT, timeout=60)
-            subprocess.run([str(cf_binary)], check=True, cwd=ROOT, timeout=60)
+            for arc_mode, arc_flag in CF_EXCEPTION_MODES:
+                cf_binary = folder / ('wifi-cf-hooks-' + scheme + '-' + arc_mode)
+                print('WiFi CF native matrix:', scheme, arc_mode, flush=True)
+                subprocess.run(['xcrun', 'clang', '-O0', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions', arc_flag,
+                                '-Wall', '-Wextra', '-Werror=implicit-function-declaration', '-I', str(folder), *defines,
+                                str(ROOT / 'tests/PXWiFiCFHookTests.m'), '-framework', 'Foundation', '-framework', 'CoreFoundation',
+                                '-o', str(cf_binary)], check=True, cwd=ROOT, timeout=60)
+                subprocess.run([str(cf_binary)], check=True, cwd=ROOT, timeout=60)
 
 
 if __name__ == '__main__':
