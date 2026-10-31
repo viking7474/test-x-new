@@ -260,50 +260,6 @@ static NSDictionary *getStorageValues() {
     }, now);
 }
 
-// Helper to convert GB string to bytes using marketing units (1000-based)
-static uint64_t __attribute__((unused)) convertGBStringToBytes(NSString *gbString) {
-    if (!gbString) return 0;
-    
-    double gbValue = [gbString doubleValue];
-    if (gbValue <= 0) return 0;
-    
-    // Use marketing units (1000-based)
-    return (uint64_t)(gbValue * BYTES_PER_GB);
-}
-
-// Helper function to normalize byte values to match what iOS would display
-// This ensures consistent representation regardless of how the app reads the data
-static uint64_t __attribute__((unused)) normalizeStorageBytes(uint64_t bytes) {
-    if (bytes == 0) return 0;
-    
-    // Get the GB value using marketing units
-    double gbValue = (double)bytes / BYTES_PER_GB;
-    
-    // Round to nearest common capacity
-    if (gbValue > 1000) {
-        // For 1TB+ devices, round to nearest 128GB
-        gbValue = round(gbValue / 128.0) * 128.0;
-    } else if (gbValue > 500) {
-        // For 512GB devices, round to nearest 64GB
-        gbValue = round(gbValue / 64.0) * 64.0;
-    } else if (gbValue > 200) {
-        // For 256GB devices, round to nearest 64GB
-        gbValue = round(gbValue / 32.0) * 32.0;
-    } else if (gbValue > 100) {
-        // For 128GB devices, round to nearest 16GB
-        gbValue = round(gbValue / 16.0) * 16.0;
-    } else if (gbValue > 50) {
-        // For 64GB devices, round to nearest 8GB
-        gbValue = round(gbValue / 8.0) * 8.0;
-    } else {
-        // For 64GB devices, round to nearest 4GB
-        gbValue = round(gbValue / 4.0) * 4.0;
-    }
-    
-    // Convert back to bytes
-    return (uint64_t)(gbValue * BYTES_PER_GB);
-}
-
 // Helper to calculate block count from bytes and block size
 static uint64_t calculateBlockCount(uint64_t bytes, uint32_t blockSize) {
     if (blockSize == 0) {
@@ -312,7 +268,7 @@ static uint64_t calculateBlockCount(uint64_t bytes, uint32_t blockSize) {
     }
     
     // Calculate block count, rounding up for partial blocks
-    return (bytes + blockSize - 1) / blockSize;
+    return bytes / blockSize + (bytes % blockSize != 0);
 }
 
 // Helper function to check if storage spoofing should be applied

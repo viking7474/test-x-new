@@ -7,6 +7,7 @@
 #import "PXRuntimeSourceStore.h"
 #import "DeviceModelManager.h"
 #import "IPhoneModelDB.h"
+#include <math.h>
 
 // Constants for proper size calculations
 // Use only marketing units (1000-based) as used by Apple
@@ -18,7 +19,18 @@
 // Standard APFS block size
 #define DEFAULT_BLOCK_SIZE (4096ULL)
 
+// A storage record can contain legacy numeric scalars. Keep NSString APIs
+// stable while rejecting container/date fields and malformed cache roots.
+static NSString *PXStorageScalarField(id settings, NSString *key) {
+    if (![settings isKindOfClass:NSDictionary.class]) return nil;
+    id value = settings[key];
+    if ([value isKindOfClass:NSString.class]) return value;
+    return [value isKindOfClass:NSNumber.class] ? [value stringValue] : nil;
+}
+
 @interface StorageManager ()
+- (NSString *)randomizeStorageCapacityForProfile:(NSString *)profileID;
+- (void)setDefaultStorageForProfile:(NSString *)profileID;
 - (BOOL)persistStorageToProfile:(NSString *)profileID current:(BOOL)current error:(NSError **)error;
 @end
 
@@ -58,8 +70,8 @@
     NSString *profilesPath = PXCurrentProfileInfoPath();
     NSDictionary *currentProfileInfo = [NSDictionary dictionaryWithContentsOfFile:profilesPath];
     
-    if (currentProfileInfo && currentProfileInfo[@"ProfileId"]) {
-        NSString *profileId = currentProfileInfo[@"ProfileId"];
+    NSString *profileId = PXValidatedProfileID(currentProfileInfo[@"ProfileId"]);
+    if (profileId) {
         [self loadFromProfile:profileId];
     } else {
         // Default values if no profile
@@ -68,32 +80,48 @@
 }
 
 - (void)setDefaultStorage {
-    // Use the storage generation method to ensure consistent values
-    NSString *capacity = [self randomizeStorageCapacity];
-    NSDictionary *storageInfo = [self generateStorageForCapacity:capacity];
-    
+    [self setDefaultStorageForProfile:PXActiveProfileID()];
+}
+
+- (void)setDefaultStorageForProfile:(NSString *)profileID {
+    NSString *capacity = [self randomizeStorageCapacityForProfile:profileID];
+    id prepared = [self generateStorageForCapacity:capacity];
+    NSDictionary *storageInfo = [prepared isKindOfClass:NSDictionary.class] ? prepared : nil;
+    // Preserve missing/default-generation failure policy: these owned fields
+    // are cleared when no candidate exists; unrelated cache fields remain.
     _storageSettings[@"TotalStorage"] = storageInfo[@"TotalStorage"];
     _storageSettings[@"FreeStorage"] = storageInfo[@"FreeStorage"];
     _storageSettings[@"FilesystemType"] = storageInfo[@"FilesystemType"];
 }
 
 - (NSString *)randomizeStorageCapacity {
-    NSString *profileID = PXActiveProfileID();
-    NSDictionary *deviceIDs = profileID.length ?
-        [NSDictionary dictionaryWithContentsOfFile:[PXProfileIdentityPath(profileID) stringByAppendingPathComponent:@"device_ids.plist"]] : nil;
+    return [self randomizeStorageCapacityForProfile:PXActiveProfileID()];
+}
+
+- (NSString *)randomizeStorageCapacityForProfile:(NSString *)profileID {
+    NSString *target = [PXValidatedProfileID(profileID) copy];
+    if (profileID && !target) return nil;
+    NSDictionary *deviceIDs = target.length ?
+        [NSDictionary dictionaryWithContentsOfFile:[PXProfileIdentityPath(target) stringByAppendingPathComponent:@"device_ids.plist"]] : nil;
     return [self randomizeStorageCapacityForDeviceModel:deviceIDs[@"DeviceModel"]];
 }
 
 - (NSString *)randomizeStorageCapacityForDeviceModel:(NSString *)deviceModel {
+    if (deviceModel && ![deviceModel isKindOfClass:NSString.class]) return nil;
     IPhoneModelDB *modelDB = [IPhoneModelDB sharedManager];
-    NSDictionary *modelSpec = [modelDB specForProductType:deviceModel];
-    NSDictionary *specs = modelSpec ? [modelDB canonicalHardwareSpecForProductType:deviceModel] : nil;
+    id row = [modelDB specForProductType:deviceModel];
+    NSDictionary *modelSpec = [row isKindOfClass:NSDictionary.class] ? row : nil;
+    id canonical = modelSpec ? [modelDB canonicalHardwareSpecForProductType:deviceModel] : nil;
+    NSDictionary *specs = [canonical isKindOfClass:NSDictionary.class] ? canonical : nil;
 
     // Every iPhone is owned by the canonical model DB. Unknown/missing iPhone
     // records fail closed instead of falling back to ProductType-prefix heuristics.
     BOOL isIPhone = [deviceModel isKindOfClass:[NSString class]] && [deviceModel hasPrefix:@"iPhone"];
     if (isIPhone && (!modelSpec || !specs.count)) return nil;
-    if (!specs.count) specs = [[DeviceModelManager sharedManager] deviceSpecificationsForModel:deviceModel];
+    if (!specs.count) {
+        id fallback = [[DeviceModelManager sharedManager] deviceSpecificationsForModel:deviceModel];
+        specs = [fallback isKindOfClass:NSDictionary.class] ? fallback : nil;
+    }
 
     NSArray *rawCapacities = [specs[@"storageCapacitiesGB"] isKindOfClass:[NSArray class]]
         ? specs[@"storageCapacitiesGB"] : @[@64, @128, @256, @512];
@@ -104,10 +132,13 @@
     }
     if (!capacities.count) [capacities addObjectsFromArray:@[@"64", @"128", @"256", @"512"]];
 
-    NSString *previous = _storageSettings[@"TotalStorage"];
-    NSMutableArray<NSString *> *candidates = [capacities mutableCopy];
-    if (candidates.count > 1 && previous.length) [candidates removeObject:previous];
-    if (!candidates.count) candidates = [capacities mutableCopy];
+    NSString *previous = PXStorageScalarField(_storageSettings, @"TotalStorage");
+    NSMutableArray<NSString *> *candidates = capacities;
+    if (capacities.count > 1 && previous.length) {
+        candidates = [capacities mutableCopy];
+        [candidates removeObject:previous];
+        if (!candidates.count) candidates = capacities;
+    }
     return candidates[arc4random_uniform((uint32_t)candidates.count)];
 }
 
@@ -126,19 +157,15 @@
 #pragma mark - Basic Storage Values
 
 - (NSString *)totalStorageCapacity {
-    return _storageSettings[@"TotalStorage"];
+    return PXStorageScalarField(_storageSettings, @"TotalStorage");
 }
 
 - (NSString *)freeStorageSpace {
-    // Get the base free space
-    NSString *baseSpace = _storageSettings[@"FreeStorage"];
-    
-    // Return the exact value without random variations to ensure consistency
-    return baseSpace;
+    return PXStorageScalarField(_storageSettings, @"FreeStorage");
 }
 
 - (NSString *)filesystemType {
-    return _storageSettings[@"FilesystemType"];
+    return PXStorageScalarField(_storageSettings, @"FilesystemType");
 }
 
 #pragma mark - Advanced Storage Values
@@ -179,13 +206,14 @@
 #pragma mark - Unit Conversion Helpers
 
 - (uint64_t)convertGBStringToBytes:(NSString *)gbString {
-    if (!gbString) return 0;
-    
+    if (![gbString isKindOfClass:NSString.class] && ![gbString isKindOfClass:NSNumber.class]) return 0;
     double gbValue = [gbString doubleValue];
-    if (gbValue <= 0) return 0;
-    
-    // Use only marketing (1000-based) conversion
-    return (uint64_t)(gbValue * BYTES_PER_GB);
+    if (!isfinite(gbValue) || gbValue <= 0) return 0;
+    double bytes = gbValue * BYTES_PER_GB;
+    // UINT64_MAX rounds to 2^64 as double. Reject that exclusive limit before
+    // conversion rather than comparing against a rounded inclusive maximum.
+    if (!isfinite(bytes) || bytes >= 0x1p64) return 0;
+    return (uint64_t)bytes;
 }
 
 - (uint64_t)normalizeStorageBytes:(uint64_t)bytes {
@@ -219,7 +247,9 @@
     }
     
     // Convert back to bytes
-    return (uint64_t)(gbValue * BYTES_PER_GB);
+    double normalized = gbValue * BYTES_PER_GB;
+    if (!isfinite(normalized) || normalized >= 0x1p64) return bytes;
+    return (uint64_t)normalized;
 }
 
 // For backward compatibility - these methods are kept but simplified
@@ -337,6 +367,7 @@
 }
 
 - (BOOL)loadFromProfile:(NSString *)profileId {
+    profileId = [PXValidatedProfileID(profileId) copy];
     if (!profileId) return NO;
     
     NSString *profileDir = PXProfileRootPath(profileId);
@@ -350,7 +381,7 @@
     }
     
     // If no saved settings, use defaults
-    [self setDefaultStorage];
+    [self setDefaultStorageForProfile:profileId];
     return NO;
 }
 

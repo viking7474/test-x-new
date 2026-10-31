@@ -14,6 +14,19 @@ read = lambda p: (ROOT / p).read_text(encoding='utf-8')
 spec = importlib.util.spec_from_file_location('identifier_writers', ROOT / 'scripts/test_runtime_identifier_writers.py')
 identifier = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(identifier)
+STORAGE_READ_SIGNATURES = [
+    '- (NSString *)totalStorageCapacity', '- (NSString *)freeStorageSpace', '- (NSString *)filesystemType',
+    '- (uint64_t)convertGBStringToBytes:(NSString *)gbString', '- (uint64_t)normalizeStorageBytes:(uint64_t)bytes',
+    '- (uint64_t)convertGBStringToBytes:(NSString *)gbString useBinaryUnits:(BOOL)useBinary',
+    '- (uint64_t)normalizeStorageBytes:(uint64_t)bytes useMarketingUnits:(BOOL)useMarketingUnits',
+    '- (uint64_t)totalStorageCapacityInBinaryBytes', '- (uint64_t)totalStorageCapacityInMarketingBytes',
+    '- (uint64_t)freeStorageSpaceInBinaryBytes', '- (uint64_t)freeStorageSpaceInMarketingBytes',
+    '- (uint64_t)normalizedTotalStorageForDisplay:(BOOL)useMarketingUnits', '- (uint64_t)normalizedFreeStorageForDisplay:(BOOL)useMarketingUnits',
+    '- (NSString *)randomizeStorageCapacity', '- (NSString *)randomizeStorageCapacityForProfile:(NSString *)profileID',
+    '- (NSString *)randomizeStorageCapacityForDeviceModel:(NSString *)deviceModel',
+    '- (void)setDefaultStorage', '- (void)setDefaultStorageForProfile:(NSString *)profileID',
+    '- (void)loadFromCurrentProfile', '- (BOOL)loadFromProfile:(NSString *)profileId',
+]
 WRAPPERS = {
     'PXPreparedWiFiMethod.inc': ('common/WiFiManager.m', ['- (NSDictionary *)generateWiFiInfo', '- (void)adoptCommittedWiFiInfo:(NSDictionary *)wifiInfo profileID:(NSString *)profileID']),
     'PXOwnedWiFiMethods.inc': ('common/WiFiManager.m', [
@@ -36,6 +49,7 @@ WRAPPERS = {
         '- (NSDictionary *)batteryRecordForLevel:(NSString *)level lowPowerMode:(BOOL)enabled',
         '- (BOOL)persistBatteryRecord:(NSDictionary *)record', '- (BOOL)mirrorBatteryRecord:(NSDictionary *)record error:(NSError **)error']),
     'PXPreparedStorageMethod.inc': ('common/StorageManager.m', ['- (NSDictionary *)generateStorageForCapacity:(NSString *)capacity', '- (void)adoptCommittedStorageInfo:(NSDictionary *)storageInfo', '- (NSDictionary *)currentStorageInfo',
+        *STORAGE_READ_SIGNATURES,
         '- (BOOL)commitDisplayStorageInfo:(NSDictionary *)values updateFilesystem:(BOOL)updateFilesystem error:(NSError **)error',
         '- (void)saveToCurrentProfile', '- (void)saveToProfile:(NSString *)profileId',
         '- (BOOL)persistStorageToProfile:(NSString *)profileID current:(BOOL)current error:(NSError **)error',
@@ -119,6 +133,28 @@ def source_contracts():
                  'legacy uptime getters retain safe default policy when generation is busy'):
         assert case in read('tests/PXRuntimeArtifactPreparationTests.m'), case
     storage = read('common/StorageManager.m')
+    scalar = identifier.method(storage, 'static NSString *PXStorageScalarField(id settings, NSString *key)')
+    assert 'if (![settings isKindOfClass:NSDictionary.class]) return nil;' in scalar
+    assert 'isKindOfClass:NSString.class' in scalar and 'isKindOfClass:NSNumber.class' in scalar
+    conversion = identifier.method(storage, '- (uint64_t)convertGBStringToBytes:(NSString *)gbString')
+    assert 'isKindOfClass:NSString.class' in conversion and 'isKindOfClass:NSNumber.class' in conversion
+    assert conversion.index('!isfinite(bytes) || bytes >= 0x1p64') < conversion.index('(uint64_t)bytes')
+    normalization = identifier.method(storage, '- (uint64_t)normalizeStorageBytes:(uint64_t)bytes')
+    assert normalization.index('normalized >= 0x1p64) return bytes') < normalization.index('(uint64_t)normalized')
+    for name, key in (('totalStorageCapacity', 'TotalStorage'), ('freeStorageSpace', 'FreeStorage'), ('filesystemType', 'FilesystemType')):
+        assert f'PXStorageScalarField(_storageSettings, @"{key}")' in identifier.method(storage, '- (NSString *)' + name)
+    chooser = identifier.method(storage, '- (NSString *)randomizeStorageCapacityForDeviceModel:(NSString *)deviceModel')
+    assert chooser.index('deviceModel && ![deviceModel isKindOfClass:NSString.class]') < chooser.index('[IPhoneModelDB sharedManager]')
+    assert 'candidates = capacities;' in chooser and 'if (capacities.count > 1 && previous.length)' in chooser
+    loader = identifier.method(storage, '- (BOOL)loadFromProfile:(NSString *)profileId')
+    assert loader.index('PXValidatedProfileID(profileId)') < loader.index('PXProfileRootPath(profileId)')
+    assert 'if (!profileId) return NO;' in loader
+    assert '[self setDefaultStorageForProfile:profileId]' in loader and '[self setDefaultStorage]' not in loader
+    targeted = identifier.method(storage, '- (NSString *)randomizeStorageCapacityForProfile:(NSString *)profileID')
+    assert 'PXProfileIdentityPath(target)' in targeted and 'PXActiveProfileID' not in targeted
+    hooks = read('TLinkIOSTweak/StorageHooks.x')
+    assert 'return bytes / blockSize + (bytes % blockSize != 0);' in hooks
+    assert 'convertGBStringToBytes(' not in hooks and 'normalizeStorageBytes(' not in hooks
     display = identifier.method(storage, '- (BOOL)commitDisplayStorageInfo:(NSDictionary *)values updateFilesystem:(BOOL)updateFilesystem error:(NSError **)error')
     assert display.index('[rawTotal copy]') < display.index('acquireWithProfileIDResolver:') < display.index('dictionaryWithContentsOfFile:PXCurrentProfileInfoPath()') < display.index('[_storageSettings copy]')
     assert 'PXActiveProfileID()' not in display and 'mutation.identityDirectory' not in display
@@ -278,6 +314,14 @@ def source_contracts():
 def generate_native_fragments(folder):
     for name, (source, signatures) in WRAPPERS.items():
         (folder / name).write_text('\n\n'.join(identifier.method(read(source), signature) for signature in signatures), encoding='utf-8')
+    storage = read('common/StorageManager.m'); hooks = read('TLinkIOSTweak/StorageHooks.x')
+    declarations = [identifier.method(storage, sig).split(' {', 1)[0] + ';' for sig in STORAGE_READ_SIGNATURES]
+    (folder / 'PXStorageReadDeclarations.inc').write_text('\n'.join(declarations), encoding='utf-8')
+    definitions = [next(line for line in storage.splitlines() if line.startswith('#define BYTES_PER_GB ')),
+                   next(line for line in hooks.splitlines() if line.startswith('#define DEFAULT_BLOCK_SIZE ')),
+                   identifier.method(storage, 'static NSString *PXStorageScalarField(id settings, NSString *key)'),
+                   identifier.method(hooks, 'static uint64_t calculateBlockCount(uint64_t bytes, uint32_t blockSize)')]
+    (folder / 'PXStorageReadHelpers.inc').write_text('\n\n'.join(definitions), encoding='utf-8')
 
 
 def native_tests():

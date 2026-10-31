@@ -26,6 +26,10 @@ static NSArray<NSNumber *> *gTape;
 static NSUInteger gTapeIndex;
 static BOOL gHigh;
 static NSUInteger gUptimeProviders, gStorageCopies, gWiFiSelections, gWiFiCopies, gWiFiReloads;
+static NSUInteger gStorageModelCalls, gStorageActiveReads;
+static NSDictionary *gStorageModelRows, *gStorageModelSpecs;
+static id gStorageFallbackSpecs;
+static NSString *gLastStorageModel;
 static BOOL gWiFiManagerAvailable = YES;
 static NSString *gWiFiMemoryID;
 static void (^gDuringWiFiCopy)(void), (^gDuringWiFiWarmup)(void);
@@ -47,6 +51,14 @@ NSString *PXProfilesPath(void) { return gRoot; }
 NSString *PXCurrentProfileInfoPath(void) { return Path(gRoot, @"current_profile_info.plist"); }
 NSString *PXTLinkIOSSettingsPath(void) { return Path(gRoot, @"tlink_settings.plist"); }
 NSString *PXLegacyActiveProfileInfoPath(void) { return Path(gRoot, @"legacy_selection.plist"); }
+NSString *PXActiveProfileID(void) {
+    gStorageActiveReads++;
+    NSDictionary *selection = [NSDictionary dictionaryWithContentsOfFile:PXCurrentProfileInfoPath()];
+    NSString *profile = PXValidatedProfileID(selection[@"ProfileId"]);
+    if (profile) return profile;
+    selection = [NSDictionary dictionaryWithContentsOfFile:PXLegacyActiveProfileInfoPath()];
+    return PXValidatedProfileID(selection[@"ProfileId"]) ?: PXValidatedProfileID(selection[@"currentProfileId"]);
+}
 NSString *PXProfileDeletionJournalPath(void) { return Path(gRoot, @".profile-delete-journal.plist"); }
 NSString *PXValidatedProfileID(id value) {
     return [value isKindOfClass:NSString.class] && [@[@"a", @"b", @"c"] containsObject:value] ? [value copy] : nil;
@@ -170,6 +182,25 @@ static void (^gDuringStoragePreferenceMirror)(void);
 - (BOOL)synchronize { gStoragePreferenceFlushes++; return YES; }
 @end
 
+@interface IPhoneModelDB : NSObject
++ (instancetype)sharedManager;
+- (NSDictionary *)specForProductType:(NSString *)product;
+- (NSDictionary *)canonicalHardwareSpecForProductType:(NSString *)product;
+@end
+@implementation IPhoneModelDB
++ (instancetype)sharedManager { gStorageModelCalls++; return [self new]; }
+- (NSDictionary *)specForProductType:(NSString *)product { gLastStorageModel = [product copy]; return product ? gStorageModelRows[product] : nil; }
+- (NSDictionary *)canonicalHardwareSpecForProductType:(NSString *)product { return product ? gStorageModelSpecs[product] : nil; }
+@end
+@interface DeviceModelManager : NSObject
++ (instancetype)sharedManager;
+- (NSDictionary *)deviceSpecificationsForModel:(NSString *)product;
+@end
+@implementation DeviceModelManager
++ (instancetype)sharedManager { return [self new]; }
+- (NSDictionary *)deviceSpecificationsForModel:(NSString *)product { (void)product; return gStorageFallbackSpecs; }
+@end
+#include "PXStorageReadHelpers.inc"
 @interface PXPreparedStorageFixture : NSObject {
     NSMutableDictionary *_storageSettings;
     BOOL _isEnabled;
@@ -190,6 +221,7 @@ static void (^gDuringStoragePreferenceMirror)(void);
 - (BOOL)isStorageSpoofingEnabled;
 - (void)setStorageSpoofingEnabled:(BOOL)enabled;
 - (BOOL)setStorageSpoofingEnabled:(BOOL)enabled error:(NSError **)error;
+#include "PXStorageReadDeclarations.inc"
 @end
 #define NSUserDefaults PXStoragePreferenceDefaultsFixture
 @implementation PXPreparedStorageFixture
@@ -703,6 +735,112 @@ static void TestStorageLifecycle(void) {
     }
     CHECK(descriptors == ArtifactDescriptorCount(), "profile-root capability closes descriptors on explicit release dealloc and failed acquire");
     CheckArtifactLeaseFree();
+}
+
+static void TestStorageReadBoundaries(void) {
+    PXPreparedStorageFixture *manager = [PXPreparedStorageFixture new];
+    [manager adoptCommittedStorageInfo:@{ @"TotalStorage": @128, @"FreeStorage": @19.8, @"FilesystemType": @26 }];
+    CHECK([[manager totalStorageCapacity] isEqual:@"128"] && [[manager freeStorageSpace] isEqual:@"19.8"] && [[manager filesystemType] isEqual:@"26"],
+          "storage scalar getters stringify legacy numeric values without changing the cache");
+    CHECK([[manager currentStorageInfo][@"TotalStorage"] isKindOfClass:NSNumber.class], "storage getters never rewrite source or cached scalar types");
+    NSArray *invalid = @[@[], @{}, NSNull.null, NSDate.date];
+    for (id value in invalid) {
+        [manager adoptCommittedStorageInfo:@{ @"TotalStorage": value, @"FreeStorage": value, @"FilesystemType": value }];
+        CHECK(![manager totalStorageCapacity] && ![manager freeStorageSpace] && ![manager filesystemType] &&
+              [manager totalStorageCapacityInMarketingBytes] == 0 && [manager freeStorageSpaceInMarketingBytes] == 0,
+              "malformed storage fields cannot escape string APIs or reach numeric selectors");
+        CHECK([manager convertGBStringToBytes:value] == 0, "storage numeric helper rejects unsupported scalar types");
+    }
+    NSArray *badNumbers = @[@(-1), @0, @(NAN), @(INFINITY), @(-INFINITY), @(1e100), @(0x1p64 / 1e9)];
+    for (id value in badNumbers) CHECK([manager convertGBStringToBytes:value] == 0, "storage numeric conversion rejects nonpositive nonfinite and uint64 overflow values");
+    CHECK([manager convertGBStringToBytes:@"64"] == 64000000000ULL && [manager convertGBStringToBytes:@0.1] == 100000000ULL &&
+          [manager convertGBStringToBytes:@"64GB"] == 64000000000ULL && [manager convertGBStringToBytes:@"bad"] == 0,
+          "storage conversions preserve marketing units fractions and legacy prefix parsing");
+    CHECK([manager convertGBStringToBytes:@"64" useBinaryUnits:YES] == 64000000000ULL &&
+          [manager normalizeStorageBytes:64000000000ULL useMarketingUnits:NO] == 64000000000ULL,
+          "storage compatibility unit switches keep their existing marketing-only behavior");
+    for (NSNumber *capacity in @[@64, @128, @256, @512, @1024]) {
+        uint64_t bytes = capacity.unsignedLongLongValue * 1000000000ULL;
+        CHECK([manager normalizeStorageBytes:bytes] == bytes, "normal storage tiers retain legacy normalization");
+    }
+    CHECK([manager normalizeStorageBytes:UINT64_MAX] == UINT64_MAX && [manager normalizeStorageBytes:UINT64_MAX - 1] == UINT64_MAX - 1,
+          "normalization preserves original byte count if rounding cannot fit uint64");
+    for (NSNumber *bytes in @[@0, @1, @4095, @4096, @4097, @(UINT64_MAX - 1), @(UINT64_MAX)]) {
+        for (NSNumber *block in @[@0, @1, @4096, @(UINT32_MAX)]) {
+            uint64_t size = bytes.unsignedLongLongValue;
+            uint32_t divisor = block.unsignedIntValue ?: 4096;
+            uint64_t count = calculateBlockCount(size, block.unsignedIntValue);
+            __uint128_t covered = (__uint128_t)count * divisor;
+            CHECK(covered >= size && (!count || covered - divisor < size), "block count is the minimal covering count without overflowing at uint64 boundaries");
+        }
+    }
+
+    // Restore exact bytes/absence after the read/default matrix; the fixture
+    // never publishes these temporary model/selection records through SourceStore.
+    NSArray *paths = @[PXCurrentProfileInfoPath(), PXLegacyActiveProfileInfoPath(),
+        Path(PXProfileRootPath(@"a"), @"storage.plist"), Path(PXProfileIdentityPath(@"a"), @"device_ids.plist"),
+        Path(PXProfileIdentityPath(@"b"), @"device_ids.plist")];
+    NSMutableDictionary *original = [NSMutableDictionary dictionary];
+    for (NSString *path in paths) original[path] = [NSData dataWithContentsOfFile:path] ?: (id)NSNull.null;
+    NSDictionary *allBefore = AllArtifactFiles();
+    NSUInteger writes = gWrites, local = gLocal, darwin = gDarwin;
+    NSArray *savedTape = gTape; NSUInteger savedTapeIndex = gTapeIndex; BOOL savedHigh = gHigh;
+    @try {
+        gStorageModelRows = @{ @"iPhoneFixtureA": @{ @"known": @YES }, @"iPhoneFixtureB": @{ @"known": @YES } };
+        gStorageModelSpecs = @{ @"iPhoneFixtureA": @{ @"storageCapacitiesGB": @[@64] }, @"iPhoneFixtureB": @{ @"storageCapacitiesGB": @[@1024] } };
+        CHECK(([@{ @"ProfileId": @"b" } writeToFile:PXCurrentProfileInfoPath() atomically:YES]), "storage read fixture selects active B");
+        CHECK(([@{ @"DeviceModel": @"iPhoneFixtureA" } writeToFile:paths[3] atomically:YES] &&
+               [@{ @"DeviceModel": @"iPhoneFixtureB" } writeToFile:paths[4] atomically:YES]), "storage read fixture model packets seeded");
+        [NSFileManager.defaultManager removeItemAtPath:paths[2] error:NULL];
+        [manager adoptCommittedStorageInfo:@{ @"keep": @"metadata" }]; Tape(@[]);
+        NSUInteger active = gStorageActiveReads;
+        CHECK(![manager loadFromProfile:@"a"] && [[manager totalStorageCapacity] isEqual:@"64"] &&
+              [gLastStorageModel isEqual:@"iPhoneFixtureA"] && active == gStorageActiveReads && [[manager currentStorageInfo][@"keep"] isEqual:@"metadata"],
+              "missing inactive storage uses its own target model rather than active profile hardware");
+        CHECK(![NSFileManager.defaultManager fileExistsAtPath:paths[2]], "default storage stays ephemeral and never creates a source file");
+        NSDictionary *snapshot = [manager currentStorageInfo];
+        NSUInteger calls = gStorageModelCalls;
+        NSArray *badIDs = @[@[], @1, NSNull.null, @"../a", @"Unknown", @""];
+        for (id value in badIDs) CHECK(![manager loadFromProfile:value] && [snapshot isEqual:[manager currentStorageInfo]] && calls == gStorageModelCalls,
+                                      "invalid storage profile ID rejects before defaults model lookup or cache mutation");
+        for (id value in invalid) CHECK(![manager randomizeStorageCapacityForDeviceModel:value] && calls == gStorageModelCalls,
+                                      "invalid model type rejects before database factory lookup");
+        CHECK(([@{ @"TotalStorage": @128, @"FreeStorage": @20, @"FilesystemType": @"apfs" } writeToFile:paths[2] atomically:YES]), "storage read numeric record seeded");
+        CHECK([manager loadFromProfile:@"a"] && [[manager totalStorageCapacity] isEqual:@"128"] && ![manager currentStorageInfo][@"keep"],
+              "existing storage load replaces cache and preserves legacy numeric getter compatibility");
+        gStorageModelSpecs = @{ @"iPhoneFixtureA": @{ @"storageCapacitiesGB": @[@128, @256] } };
+        CHECK([[manager randomizeStorageCapacityForDeviceModel:@"iPhoneFixtureA"] isEqual:@"256"], "numeric previous capacity avoids immediate repeat");
+        gStorageModelSpecs = @{ @"iPhoneFixtureA": @{ @"storageCapacitiesGB": @[@128, @128] } };
+        CHECK([[manager randomizeStorageCapacityForDeviceModel:@"iPhoneFixtureA"] isEqual:@"128"], "duplicate-only tiers retain restoration fallback after filtering");
+        gStorageModelSpecs = @{ @"iPhoneFixtureA": @{ @"storageCapacitiesGB": @[@128] } };
+        CHECK([[manager randomizeStorageCapacityForDeviceModel:@"iPhoneFixtureA"] isEqual:@"128"], "single storage tier is not filtered out");
+        gStorageModelSpecs = @{ @"iPhoneFixtureA": @[] }; gStorageFallbackSpecs = @{ @"storageCapacitiesGB": @[@32] };
+        CHECK(![manager randomizeStorageCapacityForDeviceModel:@"iPhoneFixtureA"] && ![manager randomizeStorageCapacityForDeviceModel:@"iPhoneUnknown"],
+              "iPhone hardware remains fail closed when canonical rows are missing or malformed");
+        gStorageFallbackSpecs = @[];
+        CHECK([manager randomizeStorageCapacityForDeviceModel:nil] != nil, "nil model keeps generic tiers even with malformed optional fallback specs");
+        CHECK(([@{ @"DeviceModel": @"iPhoneUnknown" } writeToFile:paths[3] atomically:YES]), "unknown target model seeded");
+        [NSFileManager.defaultManager removeItemAtPath:paths[2] error:NULL];
+        [manager adoptCommittedStorageInfo:@{ @"TotalStorage": @"256", @"FreeStorage": @"40", @"FilesystemType": @"old", @"keep": @YES }];
+        CHECK(![manager loadFromProfile:@"a"] && ![manager totalStorageCapacity] && ![manager freeStorageSpace] &&
+              ![manager filesystemType] && [[manager currentStorageInfo][@"keep"] boolValue], "failed target defaults clear owned storage fields without leaking previous profile values");
+        gStorageModelSpecs = @{ @"iPhoneFixtureB": @{ @"storageCapacitiesGB": @[@1024] } };
+        CHECK(([@{ @"ProfileId": @[] } writeToFile:PXCurrentProfileInfoPath() atomically:YES] &&
+               [@{ @"ProfileId": @"b" } writeToFile:PXLegacyActiveProfileInfoPath() atomically:YES]), "storage current-load malformed canonical selection fixture seeded");
+        [manager loadFromCurrentProfile];
+        CHECK([[manager totalStorageCapacity] isEqual:@"1024"] && [gLastStorageModel isEqual:@"iPhoneFixtureB"],
+              "current storage malformed canonical ID uses legacy active hardware for ephemeral defaults without loading another profile record");
+    } @finally {
+        for (NSString *path in paths) {
+            id bytes = original[path];
+            if (bytes == NSNull.null) [NSFileManager.defaultManager removeItemAtPath:path error:NULL];
+            else CHECK([bytes writeToFile:path atomically:YES], "storage read fixture restores exact original bytes");
+        }
+        gStorageModelRows = nil; gStorageModelSpecs = nil; gStorageFallbackSpecs = nil; gLastStorageModel = nil;
+        gTape = savedTape; gTapeIndex = savedTapeIndex; gHigh = savedHigh;
+    }
+    CHECK([allBefore isEqual:AllArtifactFiles()] && writes == gWrites && local == gLocal && darwin == gDarwin,
+          "storage read and default matrix leaves source marker files and notification counters unchanged after teardown");
 }
 
 static void TestStorageDisplayCommit(void) {
@@ -1351,7 +1489,7 @@ int main(void) {
         CHECK(gStore != nil && [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
             return [tx setDictionary:@{ @"keep": @YES } atPath:Path(PXProfileIdentityPath(@"a"), @"device_ids.plist") error:error];
         } error:NULL], "preparation source backend seeded");
-        TestPurePreparation(); TestManagerWrappers(); TestCompositionAndUptime(); TestStorageLifecycle(); TestStorageDisplayCommit(); TestStoragePreferenceWriters(); TestUptimeLifecycle(); TestWiFiLifecycle(); TestBatteryLifecycle(); TestBorrowedArtifactScope(); TestUptimeReadOnly();
+        TestPurePreparation(); TestManagerWrappers(); TestCompositionAndUptime(); TestStorageLifecycle(); TestStorageDisplayCommit(); TestStorageReadBoundaries(); TestStoragePreferenceWriters(); TestUptimeLifecycle(); TestWiFiLifecycle(); TestBatteryLifecycle(); TestBorrowedArtifactScope(); TestUptimeReadOnly();
         gStore = nil; [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
         printf("Runtime artifact preparation: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);
         return gFailures ? 1 : 0;
