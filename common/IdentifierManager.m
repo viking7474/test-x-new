@@ -41,6 +41,8 @@
 #import "PXProfileDeletionJournal.h"
 #import <Security/Security.h>
 #import <sys/sysctl.h>
+#include <math.h>
+#include <limits.h>
 
 @interface LSApplicationWorkspace
 + (id)defaultWorkspace;
@@ -357,6 +359,15 @@ static NSString *PXIdentifierDisplayString(id value) {
     if ([value isKindOfClass:NSString.class]) return value;
     if ([value isKindOfClass:NSNumber.class]) return [value stringValue];
     return nil;
+}
+
+// Preserve legacy float/truncation formatting, but never convert non-finite
+// or out-of-int-range values to int. Invalid data follows the existing fallback path.
+static NSString *PXIdentifierBatteryPercentage(id value) {
+    if (![value isKindOfClass:NSString.class] && ![value isKindOfClass:NSNumber.class]) return nil;
+    float scaled = [value floatValue] * 100.0f;
+    if (!isfinite(scaled) || (double)scaled < INT_MIN || (double)scaled > INT_MAX) return nil;
+    return [NSString stringWithFormat:@"%d%%", (int)scaled];
 }
 
 static BOOL PXWebCompatIOSRangeEnabled(void) {
@@ -2715,8 +2726,10 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
             // Check for WiFi info in the profile
             NSString *wifiInfoPath = [identityDir stringByAppendingPathComponent:@"wifi_info.plist"];
             NSDictionary *wifiInfo = [NSDictionary dictionaryWithContentsOfFile:wifiInfoPath];
-            if (wifiInfo && wifiInfo[@"ssid"] && wifiInfo[@"bssid"]) {
-                NSString *formattedValue = [NSString stringWithFormat:@"%@ (%@)", wifiInfo[@"ssid"], wifiInfo[@"bssid"]];
+            NSString *ssid = PXIdentifierDisplayString(wifiInfo[@"ssid"]);
+            NSString *bssid = PXIdentifierDisplayString(wifiInfo[@"bssid"]);
+            if (ssid && bssid) {
+                NSString *formattedValue = [NSString stringWithFormat:@"%@ (%@)", ssid, bssid];
                 PXLog(@"Found WiFi info in wifi_info.plist: %@", formattedValue);
                 return formattedValue;
             }
@@ -2724,10 +2737,11 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
         else if ([type isEqualToString:@"StorageSystem"]) {
             NSString *storagePath = [identityDir stringByAppendingPathComponent:@"storage.plist"];
             NSDictionary *storageDict = [NSDictionary dictionaryWithContentsOfFile:storagePath];
-            if (storageDict && storageDict[@"TotalStorage"] && storageDict[@"FreeStorage"]) {
+            NSString *total = PXIdentifierDisplayString(storageDict[@"TotalStorage"]);
+            NSString *free = PXIdentifierDisplayString(storageDict[@"FreeStorage"]);
+            if (total && free) {
                 NSString *formattedStorage = [NSString stringWithFormat:@"Total: %@ GB, Free: %@ GB", 
-                                             storageDict[@"TotalStorage"], 
-                                             storageDict[@"FreeStorage"]];
+                                             total, free];
                 PXLog(@"Found Storage info in storage.plist: %@", formattedStorage);
                 return formattedStorage;
             }
@@ -2742,8 +2756,7 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
             }
         }
         else if ([type isEqualToString:@"SystemUptime"]) {
-            NSString *profilePath = [self profileIdentityPath];
-NSString *uptimePath = [profilePath stringByAppendingPathComponent:@"system_uptime.plist"];
+NSString *uptimePath = [identityDir stringByAppendingPathComponent:@"system_uptime.plist"];
 NSDictionary *uptimeDict = [NSDictionary dictionaryWithContentsOfFile:uptimePath];
 id uptimeValue = uptimeDict[@"value"];
 if ([uptimeValue isKindOfClass:NSNumber.class] || [uptimeValue isKindOfClass:NSString.class]) {
@@ -2757,8 +2770,7 @@ if ([uptimeValue isKindOfClass:NSNumber.class] || [uptimeValue isKindOfClass:NSS
 return @"Not Set";
         }
         else if ([type isEqualToString:@"BootTime"]) {
-            NSString *profilePath = [self profileIdentityPath];
-NSString *bootTimePath = [profilePath stringByAppendingPathComponent:@"boot_time.plist"];
+NSString *bootTimePath = [identityDir stringByAppendingPathComponent:@"boot_time.plist"];
 NSDictionary *bootTimeDict = [NSDictionary dictionaryWithContentsOfFile:bootTimePath];
 if (bootTimeDict && bootTimeDict[@"value"]) {
     NSDate *bootTime = bootTimeDict[@"value"];
@@ -2787,7 +2799,7 @@ return @"Not Set";
             // First try to get from device_ids.plist
             NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
             NSDictionary *deviceIds = [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath];
-            NSString *version = deviceIds[@"IOSVersion"];
+            NSString *version = PXIdentifierDisplayString(deviceIds[@"IOSVersion"]);
             
             // If we have a pre-formatted version string, use it
             if (version && [version containsString:@"("]) {
@@ -2796,7 +2808,7 @@ return @"Not Set";
             }
             
             // If not pre-formatted, try to combine version and build
-            NSString *build = deviceIds[@"IOSBuild"];
+            NSString *build = PXIdentifierDisplayString(deviceIds[@"IOSBuild"]);
             if (version && build) {
                 NSString *formattedVersion = [NSString stringWithFormat:@"%@ (%@)", version, build];
                 PXLog(@"[WeaponX] Formatted iOS version from components: %@", formattedVersion);
@@ -2805,9 +2817,12 @@ return @"Not Set";
         }
         
         // Fall back to IOSVersionInfo if profile-specific value not found
-        NSDictionary *currentVersion = [[IOSVersionInfo sharedManager] currentIOSVersionInfo];
-        if (currentVersion && currentVersion[@"version"] && currentVersion[@"build"]) {
-            NSString *formattedVersion = [NSString stringWithFormat:@"%@ (%@)", currentVersion[@"version"], currentVersion[@"build"]];
+        id rawVersion = [[IOSVersionInfo sharedManager] currentIOSVersionInfo];
+        NSDictionary *currentVersion = [rawVersion isKindOfClass:NSDictionary.class] ? rawVersion : nil;
+        NSString *version = PXIdentifierDisplayString(currentVersion[@"version"]);
+        NSString *build = PXIdentifierDisplayString(currentVersion[@"build"]);
+        if (version && build) {
+            NSString *formattedVersion = [NSString stringWithFormat:@"%@ (%@)", version, build];
             PXLog(@"[WeaponX] Formatted iOS version from IOSVersionInfo: %@", formattedVersion);
             return formattedVersion;
         }
@@ -2828,11 +2843,11 @@ return @"Not Set";
                 NSString *bssid = nil;
                 
                 if ([sharedManager respondsToSelector:@selector(currentSSID)]) {
-                    ssid = [sharedManager currentSSID];
+                    ssid = PXIdentifierDisplayString([sharedManager currentSSID]);
                 }
                 
                 if ([sharedManager respondsToSelector:@selector(currentBSSID)]) {
-                    bssid = [sharedManager currentBSSID];
+                    bssid = PXIdentifierDisplayString([sharedManager currentBSSID]);
                 }
                 
                 if (ssid && bssid) {
@@ -2857,11 +2872,11 @@ return @"Not Set";
                 NSString *freeStorage = nil;
                 
                 if ([sharedManager respondsToSelector:@selector(totalStorageCapacity)]) {
-                    totalStorage = [sharedManager totalStorageCapacity];
+                    totalStorage = PXIdentifierDisplayString([sharedManager totalStorageCapacity]);
                 }
                 
                 if ([sharedManager respondsToSelector:@selector(freeStorageSpace)]) {
-                    freeStorage = [sharedManager freeStorageSpace];
+                    freeStorage = PXIdentifierDisplayString([sharedManager freeStorageSpace]);
                 }
                 
                 if (totalStorage && freeStorage) {
@@ -2874,18 +2889,20 @@ return @"Not Set";
                 if ([sharedManager respondsToSelector:@selector(generateStorageForCapacity:)]) {
                     // Randomly choose between 64GB and 128GB
                     NSString *capacity = [sharedManager respondsToSelector:@selector(randomizeStorageCapacity)] ? 
-                                           [sharedManager randomizeStorageCapacity] : @"64";
+                                           PXIdentifierDisplayString([sharedManager randomizeStorageCapacity]) : nil;
+                    if (!capacity) capacity = @"64";
                     
-                    NSDictionary *storageInfo = [sharedManager generateStorageForCapacity:capacity];
-                    if (storageInfo) {
-                        [sharedManager setTotalStorageCapacity:storageInfo[@"TotalStorage"]];
-                        [sharedManager setFreeStorageSpace:storageInfo[@"FreeStorage"]];
-                        [sharedManager setFilesystemType:storageInfo[@"FilesystemType"]];
-                        
-                        NSString *formattedStorage = [NSString stringWithFormat:@"Total: %@ GB, Free: %@ GB", 
-                                                  storageInfo[@"TotalStorage"], 
-                                                  storageInfo[@"FreeStorage"]];
-                        return formattedStorage;
+                    id rawStorage = [sharedManager generateStorageForCapacity:capacity];
+                    NSDictionary *storageInfo = [rawStorage isKindOfClass:NSDictionary.class] ? rawStorage : nil;
+                    NSString *total = PXIdentifierDisplayString(storageInfo[@"TotalStorage"]);
+                    NSString *free = PXIdentifierDisplayString(storageInfo[@"FreeStorage"]);
+                    if (total && free) {
+                        id rawFilesystem = storageInfo[@"FilesystemType"];
+                        NSString *filesystem = PXIdentifierDisplayString(rawFilesystem);
+                        if ([sharedManager respondsToSelector:@selector(setTotalStorageCapacity:)]) [sharedManager setTotalStorageCapacity:total];
+                        if ([sharedManager respondsToSelector:@selector(setFreeStorageSpace:)]) [sharedManager setFreeStorageSpace:free];
+                        if ((!rawFilesystem || filesystem) && [sharedManager respondsToSelector:@selector(setFilesystemType:)]) [sharedManager setFilesystemType:filesystem];
+                        return [NSString stringWithFormat:@"Total: %@ GB, Free: %@ GB", total, free];
                     }
                 }
             }
@@ -2900,9 +2917,9 @@ return @"Not Set";
         if (storageManager && [storageManager respondsToSelector:@selector(sharedManager)]) {
             id sharedManager = [storageManager sharedManager];
             if (sharedManager) {
-                [sharedManager setTotalStorageCapacity:storageCapacity];
-                [sharedManager setFreeStorageSpace:freeSpaceValue];
-                [sharedManager setFilesystemType:@"0x1A"];
+                if ([sharedManager respondsToSelector:@selector(setTotalStorageCapacity:)]) [sharedManager setTotalStorageCapacity:storageCapacity];
+                if ([sharedManager respondsToSelector:@selector(setFreeStorageSpace:)]) [sharedManager setFreeStorageSpace:freeSpaceValue];
+                if ([sharedManager respondsToSelector:@selector(setFilesystemType:)]) [sharedManager setFilesystemType:@"0x1A"];
             }
         }
         
@@ -2925,14 +2942,8 @@ return @"Not Set";
                     if ([sharedManager respondsToSelector:@selector(batteryLevel)]) {
                         
                         // Use explicit cast to BatteryManager to avoid confusion with UIDevice method
-                        NSString *level = [(BatteryManager *)sharedManager batteryLevel];
-                        
-                        if (level) {
-                            float levelFloat = [level floatValue];
-                            int percentage = (int)(levelFloat * 100);
-                            
-                            NSString *displayValue = [NSString stringWithFormat:@"%d%%", percentage];
-                                 
+                        NSString *displayValue = PXIdentifierBatteryPercentage([(BatteryManager *)sharedManager batteryLevel]);
+                        if (displayValue) {
                             PXLog(@"[WeaponX] 🔋 Battery info from BatteryManager: %@", displayValue);
                             return displayValue;
                         }
@@ -2940,22 +2951,16 @@ return @"Not Set";
                     
                     // If we couldn't get both values, try to get a pre-formatted display value
                     if ([sharedManager respondsToSelector:@selector(generateBatteryInfo)]) {
-                        NSDictionary *batteryInfo = [sharedManager generateBatteryInfo];
+                        id rawBattery = [sharedManager generateBatteryInfo];
+                        NSDictionary *batteryInfo = [rawBattery isKindOfClass:NSDictionary.class] ? rawBattery : nil;
                         if (batteryInfo) {
                             // Check if we have a pre-formatted display value
-                            if (batteryInfo[@"DisplayValue"]) {
-                                return batteryInfo[@"DisplayValue"];
-                            }
+                            NSString *displayValue = PXIdentifierDisplayString(batteryInfo[@"DisplayValue"]);
+                            if (displayValue) return displayValue;
                             
                             // Otherwise, format it ourselves
-                            NSString *level = batteryInfo[@"BatteryLevel"];
-                            
-                            if (level) {
-                                float levelFloat = [level floatValue];
-                                int percentage = (int)(levelFloat * 100);
-                                
-                                NSString *displayValue = [NSString stringWithFormat:@"%d%%", percentage];
-                                     
+                            displayValue = PXIdentifierBatteryPercentage(batteryInfo[@"BatteryLevel"]);
+                            if (displayValue) {
                                 PXLog(@"[WeaponX] 🔋 Generated battery info: %@", displayValue);
                                 return displayValue;
                             }
@@ -2964,7 +2969,7 @@ return @"Not Set";
                 } 
                 // Handle individual battery values
                 else if ([type isEqualToString:@"BatteryLevel"] && [sharedManager respondsToSelector:@selector(batteryLevel)]) {
-                    NSString *level = [(BatteryManager *)sharedManager batteryLevel];
+                    NSString *level = PXIdentifierDisplayString([(BatteryManager *)sharedManager batteryLevel]);
                     if (level) {
                         PXLog(@"[WeaponX] 🔋 Battery level from BatteryManager: %@", level);
                         return level;
@@ -2991,7 +2996,7 @@ NSTimeInterval uptime = [[UptimeManager sharedManager] currentUptimeForProfile:p
     else if ([type isEqualToString:@"BootTime"]) {
         NSString *profilePath = [self profileIdentityPath];
 NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:profilePath];
-        if (!bootTime) {
+        if (![bootTime isKindOfClass:NSDate.class]) {
             PXLog(@"Default BootTime value: Not Set");
             return @"Not Set";
         }
@@ -3006,55 +3011,55 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
     // Fallback to the original implementation if profile-specific value not found
     PXLog(@"Falling back to default implementation for %@", type);
     if ([type isEqualToString:@"IDFA"]) {
-        NSString *result = [[IDFAManager sharedManager] currentIDFA];
+        NSString *result = PXIdentifierDisplayString([[IDFAManager sharedManager] currentIDFA]);
         PXLog(@"Default IDFA value: %@", result ?: @"nil");
         return result;
     } else if ([type isEqualToString:@"IDFV"]) {
-        NSString *result = [[IDFVManager sharedManager] currentIDFV];
+        NSString *result = PXIdentifierDisplayString([[IDFVManager sharedManager] currentIDFV]);
         PXLog(@"Default IDFV value: %@", result ?: @"nil");
         return result;
     } else if ([type isEqualToString:@"SystemBootUUID"]) {
-        NSString *result = [[SystemUUIDManager sharedManager] currentBootUUID];
+        NSString *result = PXIdentifierDisplayString([[SystemUUIDManager sharedManager] currentBootUUID]);
         PXLog(@"Default SystemBootUUID value: %@", result ?: @"nil");
         return result;
     } else if ([type isEqualToString:@"DyldCacheUUID"]) {
-        NSString *result = [[DyldCacheUUIDManager sharedManager] currentDyldCacheUUID];
+        NSString *result = PXIdentifierDisplayString([[DyldCacheUUIDManager sharedManager] currentDyldCacheUUID]);
         PXLog(@"Default DyldCacheUUID value: %@", result ?: @"nil");
         return result;
     } else if ([type isEqualToString:@"PasteboardUUID"]) {
-        NSString *result = [[PasteboardUUIDManager sharedManager] currentPasteboardUUID];
+        NSString *result = PXIdentifierDisplayString([[PasteboardUUIDManager sharedManager] currentPasteboardUUID]);
         PXLog(@"Default PasteboardUUID value: %@", result ?: @"nil");
         return result;
     } else if ([type isEqualToString:@"KeychainUUID"]) {
-        NSString *result = [[KeychainUUIDManager sharedManager] currentKeychainUUID];
+        NSString *result = PXIdentifierDisplayString([[KeychainUUIDManager sharedManager] currentKeychainUUID]);
         PXLog(@"Default KeychainUUID value: %@", result ?: @"nil");
         return result;
     } else if ([type isEqualToString:@"UserDefaultsUUID"]) {
-        NSString *result = [[UserDefaultsUUIDManager sharedManager] currentUserDefaultsUUID];
+        NSString *result = PXIdentifierDisplayString([[UserDefaultsUUIDManager sharedManager] currentUserDefaultsUUID]);
         PXLog(@"Default UserDefaultsUUID value: %@", result ?: @"nil");
         return result;
     } else if ([type isEqualToString:@"AppGroupUUID"]) {
-        NSString *result = [[AppGroupUUIDManager sharedManager] currentAppGroupUUID];
+        NSString *result = PXIdentifierDisplayString([[AppGroupUUIDManager sharedManager] currentAppGroupUUID]);
         PXLog(@"Default AppGroupUUID value: %@", result ?: @"nil");
         return result;
     } else if ([type isEqualToString:@"CoreDataUUID"]) {
-        NSString *result = [[CoreDataUUIDManager sharedManager] currentCoreDataUUID];
+        NSString *result = PXIdentifierDisplayString([[CoreDataUUIDManager sharedManager] currentCoreDataUUID]);
         PXLog(@"Default CoreDataUUID value: %@", result ?: @"nil");
         return result;
     } else if ([type isEqualToString:@"AppInstallUUID"]) {
-        NSString *result = [[AppInstallUUIDManager sharedManager] currentAppInstallUUID];
+        NSString *result = PXIdentifierDisplayString([[AppInstallUUIDManager sharedManager] currentAppInstallUUID]);
         PXLog(@"Default AppInstallUUID value: %@", result ?: @"nil");
         return result;
     } else if ([type isEqualToString:@"AppContainerUUID"]) {
-        NSString *result = [[AppContainerUUIDManager sharedManager] currentAppContainerUUID];
+        NSString *result = PXIdentifierDisplayString([[AppContainerUUIDManager sharedManager] currentAppContainerUUID]);
         PXLog(@"Default AppContainerUUID value: %@", result ?: @"nil");
         return result;
     } else if ([type isEqualToString:@"DeviceName"]) {
-        NSString *result = [[DeviceNameManager sharedManager] currentDeviceName];
+        NSString *result = PXIdentifierDisplayString([[DeviceNameManager sharedManager] currentDeviceName]);
         PXLog(@"Default DeviceName value: %@", result ?: @"nil");
         return result;
     } else if ([type isEqualToString:@"SerialNumber"]) {
-        NSString *result = [[SerialNumberManager sharedManager] currentSerialNumber];
+        NSString *result = PXIdentifierDisplayString([[SerialNumberManager sharedManager] currentSerialNumber]);
         PXLog(@"Default SerialNumber value: %@", result ?: @"nil");
         return result;
     }

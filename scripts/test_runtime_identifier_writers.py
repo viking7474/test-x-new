@@ -126,6 +126,29 @@ def source_contracts():
     assert 'PXIdentifierDisplayString(batteryDict[type])' in display
     assert '[uptimeValue isKindOfClass:NSNumber.class]' in display and '[uptimeValue isKindOfClass:NSString.class]' in display
     assert 'PXIdentifierDisplayString(tracking[@"ATTAuthorizationStatus"])' in display
+    percentage = method(manager, 'static NSString *PXIdentifierBatteryPercentage(id value)')
+    assert manager.index('static NSString *PXIdentifierBatteryPercentage(id value) {') < manager.index(READER_SIGNATURES[1] + ' {'), 'C percentage helper must precede its caller'
+    assert 'float scaled = [value floatValue] * 100.0f;' in percentage
+    assert percentage.index('!isfinite(scaled)') < percentage.index('(int)scaled')
+    assert '(double)scaled < INT_MIN' in percentage and '(double)scaled > INT_MAX' in percentage
+    assert display.count('PXIdentifierBatteryPercentage(') == 2 and '(int)(levelFloat * 100)' not in display
+    for packet in ('rawVersion', 'rawStorage', 'rawBattery'):
+        assert f'[{packet} isKindOfClass:NSDictionary.class]' in display
+    for setter in ('setTotalStorageCapacity:', 'setFreeStorageSpace:', 'setFilesystemType:'):
+        assert display.count(f'respondsToSelector:@selector({setter})') == 2
+    assert '(!rawFilesystem || filesystem)' in display
+    for receiver, keys in (('wifiInfo', ('ssid', 'bssid')), ('storageDict', ('TotalStorage', 'FreeStorage'))):
+        for key in keys:
+            assert f'PXIdentifierDisplayString({receiver}[@"{key}"])' in display
+    for selector in ('currentSSID', 'currentBSSID', 'totalStorageCapacity', 'freeStorageSpace'):
+        assert f'PXIdentifierDisplayString([sharedManager {selector}])' in display
+    assert 'stringByAppendingPathComponent:@"system_uptime.plist"]' in display
+    for name in ('uptimePath', 'bootTimePath'):
+        assert f'{name} = [identityDir stringByAppendingPathComponent:' in display
+    assert 'if (![bootTime isKindOfClass:NSDate.class])' in display
+    for _, cls, _, _, setter in GENERATORS:
+        getter = setter[3:4].lower() + setter[4:]
+        assert f'PXIdentifierDisplayString([[{cls} sharedManager] {getter}])' in display
     inference = method(manager, 'static BOOL PXRuntimeSnapshotImpliesIdentifierEnabled(NSString *type, PXRuntimeReadSnapshot *runtimeView)')
     assert 'static NSDictionary<NSString *, NSArray<NSString *> *> *requiredKeys;' in inference
     assert inference.count('dispatch_once(&once, ^{') == 1
@@ -305,6 +328,7 @@ def generate_native_fragments(folder):
     (folder / 'PXReaderDeclarations.inc').write_text('\n'.join(m.split(' {', 1)[0] + ';' for m in reader_methods), encoding='utf-8')
     (folder / 'PXReaderMethods.inc').write_text('\n\n'.join(reader_methods), encoding='utf-8')
     reader_statics = [method(manager, 'static NSString *PXIdentifierDisplayString(id value)'),
+                      method(manager, 'static NSString *PXIdentifierBatteryPercentage(id value)'),
                       method(manager, 'static BOOL PXRuntimeSnapshotImpliesIdentifierEnabled(NSString *type, PXRuntimeReadSnapshot *runtimeView)'),
                       method(read('common/PXRuntimeIdentifierWriter.m'), 'static NSDictionary<NSString *, NSString *> *PXIdentifierSidecarMap(void)'),
                       method(read('common/PXRuntimeIdentifierWriter.m'), 'NSString *PXRuntimeIdentifierSidecar(NSString *type)')]
@@ -313,7 +337,7 @@ def generate_native_fragments(folder):
     for _, cls, _, _, setter in GENERATORS:
         getter = setter[3:4].lower() + setter[4:]
         reader_providers.append(f'@interface {cls} : PXReaderProvider\n- (NSString *){getter};\n@end\n'
-                                f'@implementation {cls}\n- (NSString *){getter} {{ gFallbacks++; return @"provider-fallback"; }}\n@end\n')
+                                f'@implementation {cls}\n- (NSString *){getter} {{ gFallbacks++; return PXReaderProviderValue(@"{cls}", @"provider-fallback"); }}\n@end\n')
     reader_providers.append('static NSArray *PXReaderSidecarCases(void) { return ' + objc_array(list(FILES.items())) + '; }\n')
     (folder / 'PXReaderProviders.inc').write_text('\n'.join(reader_providers), encoding='utf-8')
 
