@@ -156,6 +156,23 @@ def source_contracts():
     hooks = read('TLinkIOSTweak/StorageHooks.x')
     assert 'return bytes / blockSize + (bytes % blockSize != 0);' in hooks
     assert 'convertGBStringToBytes(' not in hooks and 'normalizeStorageBytes(' not in hooks
+    clock = identifier.method(hooks, 'static NSTimeInterval PXStorageCacheTime(void)')
+    assert 'CLOCK_MONOTONIC' in clock and 'return NAN;' in clock and '#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)' in clock
+    cache_read = identifier.method(hooks, 'static NSDictionary *PXStorageCachedValues(NSTimeInterval now, uint64_t *generation)')
+    cache_publish = identifier.method(hooks, 'static NSDictionary *PXStoragePublishValues(NSDictionary *values, NSTimeInterval now, uint64_t generation)')
+    invalidation = identifier.method(hooks, 'static void PXStorageInvalidateCache(void)')
+    assert 'now >= gStorageCacheLoadedAt' in cache_read and 'now - gStorageCacheLoadedAt < 30.0' in cache_read
+    assert 'if (generation) *generation = gStorageCacheGeneration;' in cache_read
+    assert 'if (generation == gStorageCacheGeneration)' in cache_publish and 'gStorageCacheGeneration++;' in invalidation
+    assert cache_publish.index('NSPropertyListImmutable') < cache_publish.index('os_unfair_lock_lock')
+    for body in (cache_read, cache_publish, invalidation):
+        assert '__attribute__((objc_precise_lifetime)) NSDictionary *discarded = nil;' in body
+        assert body.index('discarded = gCachedStorageValues;') < body.index('gCachedStorageValues =')
+        assert body.index('os_unfair_lock_unlock') < body.index('(void)discarded;')
+    values_reader = identifier.method(hooks, 'static NSDictionary *getStorageValues()')
+    assert 'PXStorageCachedValues(now, &generation)' in values_reader and values_reader.count('now, generation)') == 5
+    assert 'timeIntervalSince1970' not in values_reader
+    check_macro_arity(read('tests/PXStorageObjectCacheTests.m'), 'PXStorageObjectCacheTests.m')
     native_copy = identifier.method(hooks, 'static BOOL PXStorageCopyNativeSnapshot(uint64_t *totalBytes, uint64_t *freeBytes)')
     assert native_copy.count('atomic_load_explicit(&gStorageNativeRevision, memory_order_seq_cst)') == 2
     assert 'free > total' in native_copy and 'revision & 1' in native_copy
@@ -358,6 +375,9 @@ def generate_native_fragments(folder):
                          'static int PXStorageBoundedMountCount(int result, int bufsize, size_t entrySize)',
                          'static void PXStorageModifyStatfsWithValues(struct statfs *buf,\n                                            uint64_t totalBytes,\n                                            uint64_t freeBytes)']
     (folder / 'PXStorageNativeWork.inc').write_text('\n\n'.join(constants + [identifier.method(hooks, sig) for sig in native_signatures]), encoding='utf-8')
+    cache_start = hooks.index('static os_unfair_lock gStorageCacheLock =')
+    cache_end = hooks.index('static void PXStorageSettingsChanged(', cache_start)
+    (folder / 'PXStorageObjectCache.inc').write_text(hooks[cache_start:cache_end], encoding='utf-8')
 
 
 def native_tests():
@@ -386,6 +406,12 @@ def native_tests():
                             str(ROOT / 'tests/PXStorageNativeSnapshotTests.m'), '-framework', 'Foundation',
                             '-o', str(native_binary)], check=True, cwd=ROOT, timeout=60)
             subprocess.run([str(native_binary)], check=True, cwd=ROOT, timeout=60)
+            cache_binary = folder / ('storage-cache-' + scheme)
+            subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions',
+                            '-Wall', '-Wextra', '-Werror=implicit-function-declaration', '-I', str(folder), *defines,
+                            str(ROOT / 'tests/PXStorageObjectCacheTests.m'), '-framework', 'Foundation',
+                            '-o', str(cache_binary)], check=True, cwd=ROOT, timeout=60)
+            subprocess.run([str(cache_binary)], check=True, cwd=ROOT, timeout=60)
 
 
 if __name__ == '__main__':

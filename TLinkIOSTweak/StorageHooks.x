@@ -21,6 +21,7 @@
 #import <stdatomic.h>
 #import <stdbool.h>
 #include <math.h>
+#include <time.h>
 
 // Constants for proper size calculations - use only marketing units (1000-based)
 #define BYTES_PER_KB (1000ULL)
@@ -133,43 +134,92 @@ static BOOL isInScopedAppsList(void) {
     }
 }
 
-// Storage values and timestamp are one lock-owned immutable cache unit.
+// Object cache state is lock-owned; its epoch tracks notification invalidation.
 static os_unfair_lock gStorageCacheLock = OS_UNFAIR_LOCK_INIT;
 static NSDictionary *gCachedStorageValues = nil;
 static NSTimeInterval gStorageCacheLoadedAt = 0;
+static uint64_t gStorageCacheGeneration = 0;
 
-static NSDictionary *PXStorageCachedValues(NSTimeInterval now) {
+static NSTimeInterval PXStorageCacheTime(void) {
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    return nil; // The captured view is the cache authority; never reuse another generation.
+    return 0; // Captured views bypass this object cache and its clock.
 #else
+    struct timespec instant = {0};
+    if (clock_gettime(CLOCK_MONOTONIC, &instant) != 0) return NAN;
+    return (NSTimeInterval)instant.tv_sec + (NSTimeInterval)instant.tv_nsec / 1e9;
+#endif
+}
+
+static NSDictionary *PXStorageCachedValues(NSTimeInterval now, uint64_t *generation) {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    (void)now;
+    if (generation) *generation = 0;
+    return nil;
+#else
+    __attribute__((objc_precise_lifetime)) NSDictionary *discarded = nil;
+    NSDictionary *cached = nil;
     os_unfair_lock_lock(&gStorageCacheLock);
-    NSDictionary *cached = (gCachedStorageValues && now - gStorageCacheLoadedAt < 30.0)
-        ? gCachedStorageValues
-        : nil;
+    if (generation) *generation = gStorageCacheGeneration;
+    if (gCachedStorageValues && isfinite(now) && now >= gStorageCacheLoadedAt &&
+        now - gStorageCacheLoadedAt < 30.0) {
+        cached = gCachedStorageValues;
+    } else {
+        discarded = gCachedStorageValues;
+        gCachedStorageValues = nil;
+        gStorageCacheLoadedAt = 0;
+    }
     os_unfair_lock_unlock(&gStorageCacheLock);
+    (void)discarded;
     return cached;
 #endif
 }
 
-static NSDictionary *PXStoragePublishValues(NSDictionary *values, NSTimeInterval now) {
+static NSDictionary *PXStoragePublishValues(NSDictionary *values, NSTimeInterval now, uint64_t generation) {
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    (void)now; (void)generation;
     return values;
 #else
-    NSDictionary *immutable = [values isKindOfClass:[NSDictionary class]] ? [values copy] : nil;
+    __attribute__((objc_precise_lifetime)) NSDictionary *immutable = nil;
+    if ([values isKindOfClass:NSDictionary.class]) {
+        @try {
+            NSData *data = [NSPropertyListSerialization dataWithPropertyList:values format:NSPropertyListBinaryFormat_v1_0 options:0 error:NULL];
+            id detached = data ? [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:NULL] : nil;
+            if ([detached isKindOfClass:NSDictionary.class]) immutable = detached;
+        } @catch (NSException *exception) { (void)exception; }
+        // Match enabled invalid-data byte defaults, not physical capacity.
+        if (!immutable) immutable = @{ @"TotalStorage": @"128", @"FreeStorage": @"38" };
+    }
+    NSTimeInterval observedNow = PXStorageCacheTime();
+    __attribute__((objc_precise_lifetime)) NSDictionary *discarded = nil;
+    NSDictionary *published = nil;
     os_unfair_lock_lock(&gStorageCacheLock);
-    gCachedStorageValues = immutable;
-    gStorageCacheLoadedAt = immutable ? now : 0;
-    NSDictionary *published = gCachedStorageValues;
+    if (generation == gStorageCacheGeneration) {
+        discarded = gCachedStorageValues;
+        BOOL cacheable = immutable && isfinite(now) && now >= 0;
+        gCachedStorageValues = cacheable ? immutable : nil;
+        gStorageCacheLoadedAt = cacheable ? now : 0;
+        published = immutable; // A clock failure may still serve this detached read once.
+    } else {
+        // A notification invalidated this loader. Do not resurrect its packet;
+        // a newer publication, if present, is already the authoritative cache.
+        if (gCachedStorageValues && isfinite(observedNow) && observedNow >= gStorageCacheLoadedAt &&
+            observedNow - gStorageCacheLoadedAt < 30.0) published = gCachedStorageValues;
+    }
     os_unfair_lock_unlock(&gStorageCacheLock);
+    (void)discarded; (void)immutable;
     return published;
 #endif
 }
 
 static void PXStorageInvalidateCache(void) {
+    __attribute__((objc_precise_lifetime)) NSDictionary *discarded = nil;
     os_unfair_lock_lock(&gStorageCacheLock);
+    discarded = gCachedStorageValues;
     gCachedStorageValues = nil;
     gStorageCacheLoadedAt = 0;
+    gStorageCacheGeneration++;
     os_unfair_lock_unlock(&gStorageCacheLock);
+    (void)discarded;
 }
 
 static void PXStorageSettingsChanged(CFNotificationCenterRef center,
@@ -194,8 +244,9 @@ static void PXStorageSettingsChanged(CFNotificationCenterRef center,
 // Helper function to get consistent storage values directly from storage.plist.
 static NSDictionary *getStorageValues() {
     PX_RUNTIME_READ_OPERATION;
-    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
-    NSDictionary *cached = PXStorageCachedValues(now);
+    uint64_t generation = 0;
+    NSTimeInterval now = PXStorageCacheTime();
+    NSDictionary *cached = PXStorageCachedValues(now, &generation);
     if (cached) return cached;
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     PXRuntimeReadSnapshot *runtimeView = PXCaptureRuntimeSnapshot();
@@ -219,14 +270,14 @@ static NSDictionary *getStorageValues() {
     }
     if (!runtimeStorageEnabled) return nil;
     if (runtimeStorage[@"TotalStorage"] && runtimeStorage[@"FreeStorage"]) {
-        return PXStoragePublishValues(runtimeStorage, now);
+        return PXStoragePublishValues(runtimeStorage, now, generation);
     }
     // Match the rootful behavior: once StorageSystem is explicitly/effectively
     // enabled, an unavailable profile artifact must not leak the physical disk.
     return PXStoragePublishValues(@{
         @"TotalStorage": @"128",
         @"FreeStorage": @"38.4"
-    }, now);
+    }, now, generation);
 #endif
     
     // First check if the feature is globally enabled
@@ -254,7 +305,7 @@ static NSDictionary *getStorageValues() {
             NSDictionary *storageDict = [NSDictionary dictionaryWithContentsOfFile:
                 [profileRoot stringByAppendingPathComponent:@"storage.plist"]];
             if (storageDict[@"TotalStorage"] && storageDict[@"FreeStorage"]) {
-                return PXStoragePublishValues(storageDict, now);
+                return PXStoragePublishValues(storageDict, now, generation);
             }
         }
         
@@ -268,7 +319,7 @@ static NSDictionary *getStorageValues() {
                 return PXStoragePublishValues(@{
                     @"TotalStorage": totalStorage,
                     @"FreeStorage": freeStorage
-                }, now);
+                }, now, generation);
             }
         }
     } @catch (NSException *exception) {
@@ -279,7 +330,7 @@ static NSDictionary *getStorageValues() {
     return PXStoragePublishValues(@{
         @"TotalStorage": @"128",
         @"FreeStorage": @"38.4"
-    }, now);
+    }, now, generation);
 }
 
 // Helper to calculate block count from bytes and block size
