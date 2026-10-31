@@ -193,9 +193,12 @@ def source_contracts():
     assert apple.index('CFGetTypeID(original) != CFDictionaryGetTypeID()') < apple.index('PXResolvedWiFiInfo()')
     assert apple.index('CFBridgingRetain(dict)') < apple.index('if (!replacement) return result;') < apple.index('*info = replacement;') < apple.index('CFRelease(original);')
     assert apple.rindex('@catch') < apple.index('*info = replacement;')
+    assert '@finally' in apple and 'ssidData = nil; dict = nil; bssid = nil; ssid = nil; wifiInfo = nil;' in apple
     scan = identifier.method(wifi_hooks, WIFI_CF_SIGNATURES[6])
     assert scan.index('PXWiFiInfoHasIdentity(wifi)') < scan.index('[original mutableCopy]')
     assert scan.index('(!kind || [original[@"WifiStandard"] isEqual:kind])') < scan.index('[original mutableCopy]')
+    assert all(token in scan for token in ('containsString:@"802.11ax"', 'containsString:@"802.11ac"', 'containsString:@"802.11n"'))
+    assert 'containsString:@"n"' not in scan
     check_macro_arity(read('tests/PXWiFiCFHookTests.m'), 'PXWiFiCFHookTests.m')
     assert read('tests/PXRuntimeArtifactPreparationTests.m').count('TestHookWiFiResolver();') == 1
     observer = identifier.method(wifi_source, '- (void)registerForProfileNotifications')

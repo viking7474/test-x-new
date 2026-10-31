@@ -424,7 +424,7 @@ static id replaced_dictionaryWithScanResult(id self, SEL _cmd, id arg1) {
         NSDictionary *wifi = PXResolvedWiFiInfo();
         if (!PXWiFiInfoHasIdentity(wifi)) return original;
         NSString *standard = [wifi[@"wifiStandard"] isKindOfClass:NSString.class] ? wifi[@"wifiStandard"] : nil;
-        NSNumber *kind = [standard containsString:@"ax"] ? @6 : ([standard containsString:@"ac"] ? @5 : ([standard containsString:@"n"] ? @4 : nil));
+        NSNumber *kind = [standard containsString:@"802.11ax"] ? @6 : ([standard containsString:@"802.11ac"] ? @5 : ([standard containsString:@"802.11n"] ? @4 : nil));
         if ([original[@"SSID"] isEqual:wifi[@"ssid"]] && [original[@"BSSID"] isEqual:wifi[@"bssid"]] &&
             (!kind || [original[@"WifiStandard"] isEqual:kind])) return original;
         NSMutableDictionary *modified = [original mutableCopy];
@@ -546,18 +546,28 @@ static int replaced_Apple80211GetInfoCopy(void *handle, CFDictionaryRef *info) {
     int result = orig_Apple80211GetInfoCopy ? orig_Apple80211GetInfoCopy(handle, info) : -1;
     CFDictionaryRef original = *info;
     CFDictionaryRef replacement = NULL;
+    NSDictionary *wifiInfo = nil;
+    NSString *ssid = nil, *bssid = nil;
+    NSMutableDictionary *dict = nil;
+    NSData *ssidData = nil;
     @try {
         if (original && CFGetTypeID(original) != CFDictionaryGetTypeID()) return result;
-        NSDictionary *wifiInfo = PXResolvedWiFiInfo();
+        wifiInfo = PXResolvedWiFiInfo();
         if (!PXWiFiInfoHasIdentity(wifiInfo)) return result;
-        NSString *ssid = wifiInfo[@"ssid"], *bssid = wifiInfo[@"bssid"];
+        ssid = wifiInfo[@"ssid"]; bssid = wifiInfo[@"bssid"];
         if (!ssid.length || !bssid.length) return result;
-        NSMutableDictionary *dict = original ? [(__bridge NSDictionary *)original mutableCopy] : [NSMutableDictionary dictionary];
+        dict = original ? [(__bridge NSDictionary *)original mutableCopy] : [NSMutableDictionary dictionary];
         dict[@"SSID_STR"] = ssid; dict[@"SSID"] = ssid; dict[@"BSSID"] = bssid;
-        NSData *ssidData = [ssid dataUsingEncoding:NSUTF8StringEncoding];
+        ssidData = [ssid dataUsingEncoding:NSUTF8StringEncoding];
         if (ssidData) dict[@"SSID_DATA"] = ssidData;
         replacement = (CFDictionaryRef)CFBridgingRetain(dict);
     } @catch (NSException *exception) { (void)exception; return result; }
+      @finally {
+        // This target is built with ARC but not necessarily -fobjc-arc-exceptions.
+        // Explicit stores guarantee that strong preparation temporaries are
+        // released even when a mocked/private collaborator throws mid-prepare.
+        ssidData = nil; dict = nil; bssid = nil; ssid = nil; wifiInfo = nil;
+    }
     if (!replacement) return result;
     // Publish before releasing: a destructor/reentrant observer must see the
     // new owned output, never the old pointer while it is being destroyed.
