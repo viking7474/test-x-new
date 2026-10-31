@@ -19,6 +19,8 @@
 #import "PXPaths.h"
 #import "PXNativeHookCoordinator.h"
 #import <os/lock.h>
+#include <math.h>
+#include <time.h>
 
 
 
@@ -71,40 +73,105 @@ static WiFiNetworkRef (*orig_WiFiDeviceClientCopyCurrentNetwork)(WiFiDeviceClien
 static CFStringRef (*orig_WiFiNetworkGetSSID)(WiFiNetworkRef network);
 static CFStringRef (*orig_WiFiNetworkGetBSSID)(WiFiNetworkRef network);
 
-// Immutable WiFi info/profile/timestamp cache protected as one unit.
+// Cache ownership and invalidation epoch are protected as one unit.
 static os_unfair_lock gWiFiCacheLock = OS_UNFAIR_LOCK_INIT;
 static NSDictionary *cachedWifiInfo = nil;
 static NSString *cachedProfileId = nil;
-static NSDate *cacheTimestamp = nil;
-static NSTimeInterval kCacheValidityDuration = 300.0;
+static NSTimeInterval gWiFiCacheLoadedAt = 0;
+static uint64_t gWiFiCacheGeneration = 0;
+static const NSTimeInterval kCacheValidityDuration = 300.0;
 
-static NSDictionary *PXWiFiCachedInfo(NSString *profileId, NSDate *now) {
-    os_unfair_lock_lock(&gWiFiCacheLock);
-    BOOL valid = cachedWifiInfo && cachedProfileId && cacheTimestamp &&
-        [cachedProfileId isEqualToString:profileId] &&
-        [now timeIntervalSinceDate:cacheTimestamp] <= kCacheValidityDuration;
-    NSDictionary *snapshot = valid ? cachedWifiInfo : nil;
-    os_unfair_lock_unlock(&gWiFiCacheLock);
-    return snapshot;
+static BOOL PXWiFiInfoHasIdentity(id info) {
+    return [info isKindOfClass:NSDictionary.class] &&
+        [info[@"ssid"] isKindOfClass:NSString.class] && [info[@"bssid"] isKindOfClass:NSString.class];
 }
 
-static NSDictionary *PXWiFiPublishInfo(NSDictionary *info, NSString *profileId, NSDate *now) {
-    NSDictionary *immutable = [info isKindOfClass:[NSDictionary class]] ? [info copy] : nil;
+static NSTimeInterval PXWiFiCacheTime(void) {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    return 0; // Captured views do not consult the live profile cache.
+#else
+    struct timespec instant = {0};
+    if (clock_gettime(CLOCK_MONOTONIC, &instant) != 0) return NAN;
+    return (NSTimeInterval)instant.tv_sec + (NSTimeInterval)instant.tv_nsec / 1e9;
+#endif
+}
+
+static NSDictionary *PXWiFiCachedInfo(NSString *profileId, NSTimeInterval now, uint64_t *generation) {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    (void)profileId; (void)now;
+    if (generation) *generation = 0;
+    return nil;
+#else
+    __attribute__((objc_precise_lifetime)) NSDictionary *discardedInfo = nil;
+    __attribute__((objc_precise_lifetime)) NSString *discardedProfile = nil;
+    NSDictionary *snapshot = nil;
+    NSString *snapshotProfile = nil;
     os_unfair_lock_lock(&gWiFiCacheLock);
-    cachedWifiInfo = immutable;
-    cachedProfileId = [profileId copy];
-    cacheTimestamp = immutable ? now : nil;
-    NSDictionary *published = cachedWifiInfo;
+    if (generation) *generation = gWiFiCacheGeneration;
+    if (cachedWifiInfo && cachedProfileId && isfinite(now) && now >= gWiFiCacheLoadedAt &&
+        now - gWiFiCacheLoadedAt <= kCacheValidityDuration) {
+        snapshot = cachedWifiInfo;
+        snapshotProfile = cachedProfileId;
+    } else {
+        discardedInfo = cachedWifiInfo; discardedProfile = cachedProfileId;
+        cachedWifiInfo = nil; cachedProfileId = nil; gWiFiCacheLoadedAt = 0;
+    }
     os_unfair_lock_unlock(&gWiFiCacheLock);
-    return published;
+    (void)discardedInfo; (void)discardedProfile;
+    return [profileId isKindOfClass:NSString.class] && [snapshotProfile isEqualToString:profileId] ? snapshot : nil;
+#endif
+}
+
+static NSDictionary *PXWiFiPublishInfo(NSDictionary *info, NSString *profileId, NSTimeInterval now, uint64_t generation) {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    (void)profileId; (void)now; (void)generation;
+    return info;
+#else
+    __attribute__((objc_precise_lifetime)) NSDictionary *immutable = nil;
+    __attribute__((objc_precise_lifetime)) NSString *frozenProfile = nil;
+    @try {
+        if (!PXWiFiInfoHasIdentity(info) || ![profileId isKindOfClass:NSString.class] || !profileId.length) return nil;
+        frozenProfile = [profileId copy];
+        NSData *data = [NSPropertyListSerialization dataWithPropertyList:info format:NSPropertyListBinaryFormat_v1_0 options:0 error:NULL];
+        id detached = data ? [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:NULL] : nil;
+        if (PXWiFiInfoHasIdentity(detached)) immutable = detached;
+    } @catch (NSException *exception) { (void)exception; }
+    if (!immutable || !frozenProfile.length) return nil;
+    NSTimeInterval observedNow = PXWiFiCacheTime();
+    __attribute__((objc_precise_lifetime)) NSDictionary *discardedInfo = nil;
+    __attribute__((objc_precise_lifetime)) NSString *discardedProfile = nil;
+    NSDictionary *published = nil;
+    NSString *publishedProfile = nil;
+    os_unfair_lock_lock(&gWiFiCacheLock);
+    if (generation == gWiFiCacheGeneration) {
+        discardedInfo = cachedWifiInfo; discardedProfile = cachedProfileId;
+        BOOL cacheable = isfinite(now) && now >= 0;
+        cachedWifiInfo = cacheable ? immutable : nil;
+        cachedProfileId = cacheable ? frozenProfile : nil;
+        gWiFiCacheLoadedAt = cacheable ? now : 0;
+        published = immutable;
+        publishedProfile = frozenProfile;
+    } else if (cachedWifiInfo && cachedProfileId && isfinite(observedNow) && observedNow >= gWiFiCacheLoadedAt &&
+               observedNow - gWiFiCacheLoadedAt <= kCacheValidityDuration) {
+        // An invalidated loader may reuse only a fresh winner for its own ID.
+        published = cachedWifiInfo;
+        publishedProfile = cachedProfileId;
+    }
+    os_unfair_lock_unlock(&gWiFiCacheLock);
+    (void)discardedInfo; (void)discardedProfile; (void)immutable; (void)frozenProfile;
+    return [publishedProfile isEqualToString:frozenProfile] ? published : nil;
+#endif
 }
 
 static void PXWiFiInvalidateCache(void) {
+    __attribute__((objc_precise_lifetime)) NSDictionary *discardedInfo = nil;
+    __attribute__((objc_precise_lifetime)) NSString *discardedProfile = nil;
     os_unfair_lock_lock(&gWiFiCacheLock);
-    cachedWifiInfo = nil;
-    cachedProfileId = nil;
-    cacheTimestamp = nil;
+    discardedInfo = cachedWifiInfo; discardedProfile = cachedProfileId;
+    cachedWifiInfo = nil; cachedProfileId = nil; gWiFiCacheLoadedAt = 0;
+    gWiFiCacheGeneration++;
     os_unfair_lock_unlock(&gWiFiCacheLock);
+    (void)discardedInfo; (void)discardedProfile;
 }
 
 // Forward declarations
@@ -160,23 +227,23 @@ static NSDictionary *getProfileWiFiInfo(void) {
     NSString *deviceIdsPath = PXProfileDeviceIDsPath(profileId);
     if (!profileId.length || !identityDir.length || !deviceIdsPath.length) return nil;
 
-    NSDate *now = [NSDate date];
-    NSDictionary *cached = PXWiFiCachedInfo(profileId, now);
+    uint64_t generation = 0;
+    NSTimeInterval now = PXWiFiCacheTime();
+    NSDictionary *cached = PXWiFiCachedInfo(profileId, now, &generation);
     if (cached) return cached;
 
     NSString *wifiInfoPath = [identityDir stringByAppendingPathComponent:@"wifi_info.plist"];
-    NSFileManager *fileManager = [NSFileManager defaultManager];
     NSDictionary *resolved = nil;
 
     NSDictionary *wifiInfo = [NSDictionary dictionaryWithContentsOfFile:wifiInfoPath];
-    if (wifiInfo[@"ssid"] && wifiInfo[@"bssid"]) {
+    if (PXWiFiInfoHasIdentity(wifiInfo)) {
         resolved = wifiInfo;
     }
 
     NSDictionary *deviceIds = nil;
     if (!resolved) {
         deviceIds = [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath];
-        if (deviceIds[@"SSID"] && deviceIds[@"BSSID"]) {
+        if ([deviceIds[@"SSID"] isKindOfClass:NSString.class] && [deviceIds[@"BSSID"] isKindOfClass:NSString.class]) {
             resolved = @{
                 @"ssid": deviceIds[@"SSID"],
                 @"bssid": deviceIds[@"BSSID"],
@@ -204,17 +271,17 @@ static NSDictionary *getProfileWiFiInfo(void) {
         }
     }
 
-    id wifiManager = NSClassFromString(@"WiFiManager")
-        ? [NSClassFromString(@"WiFiManager") sharedManager]
-        : nil;
+    Class managerClass = resolved ? Nil : NSClassFromString(@"WiFiManager");
+    id wifiManager = [managerClass respondsToSelector:@selector(sharedManager)] ? [managerClass sharedManager] : nil;
     if (!resolved && [wifiManager respondsToSelector:@selector(currentWiFiInfo)]) {
         NSDictionary *managerInfo = [wifiManager currentWiFiInfo];
-        if (managerInfo[@"ssid"] && managerInfo[@"bssid"]) resolved = managerInfo;
+        if (PXWiFiInfoHasIdentity(managerInfo)) resolved = managerInfo;
     }
     if (!resolved && [wifiManager respondsToSelector:@selector(generateWiFiInfo)]) {
         NSDictionary *generated = [wifiManager generateWiFiInfo];
-        if (generated[@"ssid"] && generated[@"bssid"]) {
+        if (PXWiFiInfoHasIdentity(generated)) {
             resolved = generated;
+            NSFileManager *fileManager = [NSFileManager defaultManager];
             if ([fileManager fileExistsAtPath:identityDir] ||
                 [fileManager createDirectoryAtPath:identityDir withIntermediateDirectories:YES attributes:nil error:nil]) {
                 [generated writeToFile:wifiInfoPath atomically:YES];
@@ -228,7 +295,7 @@ static NSDictionary *getProfileWiFiInfo(void) {
         }
     }
 
-    return resolved ? PXWiFiPublishInfo(resolved, profileId, now) : nil;
+    return resolved ? PXWiFiPublishInfo(resolved, profileId, now, generation) : nil;
 #endif
 }
 

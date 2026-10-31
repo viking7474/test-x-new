@@ -99,6 +99,30 @@ def source_contracts():
     assert '[self profileIDFromManager:manager]' in save_wifi and '[mutation performSourceWrite:' in save_wifi
     assert '@finally { [mutation invalidate]; }' in save_wifi and 'createDirectoryAtPath:' not in save_wifi
     assert 'PXPerformRuntimeSourceWrite' not in wifi_source
+    wifi_hooks = read('TLinkIOSTweak/WiFiHook.x')
+    wifi_cache_read = identifier.method(wifi_hooks, 'static NSDictionary *PXWiFiCachedInfo(NSString *profileId, NSTimeInterval now, uint64_t *generation)')
+    wifi_cache_publish = identifier.method(wifi_hooks, 'static NSDictionary *PXWiFiPublishInfo(NSDictionary *info, NSString *profileId, NSTimeInterval now, uint64_t generation)')
+    wifi_cache_clear = identifier.method(wifi_hooks, 'static void PXWiFiInvalidateCache(void)')
+    assert 'if (generation) *generation = gWiFiCacheGeneration;' in wifi_cache_read
+    assert 'now >= gWiFiCacheLoadedAt' in wifi_cache_read and 'now - gWiFiCacheLoadedAt <= kCacheValidityDuration' in wifi_cache_read
+    assert 'generation == gWiFiCacheGeneration' in wifi_cache_publish and 'gWiFiCacheGeneration++;' in wifi_cache_clear
+    assert wifi_cache_publish.index('NSPropertyListImmutable') < wifi_cache_publish.index('os_unfair_lock_lock')
+    assert wifi_cache_publish.index('[profileId copy]') < wifi_cache_publish.index('os_unfair_lock_lock')
+    assert wifi_cache_publish.index('os_unfair_lock_unlock') < wifi_cache_publish.index('[publishedProfile isEqualToString:frozenProfile]')
+    for body in (wifi_cache_read, wifi_cache_publish, wifi_cache_clear):
+        for name in ('discardedInfo', 'discardedProfile'):
+            assert f'objc_precise_lifetime)) ' in body and f'{name} =' in body
+            assert body.index('os_unfair_lock_unlock') < body.index(f'(void){name};')
+    wifi_identity = identifier.method(wifi_hooks, 'static BOOL PXWiFiInfoHasIdentity(id info)')
+    assert 'isKindOfClass:NSDictionary.class' in wifi_identity and wifi_identity.count('isKindOfClass:NSString.class') == 2
+    wifi_reader = identifier.method(wifi_hooks, 'static NSDictionary *getProfileWiFiInfo(void)')
+    assert 'PXWiFiCachedInfo(profileId, now, &generation)' in wifi_reader and 'PXWiFiPublishInfo(resolved, profileId, now, generation)' in wifi_reader
+    assert 'cacheTimestamp' not in wifi_hooks and 'CLOCK_MONOTONIC' in wifi_hooks
+    assert 'resolved ? Nil : NSClassFromString(@"WiFiManager")' in wifi_reader and wifi_reader.count('NSClassFromString(@"WiFiManager")') == 1
+    assert 'respondsToSelector:@selector(sharedManager)' in wifi_reader
+    for candidate in ('wifiInfo', 'managerInfo', 'generated'): assert 'PXWiFiInfoHasIdentity(' + candidate + ')' in wifi_reader
+    for field in ('SSID', 'BSSID'): assert f'[deviceIds[@"{field}"] isKindOfClass:NSString.class]' in wifi_reader
+    check_macro_arity(read('tests/PXWiFiHookCacheTests.m'), 'PXWiFiHookCacheTests.m')
     observer = identifier.method(wifi_source, '- (void)registerForProfileNotifications')
     assert '@synchronized (self)' in observer and 'if (self.profileChangeObserver) return;' in observer
     assert '__weak typeof(self) weakSelf' in observer and '__strong typeof(weakSelf) owner' in observer
@@ -383,6 +407,9 @@ def source_contracts():
     assert manifest['rollout'] == '4C.2H5S-partial'
     assert manifest['writers']['identifier-artifacts']['status'] == 'enrolled'
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
+    assert manifest['writers']['wifi-hook-legacy']['status'] == 'pending'
+    wifi_field = next(row for row in manifest['sources'] if row['field'] == 'wifiInfo')
+    assert wifi_field['status'] == 'partial' and 'wifi-hook-legacy' in wifi_field['writers']
     print('PASS: Artifact preparation and battery/WiFi/storage/uptime ownership contracts (remaining writers partial; native runtime not implied)')
 
 
@@ -390,6 +417,12 @@ def generate_native_fragments(folder):
     for name, (source, signatures) in WRAPPERS.items():
         (folder / name).write_text('\n\n'.join(identifier.method(read(source), signature) for signature in signatures), encoding='utf-8')
     storage = read('common/StorageManager.m'); hooks = read('TLinkIOSTweak/StorageHooks.x')
+    wifi = read('TLinkIOSTweak/WiFiHook.x')
+    start = wifi.index('static os_unfair_lock gWiFiCacheLock =')
+    end = wifi.index('// Forward declarations', start)
+    (folder / 'PXWiFiHookCache.inc').write_text(wifi[start:end], encoding='utf-8')
+    (folder / 'PXWiFiHookReader.inc').write_text('\n\n'.join(identifier.method(wifi, sig) for sig in
+        ('static NSString *getCurrentProfileID(void)', 'static NSDictionary *getProfileWiFiInfo(void)')), encoding='utf-8')
     declarations = [identifier.method(storage, sig).split(' {', 1)[0] + ';' for sig in STORAGE_READ_SIGNATURES]
     (folder / 'PXStorageReadDeclarations.inc').write_text('\n'.join(declarations), encoding='utf-8')
     definitions = [next(line for line in storage.splitlines() if line.startswith('#define BYTES_PER_GB ')),
@@ -461,6 +494,12 @@ def native_tests():
                             str(ROOT / 'tests/PXStorageObjCHookTests.m'), '-framework', 'Foundation',
                             '-o', str(objc_binary)], check=True, cwd=ROOT, timeout=60)
             subprocess.run([str(objc_binary)], check=True, cwd=ROOT, timeout=60)
+            wifi_binary = folder / ('wifi-hook-cache-' + scheme)
+            subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions',
+                            '-Wall', '-Wextra', '-Werror=implicit-function-declaration', '-I', str(folder), *defines,
+                            str(ROOT / 'tests/PXWiFiHookCacheTests.m'), '-framework', 'Foundation',
+                            '-o', str(wifi_binary)], check=True, cwd=ROOT, timeout=60)
+            subprocess.run([str(wifi_binary)], check=True, cwd=ROOT, timeout=60)
 
 
 if __name__ == '__main__':
