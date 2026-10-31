@@ -141,6 +141,32 @@ def source_contracts():
         assert forbidden not in hook_resolver
     for field in ('SSID', 'BSSID'): assert f'[deviceIds[@"{field}"] isKindOfClass:NSString.class]' in wifi_reader
     check_macro_arity(read('tests/PXWiFiHookCacheTests.m'), 'PXWiFiHookCacheTests.m')
+    swizzler = read('TLinkIOSTweak/MethodSwizzler.m')
+    encoding_gate = identifier.method(swizzler, 'BOOL PXMethodHasCompatibleTypeEncoding(Method method, const char *encoding)')
+    assert 'from.numberOfArguments < 2' in encoding_gate and 'from.numberOfArguments != to.numberOfArguments' in encoding_gate
+    assert 'PXSwizzleTypeEqual(from.methodReturnType, to.methodReturnType)' in encoding_gate
+    assert 'index < from.numberOfArguments' in encoding_gate and '[from getArgumentTypeAtIndex:index], [to getArgumentTypeAtIndex:index]' in encoding_gate
+    install = identifier.method(swizzler, 'static void PXInstallLocalSwizzle(Class target, SEL original, SEL alias)')
+    assert '@synchronized (MethodSwizzler.class)' in install and 'original == alias' in install
+    assert install.index('PXSwizzlePairInstalled(') < install.index('method_exchangeImplementations(')
+    assert install.index('calloc(') < install.index('class_addMethod(')
+    assert install.index('PXSwizzleHasOwnSelector(target, original)') < install.index('method_exchangeImplementations(')
+    assert install.index('PXSwizzleHasOwnSelector(target, alias)') < install.index('method_exchangeImplementations(')
+    pair_gate = identifier.method(swizzler, 'static BOOL PXSwizzlePairInstalled(Class target, SEL original, SEL alias)')
+    assert 'entry->original == alias && entry->alias == original' in pair_gate and 'PXSwizzleClassesRelated(target, entry->target)' in pair_gate
+    assert 'class_isMetaClass(left) != class_isMetaClass(right)' in swizzler
+    assert 'if (!methods) return NO;' in swizzler
+    for group, selector in (('PXWiFiNWPathSSID', '_getSSID'), ('PXWiFiNWPathBSSID', '_getBSSID')):
+        assert wifi_hooks.count('%group ' + group) == 1 and wifi_hooks.count('%init(' + group + ')') == 1
+        assert 'pathClass && PXMethodHasCompatibleTypeEncoding(class_getInstanceMethod(pathClass, @selector(' + selector + ')), "@@:")' in wifi_hooks
+    assert 'PXMethodHasCompatibleTypeEncoding(dictionaryMethod, "@@:@")' in wifi_hooks
+    assert 'PXMethodHasCompatibleTypeEncoding(fetchMethod, "v@:@?")' in wifi_hooks
+    assert 'method_setImplementation(' not in wifi_hooks and '%init;' not in wifi_hooks
+    for retired in ('WiFiManagerClientCreate', 'WiFiDeviceClientCopyCurrentNetwork', '%hook NWPathMonitor',
+                    'usesInterfaceType:', 'setPathUpdateHandler:', '- (id)currentPath', '- (NSInteger)quality',
+                    '- (double)latency', '- (BOOL)isExpensive', '- (BOOL)isConstrained', '- (id)gatherDiagnostics'):
+        assert retired not in wifi_hooks, retired
+    check_macro_arity(read('tests/PXMethodSwizzlerTests.m'), 'PXMethodSwizzlerTests.m')
     assert read('tests/PXRuntimeArtifactPreparationTests.m').count('TestHookWiFiResolver();') == 1
     observer = identifier.method(wifi_source, '- (void)registerForProfileNotifications')
     assert '@synchronized (self)' in observer and 'if (self.profileChangeObserver) return;' in observer
@@ -233,7 +259,7 @@ def source_contracts():
     assert 'method_getNumberOfArguments(entry) != 4' in abi and "returnType[0] == 'Q' && returnType[1] == 0" in abi
     for name in ('result', 'url', 'error'): assert f'{name}[sizeof({name}) - 1] = 0;' in abi
     check_macro_arity(read('tests/PXStorageObjCHookTests.m'), 'PXStorageObjCHookTests.m')
-    for file in ('tests/PXWiFiHookCacheTests.m', 'tests/PXRuntimeArtifactPreparationTests.m'):
+    for file in ('tests/PXWiFiHookCacheTests.m', 'tests/PXRuntimeArtifactPreparationTests.m', 'tests/PXMethodSwizzlerTests.m'):
         declarations = re.findall(r'^@(interface|implementation)\s+(\w+)(?:[ \t]*\(([^)]*)\))?', read(file), re.M)
         assert len(declarations) == len(set(declarations)), 'duplicate native fixture class declaration: ' + file
     for label in ('hook source arrival baseline seeded', 'hook mutable target baseline seeded'):
@@ -524,6 +550,12 @@ def native_tests():
                             str(ROOT / 'tests/PXWiFiHookCacheTests.m'), '-framework', 'Foundation',
                             '-o', str(wifi_binary)], check=True, cwd=ROOT, timeout=60)
             subprocess.run([str(wifi_binary)], check=True, cwd=ROOT, timeout=60)
+            swizzle_binary = folder / ('method-swizzler-' + scheme)
+            subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions',
+                            '-Wall', '-Wextra', '-Werror=implicit-function-declaration', '-I', str(ROOT / 'TLinkIOSTweak'), *defines,
+                            str(ROOT / 'TLinkIOSTweak/MethodSwizzler.m'), str(ROOT / 'tests/PXMethodSwizzlerTests.m'),
+                            '-framework', 'Foundation', '-o', str(swizzle_binary)], check=True, cwd=ROOT, timeout=60)
+            subprocess.run([str(swizzle_binary)], check=True, cwd=ROOT, timeout=60)
 
 
 if __name__ == '__main__':

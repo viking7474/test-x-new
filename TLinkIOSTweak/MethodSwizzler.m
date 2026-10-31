@@ -1,111 +1,105 @@
 #import "MethodSwizzler.h"
-#import <string.h>
+#include <string.h>
+#include <stdlib.h>
+
+static const char *PXSwizzleSkipQualifiers(const char *type) {
+    while (type && *type && strchr("rnNoORV", *type)) type++;
+    return type;
+}
+static BOOL PXSwizzleTypeEqual(const char *left, const char *right) {
+    left = PXSwizzleSkipQualifiers(left); right = PXSwizzleSkipQualifiers(right);
+    if (!left || !right || !*left || !*right) return NO;
+    if (strcmp(left, right) == 0) return YES;
+    // Class annotations do not change object calling convention. A block (@?)
+    // is deliberately distinct from an ordinary object; other shapes stay exact.
+    return left[0] == '@' && right[0] == '@' &&
+        (left[1] == 0 || left[1] == '"') && (right[1] == 0 || right[1] == '"');
+}
+BOOL PXMethodHasCompatibleTypeEncoding(Method method, const char *encoding) {
+    const char *original = method ? method_getTypeEncoding(method) : NULL;
+    if (!original || !encoding || !*original || !*encoding) return NO;
+    @try {
+        NSMethodSignature *from = [NSMethodSignature signatureWithObjCTypes:original];
+        NSMethodSignature *to = [NSMethodSignature signatureWithObjCTypes:encoding];
+        if (!from || !to || from.numberOfArguments < 2 || from.numberOfArguments != to.numberOfArguments ||
+            !PXSwizzleTypeEqual(from.methodReturnType, to.methodReturnType)) return NO;
+        for (NSUInteger index = 0; index < from.numberOfArguments; index++) {
+            if (!PXSwizzleTypeEqual([from getArgumentTypeAtIndex:index], [to getArgumentTypeAtIndex:index])) return NO;
+        }
+        return YES;
+    } @catch (NSException *exception) { (void)exception; return NO; }
+}
+
+// Installation records intentionally live for the process, as do the registered
+// application/framework classes used here. Access only under the shared monitor.
+typedef struct PXSwizzleInstallation {
+    __unsafe_unretained Class target;
+    SEL original, alias;
+    struct PXSwizzleInstallation *next;
+} PXSwizzleInstallation;
+static PXSwizzleInstallation *gPXSwizzleInstallations = NULL;
+
+static BOOL PXSwizzleClassesRelated(Class left, Class right) {
+    if (class_isMetaClass(left) != class_isMetaClass(right)) return NO;
+    for (Class cls = left; cls; cls = class_getSuperclass(cls)) if (cls == right) return YES;
+    for (Class cls = right; cls; cls = class_getSuperclass(cls)) if (cls == left) return YES;
+    return NO;
+}
+static BOOL PXSwizzlePairInstalled(Class target, SEL original, SEL alias) {
+    for (PXSwizzleInstallation *entry = gPXSwizzleInstallations; entry; entry = entry->next) {
+        BOOL samePair = (entry->original == original && entry->alias == alias) ||
+                        (entry->original == alias && entry->alias == original);
+        // Reusing one alias at multiple hierarchy levels can recurse when a
+        // child's original calls super. One owner per pair/hierarchy is admitted.
+        if (samePair && PXSwizzleClassesRelated(target, entry->target)) return YES;
+    }
+    return NO;
+}
+static BOOL PXSwizzleHasOwnSelector(Class target, SEL selector) {
+    unsigned count = 0;
+    Method *methods = class_copyMethodList(target, &count);
+    if (!methods) return NO;
+    BOOL found = NO;
+    for (unsigned index = 0; index < count; index++) {
+        if (method_getName(methods[index]) == selector) { found = YES; break; }
+    }
+    free(methods);
+    return found;
+}
+static void PXInstallLocalSwizzle(Class target, SEL original, SEL alias) {
+    if (!target || !original || !alias || original == alias) return;
+    @synchronized (MethodSwizzler.class) {
+        if (PXSwizzlePairInstalled(target, original, alias)) return;
+        Method from = class_getInstanceMethod(target, original);
+        Method to = class_getInstanceMethod(target, alias);
+        if (!from || !to || !PXMethodHasCompatibleTypeEncoding(from, method_getTypeEncoding(to))) {
+            NSLog(@"[WeaponX] MethodSwizzler: missing/incompatible methods on %s (%s -> %s), skipping",
+                class_getName(target), sel_getName(original), sel_getName(alias));
+            return;
+        }
+        PXSwizzleInstallation *entry = calloc(1, sizeof(*entry));
+        if (!entry) return;
+        // Localize BOTH methods before exchange; never mutate an inherited
+        // alias's Method in its superclass, even if the original is local.
+        if ((!PXSwizzleHasOwnSelector(target, original) &&
+             !class_addMethod(target, original, method_getImplementation(from), method_getTypeEncoding(from))) ||
+            (!PXSwizzleHasOwnSelector(target, alias) &&
+             !class_addMethod(target, alias, method_getImplementation(to), method_getTypeEncoding(to)))) {
+            free(entry); return;
+        }
+        Method localOriginal = class_getInstanceMethod(target, original);
+        Method localAlias = class_getInstanceMethod(target, alias);
+        method_exchangeImplementations(localOriginal, localAlias);
+        entry->target = target; entry->original = original; entry->alias = alias;
+        entry->next = gPXSwizzleInstallations; gPXSwizzleInstallations = entry;
+    }
+}
 
 @implementation MethodSwizzler
-
-// Returns YES only when it is ABI-safe to install the swizzle.
-// Guards against mismatched Objective-C type encodings, which otherwise
-// corrupt registers or crash when the runtime calls through the exchanged
-// implementation (e.g. an object-returning IMP installed over a
-// double-returning getter such as -[NEHotspotNetwork signalStrength]).
-static BOOL PXMethodSwizzleTypesCompatible(Method original, Method swizzled) {
-    if (!original || !swizzled) return NO;
-
-    const char *origEnc = method_getTypeEncoding(original);
-    const char *swizEnc = method_getTypeEncoding(swizzled);
-    if (!origEnc || !swizEnc) return NO;
-    if (strcmp(origEnc, swizEnc) == 0) return YES;
-
-    // Full encodings can legitimately differ across SDKs (argument-frame
-    // offsets), but the return type and argument count must always match or
-    // the calling convention is violated.
-    char origRet[64] = {0};
-    char swizRet[64] = {0};
-    @try {
-        method_getReturnType(original, origRet, sizeof(origRet));
-        method_getReturnType(swizzled, swizRet, sizeof(swizRet));
-    } @catch (__unused NSException *e) {
-        return NO;
-    }
-    if (origRet[0] == '\0' || swizRet[0] == '\0') return NO;
-    if (strcmp(origRet, swizRet) != 0) return NO;
-    if (method_getNumberOfArguments(original) != method_getNumberOfArguments(swizzled)) return NO;
-    return YES;
-}
-
 + (void)swizzleClass:(Class)cls originalSelector:(SEL)originalSelector swizzledSelector:(SEL)swizzledSelector {
-    if (!cls || !originalSelector || !swizzledSelector) {
-        NSLog(@"[WeaponX] MethodSwizzler: nil class/selector, skipping instance swizzle");
-        return;
-    }
-
-    Method originalMethod = class_getInstanceMethod(cls, originalSelector);
-    Method swizzledMethod = class_getInstanceMethod(cls, swizzledSelector);
-
-    if (!originalMethod || !swizzledMethod) {
-        NSLog(@"[WeaponX] MethodSwizzler: method not found on %@ (%s -> %s), skipping",
-              NSStringFromClass(cls), sel_getName(originalSelector), sel_getName(swizzledSelector));
-        return;
-    }
-
-    if (!PXMethodSwizzleTypesCompatible(originalMethod, swizzledMethod)) {
-        NSLog(@"[WeaponX] MethodSwizzler: ABI/type-encoding mismatch for -[%@ %s] (orig=%s swiz=%s), refusing to swizzle",
-              NSStringFromClass(cls), sel_getName(originalSelector),
-              method_getTypeEncoding(originalMethod) ?: "?", method_getTypeEncoding(swizzledMethod) ?: "?");
-        return;
-    }
-
-    BOOL didAddMethod = class_addMethod(cls,
-                                       originalSelector,
-                                       method_getImplementation(swizzledMethod),
-                                       method_getTypeEncoding(swizzledMethod));
-
-    if (didAddMethod) {
-        class_replaceMethod(cls,
-                           swizzledSelector,
-                           method_getImplementation(originalMethod),
-                           method_getTypeEncoding(originalMethod));
-    } else {
-        method_exchangeImplementations(originalMethod, swizzledMethod);
-    }
+    PXInstallLocalSwizzle(cls, originalSelector, swizzledSelector);
 }
-
 + (void)swizzleClassMethod:(Class)cls originalSelector:(SEL)originalSelector swizzledSelector:(SEL)swizzledSelector {
-    if (!cls || !originalSelector || !swizzledSelector) {
-        NSLog(@"[WeaponX] MethodSwizzler: nil class/selector, skipping class swizzle");
-        return;
-    }
-
-    Class metaClass = object_getClass(cls);
-    Method originalMethod = class_getClassMethod(cls, originalSelector);
-    Method swizzledMethod = class_getClassMethod(cls, swizzledSelector);
-
-    if (!metaClass || !originalMethod || !swizzledMethod) {
-        NSLog(@"[WeaponX] MethodSwizzler: class method not found on %@ (%s -> %s), skipping",
-              NSStringFromClass(cls), sel_getName(originalSelector), sel_getName(swizzledSelector));
-        return;
-    }
-
-    if (!PXMethodSwizzleTypesCompatible(originalMethod, swizzledMethod)) {
-        NSLog(@"[WeaponX] MethodSwizzler: ABI/type-encoding mismatch for +[%@ %s] (orig=%s swiz=%s), refusing to swizzle",
-              NSStringFromClass(cls), sel_getName(originalSelector),
-              method_getTypeEncoding(originalMethod) ?: "?", method_getTypeEncoding(swizzledMethod) ?: "?");
-        return;
-    }
-
-    BOOL didAddMethod = class_addMethod(metaClass,
-                                       originalSelector,
-                                       method_getImplementation(swizzledMethod),
-                                       method_getTypeEncoding(swizzledMethod));
-
-    if (didAddMethod) {
-        class_replaceMethod(metaClass,
-                           swizzledSelector,
-                           method_getImplementation(originalMethod),
-                           method_getTypeEncoding(originalMethod));
-    } else {
-        method_exchangeImplementations(originalMethod, swizzledMethod);
-    }
+    PXInstallLocalSwizzle(cls ? object_getClass((id)cls) : Nil, originalSelector, swizzledSelector);
 }
-
 @end

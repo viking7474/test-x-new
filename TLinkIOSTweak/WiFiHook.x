@@ -29,11 +29,6 @@
 @interface NWPath (WeaponXPrivate)
 - (NSString *)_getSSID;
 - (id)_getBSSID;
-- (NSInteger)quality;
-- (double)latency;
-- (id)gatherDiagnostics;
-- (BOOL)isExpensive;
-- (BOOL)isConstrained;
 @end
 
 @interface URLSessionTaskTransactionMetrics : NSObject
@@ -60,17 +55,13 @@
 @end
 
 // MobileWiFi framework typedefs and functions (private API)
-typedef struct __WiFiDeviceClient *WiFiDeviceClientRef;
 typedef struct __WiFiNetwork *WiFiNetworkRef;
-typedef struct __WiFiManager *WiFiManagerRef;
 
 // Function pointers for the original functions we'll hook
 static CFDictionaryRef (*orig_CNCopyCurrentNetworkInfo)(CFStringRef interfaceName);
 static id (*orig_dictionaryWithScanResult)(id self, SEL _cmd, id arg1);
 
 // MobileWiFi.framework function pointers
-static WiFiManagerRef (*orig_WiFiManagerClientCreate)(CFAllocatorRef allocator, int flags);
-static WiFiNetworkRef (*orig_WiFiDeviceClientCopyCurrentNetwork)(WiFiDeviceClientRef client);
 static CFStringRef (*orig_WiFiNetworkGetSSID)(WiFiNetworkRef network);
 static CFStringRef (*orig_WiFiNetworkGetBSSID)(WiFiNetworkRef network);
 
@@ -538,19 +529,7 @@ static id replaced_dictionaryWithScanResult(id self, SEL _cmd, id arg1) {
 
 #pragma mark - MobileWiFi Framework Hooks
 
-// Hook implementation for WiFiManagerClientCreate
-static WiFiManagerRef replaced_WiFiManagerClientCreate(CFAllocatorRef allocator, int flags) {
-    // Call original implementation
-    WiFiManagerRef result = orig_WiFiManagerClientCreate(allocator, flags);
-    return result;
-}
 
-// Hook implementation for WiFiDeviceClientCopyCurrentNetwork
-static WiFiNetworkRef replaced_WiFiDeviceClientCopyCurrentNetwork(WiFiDeviceClientRef client) {
-    // Call original implementation
-    WiFiNetworkRef result = orig_WiFiDeviceClientCopyCurrentNetwork(client);
-    return result;
-}
 
 // Hook implementation for WiFiNetworkGetSSID
 static CFStringRef replaced_WiFiNetworkGetSSID(WiFiNetworkRef network) {
@@ -585,8 +564,6 @@ static CFStringRef replaced_WiFiNetworkGetBSSID(WiFiNetworkRef network) {
 #pragma mark - Hook Installation
 
 // Apple80211GetInfoCopy — used by many device-info apps (AIDA-style private path).
-typedef int (*Apple80211Open_t)(void **handle);
-typedef int (*Apple80211Bind_t)(void *handle, const char *ifname);
 typedef int (*Apple80211GetInfoCopy_t)(void *handle, CFDictionaryRef *info);
 static Apple80211GetInfoCopy_t orig_Apple80211GetInfoCopy = NULL;
 
@@ -661,9 +638,9 @@ static void initializeHooks(void) {
     Class neHotspotHelperClass = NSClassFromString(@"NEHotspotHelper");
     if (neHotspotHelperClass) {
         Method dictionaryMethod = class_getClassMethod(neHotspotHelperClass, @selector(dictionaryWithScanResult:));
-        if (dictionaryMethod) {
-            orig_dictionaryWithScanResult = (id (*)(id, SEL, id))method_getImplementation(dictionaryMethod);
-            method_setImplementation(dictionaryMethod, (IMP)replaced_dictionaryWithScanResult);
+        if (PXMethodHasCompatibleTypeEncoding(dictionaryMethod, "@@:@") && dlsym(RTLD_DEFAULT, "MSHookMessageEx")) {
+            MSHookMessageEx(object_getClass((id)neHotspotHelperClass), @selector(dictionaryWithScanResult:),
+                (IMP)replaced_dictionaryWithScanResult, (IMP *)&orig_dictionaryWithScanResult);
         }
     }
     
@@ -689,7 +666,7 @@ static void initializeHooks(void) {
         // +fetchCurrentWithCompletionHandler: (iOS 14+) — CPUDasher / modern readers
         SEL fetchSel = NSSelectorFromString(@"fetchCurrentWithCompletionHandler:");
         Method fetchMethod = class_getClassMethod(neHotspotNetworkClass, fetchSel);
-        if (fetchMethod && dlsym(RTLD_DEFAULT, "MSHookMessageEx")) {
+        if (PXMethodHasCompatibleTypeEncoding(fetchMethod, "v@:@?") && dlsym(RTLD_DEFAULT, "MSHookMessageEx")) {
             MSHookMessageEx(object_getClass((id)neHotspotNetworkClass),
                             fetchSel,
                             (IMP)replaced_NEHotspotNetwork_fetchCurrent,
@@ -702,20 +679,6 @@ static void initializeHooks(void) {
     void *mobileWiFiLib = dlopen("/System/Library/PrivateFrameworks/MobileWiFi.framework/MobileWiFi", RTLD_NOW);
     if (mobileWiFiLib) {
         void *symbol = NULL;
-
-        symbol = dlsym(mobileWiFiLib, "WiFiManagerClientCreate");
-        if (symbol) {
-            MSHookFunction(symbol,
-                  (void *)replaced_WiFiManagerClientCreate,
-                  (void **)&orig_WiFiManagerClientCreate);
-        }
-
-        symbol = dlsym(mobileWiFiLib, "WiFiDeviceClientCopyCurrentNetwork");
-        if (symbol) {
-            MSHookFunction(symbol,
-                  (void *)replaced_WiFiDeviceClientCopyCurrentNetwork,
-                  (void **)&orig_WiFiDeviceClientCopyCurrentNetwork);
-        }
 
         symbol = dlsym(mobileWiFiLib, "WiFiNetworkGetSSID");
         if (symbol) {
@@ -768,16 +731,9 @@ static void settingsChanged(CFNotificationCenterRef center, void *observer, CFSt
     PXInvalidateScopeDecisionCache();
 }
 
-#pragma mark - NWPathMonitor Hooks (Network Framework)
-
-// Hook for NWPath methods
+// Optional private getters: only install when the runtime object ABI matches.
+%group PXWiFiNWPathSSID
 %hook NWPath
-
-- (BOOL)usesInterfaceType:(NSInteger)type {
-    // We don't modify this as it would break connectivity detection
-    return %orig;
-}
-
 - (NSString *)_getSSID {
     PX_RUNTIME_READ_OPERATION;
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
@@ -786,7 +742,11 @@ static void settingsChanged(CFNotificationCenterRef center, void *observer, CFSt
     if (wifiInfo[@"ssid"]) return wifiInfo[@"ssid"];
     return %orig;
 }
+%end
+%end
 
+%group PXWiFiNWPathBSSID
+%hook NWPath
 - (id)_getBSSID {
     PX_RUNTIME_READ_OPERATION;
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
@@ -795,51 +755,7 @@ static void settingsChanged(CFNotificationCenterRef center, void *observer, CFSt
     if (wifiInfo[@"bssid"]) return wifiInfo[@"bssid"];
     return %orig;
 }
-
-- (NSInteger)quality {
-    return %orig;
-}
-
-- (double)latency {
-    return %orig;
-}
-
-- (BOOL)isExpensive {
-    return %orig;
-}
-
-- (BOOL)isConstrained {
-    return %orig;
-}
-
-- (id)gatherDiagnostics {
-    return %orig;
-}
-
 %end
-
-// Hook NWPathMonitor class
-%hook NWPathMonitor
-
-- (void)setPathUpdateHandler:(void (^)(id path))handler {
-    if (handler) {
-        // Create a wrapper that can modify the path if needed
-        void (^newHandler)(id path) = ^(id path) {
-            // Original handler still needs to be called with the path
-            // We're not modifying it here as the path itself is hooked separately
-            handler(path);
-        };
-        %orig(newHandler);
-    } else {
-        %orig;
-    }
-}
-
-- (id)currentPath {
-    // The path object itself is hooked via the NWPath hook above
-    return %orig;
-}
-
 %end
 
 #pragma mark - Constructor
@@ -881,8 +797,15 @@ static void settingsChanged(CFNotificationCenterRef center, void *observer, CFSt
             // Initialize hooks
             initializeHooks();
             
-            // Initialize Objective-C hooks for scoped apps only
-            %init;
+            // Admit the private getters independently; absent/incompatible
+            // selectors must never acquire a null or ABI-mismatched %orig.
+            Class pathClass = NSClassFromString(@"NWPath");
+            if (pathClass && PXMethodHasCompatibleTypeEncoding(class_getInstanceMethod(pathClass, @selector(_getSSID)), "@@:")) {
+                %init(PXWiFiNWPathSSID);
+            }
+            if (pathClass && PXMethodHasCompatibleTypeEncoding(class_getInstanceMethod(pathClass, @selector(_getBSSID)), "@@:")) {
+                %init(PXWiFiNWPathBSSID);
+            }
             
             // Register for settings change notifications
             CFNotificationCenterAddObserver(
