@@ -44,6 +44,15 @@ STORAGE_OBJC_HELPERS = [
     'static const char *PXStorageSkipTypeQualifiers(const char *type)', 'static BOOL PXStorageObjectEncoding(const char *type)',
     'static BOOL PXStorageCapacityCompatibilityMatches(Class cls, SEL selector)',
 ]
+WIFI_CF_SIGNATURES = [
+    'static BOOL PXWiFiInfoHasIdentity(id info)',
+    'static CFDictionaryRef PXCreateSpoofedNetworkInfoDict(NSString *ssid, NSString *bssid)',
+    'static CFTypeRef PXWiFiReplaceOwnedCopy(CFTypeRef original, CFTypeRef replacement)',
+    'static CFDictionaryRef replaced_CNCopyCurrentNetworkInfo(CFStringRef interfaceName)',
+    'static CFArrayRef replaced_CNCopySupportedInterfaces(void)',
+    'static int replaced_Apple80211GetInfoCopy(void *handle, CFDictionaryRef *info)',
+    'static id replaced_dictionaryWithScanResult(id self, SEL _cmd, id arg1)',
+]
 WRAPPERS = {
     'PXPreparedWiFiMethod.inc': ('common/WiFiManager.m', ['- (NSDictionary *)generateWiFiInfo', '- (void)adoptCommittedWiFiInfo:(NSDictionary *)wifiInfo profileID:(NSString *)profileID']),
     'PXOwnedWiFiMethods.inc': ('common/WiFiManager.m', [
@@ -167,6 +176,27 @@ def source_contracts():
                     '- (double)latency', '- (BOOL)isExpensive', '- (BOOL)isConstrained', '- (id)gatherDiagnostics'):
         assert retired not in wifi_hooks, retired
     check_macro_arity(read('tests/PXMethodSwizzlerTests.m'), 'PXMethodSwizzlerTests.m')
+    cf_builder = identifier.method(wifi_hooks, WIFI_CF_SIGNATURES[1])
+    assert cf_builder.count('isKindOfClass:NSString.class') == 2
+    finish_copy = identifier.method(wifi_hooks, WIFI_CF_SIGNATURES[2])
+    assert 'if (!replacement) return original;' in finish_copy and 'CFRelease(replacement); @throw;' in finish_copy
+    for index in (3, 4):
+        body = identifier.method(wifi_hooks, WIFI_CF_SIGNATURES[index])
+        assert body.index('@catch') < body.index('PXWiFiReplaceOwnedCopy(original, replacement)')
+        assert 'CFRelease(original)' not in body
+    interfaces = identifier.method(wifi_hooks, WIFI_CF_SIGNATURES[4])
+    assert interfaces.index('PX_RUNTIME_READ_OPERATION;') < interfaces.index('CFArrayRef original =')
+    assert interfaces.index('CFGetTypeID(original) != CFArrayGetTypeID()') < interfaces.index('CFArrayGetCount(original)') < interfaces.index('shouldSpoofForBundle(')
+    apple = identifier.method(wifi_hooks, WIFI_CF_SIGNATURES[5])
+    assert apple.index('if (!info) return orig_') < apple.index('PX_RUNTIME_READ_OPERATION;')
+    assert apple.index('if (!admitted) return orig_') < apple.index('*info = NULL;') < apple.index('int result = orig_')
+    assert apple.index('CFGetTypeID(original) != CFDictionaryGetTypeID()') < apple.index('PXResolvedWiFiInfo()')
+    assert apple.index('CFBridgingRetain(dict)') < apple.index('if (!replacement) return result;') < apple.index('*info = replacement;') < apple.index('CFRelease(original);')
+    assert apple.rindex('@catch') < apple.index('*info = replacement;')
+    scan = identifier.method(wifi_hooks, WIFI_CF_SIGNATURES[6])
+    assert scan.index('PXWiFiInfoHasIdentity(wifi)') < scan.index('[original mutableCopy]')
+    assert scan.index('(!kind || [original[@"WifiStandard"] isEqual:kind])') < scan.index('[original mutableCopy]')
+    check_macro_arity(read('tests/PXWiFiCFHookTests.m'), 'PXWiFiCFHookTests.m')
     assert read('tests/PXRuntimeArtifactPreparationTests.m').count('TestHookWiFiResolver();') == 1
     observer = identifier.method(wifi_source, '- (void)registerForProfileNotifications')
     assert '@synchronized (self)' in observer and 'if (self.profileChangeObserver) return;' in observer
@@ -259,7 +289,7 @@ def source_contracts():
     assert 'method_getNumberOfArguments(entry) != 4' in abi and "returnType[0] == 'Q' && returnType[1] == 0" in abi
     for name in ('result', 'url', 'error'): assert f'{name}[sizeof({name}) - 1] = 0;' in abi
     check_macro_arity(read('tests/PXStorageObjCHookTests.m'), 'PXStorageObjCHookTests.m')
-    for file in ('tests/PXWiFiHookCacheTests.m', 'tests/PXRuntimeArtifactPreparationTests.m', 'tests/PXMethodSwizzlerTests.m'):
+    for file in ('tests/PXWiFiHookCacheTests.m', 'tests/PXRuntimeArtifactPreparationTests.m', 'tests/PXMethodSwizzlerTests.m', 'tests/PXWiFiCFHookTests.m'):
         declarations = re.findall(r'^@(interface|implementation)\s+(\w+)(?:[ \t]*\(([^)]*)\))?', read(file), re.M)
         assert len(declarations) == len(set(declarations)), 'duplicate native fixture class declaration: ' + file
     for label in ('hook source arrival baseline seeded', 'hook mutable target baseline seeded'):
@@ -471,6 +501,11 @@ def generate_native_fragments(folder):
     start = wifi.index('static os_unfair_lock gWiFiCacheLock =')
     end = wifi.index('// Forward declarations', start)
     (folder / 'PXWiFiHookCache.inc').write_text(wifi[start:end], encoding='utf-8')
+    cf_names = ('orig_CNCopyCurrentNetworkInfo', 'orig_dictionaryWithScanResult', 'orig_CNCopySupportedInterfaces', 'orig_Apple80211GetInfoCopy')
+    declarations = [line for line in wifi.splitlines() if line.startswith('typedef int (*Apple80211GetInfoCopy_t)') or
+                    (line.startswith('static ') and any(name in line for name in cf_names) and line.endswith(';'))]
+    assert len(declarations) == 5
+    (folder / 'PXWiFiCFHooks.inc').write_text('\n\n'.join(declarations + [identifier.method(wifi, sig) for sig in WIFI_CF_SIGNATURES]), encoding='utf-8')
     (folder / 'PXWiFiHookReader.inc').write_text('\n\n'.join(identifier.method(wifi, sig) for sig in
         ('static NSString *getCurrentProfileID(void)', 'static NSDictionary *getProfileWiFiInfo(void)')), encoding='utf-8')
     declarations = [identifier.method(storage, sig).split(' {', 1)[0] + ';' for sig in STORAGE_READ_SIGNATURES]
@@ -556,6 +591,12 @@ def native_tests():
                             str(ROOT / 'TLinkIOSTweak/MethodSwizzler.m'), str(ROOT / 'tests/PXMethodSwizzlerTests.m'),
                             '-framework', 'Foundation', '-o', str(swizzle_binary)], check=True, cwd=ROOT, timeout=60)
             subprocess.run([str(swizzle_binary)], check=True, cwd=ROOT, timeout=60)
+            cf_binary = folder / ('wifi-cf-hooks-' + scheme)
+            subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions',
+                            '-Wall', '-Wextra', '-Werror=implicit-function-declaration', '-I', str(folder), *defines,
+                            str(ROOT / 'tests/PXWiFiCFHookTests.m'), '-framework', 'Foundation', '-framework', 'CoreFoundation',
+                            '-o', str(cf_binary)], check=True, cwd=ROOT, timeout=60)
+            subprocess.run([str(cf_binary)], check=True, cwd=ROOT, timeout=60)
 
 
 if __name__ == '__main__':

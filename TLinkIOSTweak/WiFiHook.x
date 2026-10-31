@@ -285,7 +285,7 @@ static NSDictionary *getProfileWiFiInfo(void) {
 // Build a CNCopy-compatible network info dictionary (public + private key variants).
 // Always returns a new retained CFDictionary when ssid/bssid are non-empty.
 static CFDictionaryRef PXCreateSpoofedNetworkInfoDict(NSString *ssid, NSString *bssid) {
-    if (!ssid.length || !bssid.length) return NULL;
+    if (![ssid isKindOfClass:NSString.class] || ![bssid isKindOfClass:NSString.class] || !ssid.length || !bssid.length) return NULL;
     NSMutableDictionary *spoofedInfo = [NSMutableDictionary dictionary];
     // Canonical CaptiveNetwork keys
     spoofedInfo[@"SSID"] = ssid;
@@ -304,6 +304,16 @@ static CFDictionaryRef PXCreateSpoofedNetworkInfoDict(NSString *ssid, NSString *
     return CFBridgingRetain(spoofedInfo);
 }
 
+// Both inputs follow Copy ownership. Preparation has finished before this
+// point, so a release exception must never fall back to an already released
+// original. The unreturned replacement is still ours on that exceptional exit.
+static CFTypeRef PXWiFiReplaceOwnedCopy(CFTypeRef original, CFTypeRef replacement) {
+    if (!replacement) return original;
+    @try { if (original) CFRelease(original); }
+    @catch (NSException *exception) { (void)exception; CFRelease(replacement); @throw; }
+    return replacement;
+}
+
 static NSDictionary *PXResolvedWiFiInfo(void) {
     PX_RUNTIME_READ_OPERATION;
     return getProfileWiFiInfo();
@@ -313,26 +323,16 @@ static NSDictionary *PXResolvedWiFiInfo(void) {
 // On iOS 13+ original often returns NULL without location entitlement — still spoof when scoped.
 static CFDictionaryRef replaced_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
     PX_RUNTIME_READ_OPERATION;
-    CFDictionaryRef originalDict = orig_CNCopyCurrentNetworkInfo ? orig_CNCopyCurrentNetworkInfo(interfaceName) : NULL;
-
+    CFDictionaryRef original = orig_CNCopyCurrentNetworkInfo ? orig_CNCopyCurrentNetworkInfo(interfaceName) : NULL;
+    CFDictionaryRef replacement = NULL;
     @try {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (!shouldSpoofForBundle(bundleID)) {
-            return originalDict;
-        }
-
+        NSString *bundleID = NSBundle.mainBundle.bundleIdentifier;
+        if (!shouldSpoofForBundle(bundleID)) return original;
         NSDictionary *wifiInfo = PXResolvedWiFiInfo();
-        if (wifiInfo) {
-            CFDictionaryRef spoofed = PXCreateSpoofedNetworkInfoDict(wifiInfo[@"ssid"], wifiInfo[@"bssid"]);
-            if (spoofed) {
-                if (originalDict) CFRelease(originalDict);
-                return spoofed;
-            }
-        }
-    } @catch (__unused NSException *exception) {
-    }
-
-    return originalDict;
+        if (PXWiFiInfoHasIdentity(wifiInfo))
+            replacement = PXCreateSpoofedNetworkInfoDict(wifiInfo[@"ssid"], wifiInfo[@"bssid"]);
+    } @catch (NSException *exception) { (void)exception; return original; }
+    return (CFDictionaryRef)PXWiFiReplaceOwnedCopy(original, replacement);
 }
 
 // Ensure apps that iterate interfaces still see a Wi-Fi interface (en0).
@@ -340,22 +340,18 @@ static CFArrayRef (*orig_CNCopySupportedInterfaces)(void) = NULL;
 static CFArrayRef replaced_CNCopySupportedInterfaces(void) {
     PX_RUNTIME_READ_OPERATION;
     CFArrayRef original = orig_CNCopySupportedInterfaces ? orig_CNCopySupportedInterfaces() : NULL;
+    // Keep the lexical view around the original and any nested hooks. Nonempty
+    // results need no extra bundle/scope checks; unexpected CF types pass through.
     @try {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (!shouldSpoofForBundle(bundleID)) {
-            return original;
-        }
-        // If system already reports interfaces, keep them (order preserved).
-        if (original && CFArrayGetCount(original) > 0) {
-            return original;
-        }
-        // Fabricate en0 so CNCopyCurrentNetworkInfo(en0) is queried.
-        NSArray *ifaces = @[ @"en0" ];
-        if (original) CFRelease(original);
-        return CFBridgingRetain(ifaces);
-    } @catch (__unused NSException *e) {
-        return original;
-    }
+        if (original && (CFGetTypeID(original) != CFArrayGetTypeID() || CFArrayGetCount(original) > 0)) return original;
+    } @catch (NSException *exception) { (void)exception; return original; }
+    CFArrayRef replacement = NULL;
+    @try {
+        NSString *bundleID = NSBundle.mainBundle.bundleIdentifier;
+        if (!shouldSpoofForBundle(bundleID)) return original;
+        replacement = (CFArrayRef)CFBridgingRetain(@[@"en0"]);
+    } @catch (NSException *exception) { (void)exception; return original; }
+    return (CFArrayRef)PXWiFiReplaceOwnedCopy(original, replacement);
 }
 
 // Try to build a synthetic NEHotspotNetwork when public API returns nil
@@ -422,51 +418,20 @@ static void replaced_NEHotspotNetwork_fetchCurrent(id self, SEL _cmd, void (^com
 // Implementation of NEHotspotHelper dictionaryWithScanResult: hook
 static id replaced_dictionaryWithScanResult(id self, SEL _cmd, id arg1) {
     PX_RUNTIME_READ_OPERATION;
-    // Call original first
-    id originalResult = nil;
-    if (orig_dictionaryWithScanResult) {
-        originalResult = orig_dictionaryWithScanResult(self, _cmd, arg1);
-    }
-    
+    id original = orig_dictionaryWithScanResult ? orig_dictionaryWithScanResult(self, _cmd, arg1) : nil;
     @try {
-        // Get bundle ID for scope checking
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        
-        // Check if we should spoof
-        if (!shouldSpoofForBundle(bundleID)) {
-            return originalResult;
-        }
-        
-        // Ensure we have a valid dictionary to work with
-        if (!originalResult || ![originalResult isKindOfClass:[NSDictionary class]]) {
-            return originalResult;
-        }
-        
-        // Create mutable copy for modification
-        NSMutableDictionary *modifiedResult = [NSMutableDictionary dictionaryWithDictionary:originalResult];
-        
-        NSDictionary *wifiInfo = PXResolvedWiFiInfo();
-        if (wifiInfo[@"ssid"] && wifiInfo[@"bssid"]) {
-            modifiedResult[@"SSID"] = wifiInfo[@"ssid"];
-            modifiedResult[@"BSSID"] = wifiInfo[@"bssid"];
-            NSString *standard = [wifiInfo[@"wifiStandard"] isKindOfClass:[NSString class]]
-                ? wifiInfo[@"wifiStandard"]
-                : nil;
-            if ([standard containsString:@"ax"]) {
-                modifiedResult[@"WifiStandard"] = @6;
-            } else if ([standard containsString:@"ac"]) {
-                modifiedResult[@"WifiStandard"] = @5;
-            } else if ([standard containsString:@"n"]) {
-                modifiedResult[@"WifiStandard"] = @4;
-            }
-            return modifiedResult;
-        }
-    } @catch (NSException *exception) {
-        // Silent exception handling
-    }
-    
-    // Return original if spoofing failed
-    return originalResult;
+        if (!shouldSpoofForBundle(NSBundle.mainBundle.bundleIdentifier) || ![original isKindOfClass:NSDictionary.class]) return original;
+        NSDictionary *wifi = PXResolvedWiFiInfo();
+        if (!PXWiFiInfoHasIdentity(wifi)) return original;
+        NSString *standard = [wifi[@"wifiStandard"] isKindOfClass:NSString.class] ? wifi[@"wifiStandard"] : nil;
+        NSNumber *kind = [standard containsString:@"ax"] ? @6 : ([standard containsString:@"ac"] ? @5 : ([standard containsString:@"n"] ? @4 : nil));
+        if ([original[@"SSID"] isEqual:wifi[@"ssid"]] && [original[@"BSSID"] isEqual:wifi[@"bssid"]] &&
+            (!kind || [original[@"WifiStandard"] isEqual:kind])) return original;
+        NSMutableDictionary *modified = [original mutableCopy];
+        modified[@"SSID"] = wifi[@"ssid"]; modified[@"BSSID"] = wifi[@"bssid"];
+        if (kind) modified[@"WifiStandard"] = kind;
+        return modified;
+    } @catch (NSException *exception) { (void)exception; return original; }
 }
 
 #pragma mark - Swizzle Implementations for NEHotspotNetwork
@@ -540,8 +505,9 @@ static CFStringRef replaced_WiFiNetworkGetSSID(WiFiNetworkRef network) {
     }
     NSDictionary *wifiInfo = PXResolvedWiFiInfo();
     if (wifiInfo[@"ssid"]) {
-        // Caller owns returned CFString (Create rule of MobileWiFi GetSSID varies;
-        // CFStringCreateCopy is safe for both Get and Copy conventions when we spoof).
+        // Preserve this tweak's retained-spoof convention pending private API
+        // ownership/lifetime verification. A +1 copy does not satisfy both Get
+        // and Copy contracts; do not infer caller ownership from this code.
         return CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)wifiInfo[@"ssid"]);
     }
     return orig_WiFiNetworkGetSSID ? orig_WiFiNetworkGetSSID(network) : NULL;
@@ -568,39 +534,36 @@ typedef int (*Apple80211GetInfoCopy_t)(void *handle, CFDictionaryRef *info);
 static Apple80211GetInfoCopy_t orig_Apple80211GetInfoCopy = NULL;
 
 static int replaced_Apple80211GetInfoCopy(void *handle, CFDictionaryRef *info) {
+    if (!info) return orig_Apple80211GetInfoCopy ? orig_Apple80211GetInfoCopy(handle, info) : -1;
     PX_RUNTIME_READ_OPERATION;
-    int r = orig_Apple80211GetInfoCopy ? orig_Apple80211GetInfoCopy(handle, info) : -1;
+    BOOL admitted = NO;
+    @try { admitted = shouldSpoofForBundle(NSBundle.mainBundle.bundleIdentifier); }
+    @catch (NSException *exception) { (void)exception; }
+    // Denied calls keep the original pointer, status and untouched-on-error
+    // behavior. The scoped adapter treats this Copy API's slot as output-only.
+    if (!admitted) return orig_Apple80211GetInfoCopy ? orig_Apple80211GetInfoCopy(handle, info) : -1;
+    *info = NULL;
+    int result = orig_Apple80211GetInfoCopy ? orig_Apple80211GetInfoCopy(handle, info) : -1;
+    CFDictionaryRef original = *info;
+    CFDictionaryRef replacement = NULL;
     @try {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (!shouldSpoofForBundle(bundleID)) return r;
-
+        if (original && CFGetTypeID(original) != CFDictionaryGetTypeID()) return result;
         NSDictionary *wifiInfo = PXResolvedWiFiInfo();
-        if (!wifiInfo) return r;
-
-        NSString *ssid = wifiInfo[@"ssid"];
-        NSString *bssid = wifiInfo[@"bssid"];
-        if (!ssid.length || !bssid.length) return r;
-
-        NSMutableDictionary *dict = nil;
-        if (info && *info) {
-            dict = [NSMutableDictionary dictionaryWithDictionary:(__bridge NSDictionary *)(*info)];
-        } else {
-            dict = [NSMutableDictionary dictionary];
-        }
-        // Common Apple80211 keys
-        dict[@"SSID_STR"] = ssid;
-        dict[@"SSID"] = ssid;
-        dict[@"BSSID"] = bssid;
+        if (!PXWiFiInfoHasIdentity(wifiInfo)) return result;
+        NSString *ssid = wifiInfo[@"ssid"], *bssid = wifiInfo[@"bssid"];
+        if (!ssid.length || !bssid.length) return result;
+        NSMutableDictionary *dict = original ? [(__bridge NSDictionary *)original mutableCopy] : [NSMutableDictionary dictionary];
+        dict[@"SSID_STR"] = ssid; dict[@"SSID"] = ssid; dict[@"BSSID"] = bssid;
         NSData *ssidData = [ssid dataUsingEncoding:NSUTF8StringEncoding];
         if (ssidData) dict[@"SSID_DATA"] = ssidData;
-
-        if (info) {
-            if (*info) CFRelease(*info);
-            *info = CFBridgingRetain(dict);
-            return 0; // success even if original failed
-        }
-    } @catch (__unused NSException *e) {}
-    return r;
+        replacement = (CFDictionaryRef)CFBridgingRetain(dict);
+    } @catch (NSException *exception) { (void)exception; return result; }
+    if (!replacement) return result;
+    // Publish before releasing: a destructor/reentrant observer must see the
+    // new owned output, never the old pointer while it is being destroyed.
+    *info = replacement;
+    if (original) CFRelease(original);
+    return 0; // Preserve scoped synthesis even when the original returned failure.
 }
 
 static void initializeHooks(void) {
