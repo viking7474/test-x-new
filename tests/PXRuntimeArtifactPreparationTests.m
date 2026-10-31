@@ -965,11 +965,13 @@ static void TestStorageDisplayCommit(void) {
         [total setString:@"changed"]; [free setString:@"changed"]; [mutableValues removeAllObjects];
         CHECK(SetArtifactSelection(@"b"), "display storage external selection drift seeded");
     };
-    otherBefore = [NSData dataWithContentsOfFile:Path(PXProfileRootPath(@"b"), @"storage.plist")];
+    NSString *otherPath = Path(PXProfileRootPath(@"b"), @"storage.plist");
+    otherBefore = [NSData dataWithContentsOfFile:otherPath];
     CHECK([manager commitDisplayStorageInfo:mutableValues updateFilesystem:NO error:&error] &&
           [[NSDictionary dictionaryWithContentsOfFile:path][@"TotalStorage"] isEqual:@"512"] &&
           [[NSDictionary dictionaryWithContentsOfFile:path][@"FreeStorage"] isEqual:@"123"] &&
-          [otherBefore isEqual:[NSData dataWithContentsOfFile:Path(PXProfileRootPath(@"b"), @"storage.plist")]],
+          ((otherBefore && [otherBefore isEqual:[NSData dataWithContentsOfFile:otherPath]]) ||
+           (!otherBefore && ![NSFileManager.defaultManager fileExistsAtPath:otherPath])),
           "display storage freezes caller values and keeps one canonical target through selection drift");
     CHECK(SetArtifactSelection(@"a"), "display storage canonical target restored");
     CheckArtifactLeaseFree();

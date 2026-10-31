@@ -218,12 +218,18 @@ static NSString *PXStorageScalarField(id settings, NSString *key) {
 
 - (uint64_t)normalizeStorageBytes:(uint64_t)bytes {
     if (bytes == 0) return 0;
+
+    // Values at the very top of uint64_t can round to the exclusive 2^64
+    // boundary when converted to double. Do not normalize from an already
+    // out-of-domain floating representation; preserve the exact byte count.
+    double inputBytes = (double)bytes;
+    if (!isfinite(inputBytes) || inputBytes >= 0x1p64) return bytes;
     
     // For user-facing displays, iOS rounds to nice numbers
     // System capacity is often shown as 64GB, 128GB, etc.
     
     // Get the GB value
-    double gbValue = (double)bytes / BYTES_PER_GB;
+    double gbValue = inputBytes / BYTES_PER_GB;
     
     // Round to nearest common capacity
     if (gbValue > 1000) {

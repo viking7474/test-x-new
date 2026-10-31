@@ -257,6 +257,7 @@ def source_contracts():
     assert 'isKindOfClass:NSString.class' in conversion and 'isKindOfClass:NSNumber.class' in conversion
     assert conversion.index('!isfinite(bytes) || bytes >= 0x1p64') < conversion.index('(uint64_t)bytes')
     normalization = identifier.method(storage, '- (uint64_t)normalizeStorageBytes:(uint64_t)bytes')
+    assert normalization.index('inputBytes >= 0x1p64) return bytes') < normalization.index('inputBytes / BYTES_PER_GB')
     assert normalization.index('normalized >= 0x1p64) return bytes') < normalization.index('(uint64_t)normalized')
     for name, key in (('totalStorageCapacity', 'TotalStorage'), ('freeStorageSpace', 'FreeStorage'), ('filesystemType', 'FilesystemType')):
         assert f'PXStorageScalarField(_storageSettings, @"{key}")' in identifier.method(storage, '- (NSString *)' + name)
