@@ -53,6 +53,10 @@ WIFI_CF_SIGNATURES = [
     'static int replaced_Apple80211GetInfoCopy(void *handle, CFDictionaryRef *info)',
     'static id replaced_dictionaryWithScanResult(id self, SEL _cmd, id arg1)',
 ]
+WIFI_FETCH_SIGNATURES = [
+    'static id PXCreateSpoofedNEHotspotNetwork(NSString *ssid, NSString *bssid)',
+    'static void replaced_NEHotspotNetwork_fetchCurrent(id self, SEL _cmd, void (^completion)(id network))',
+]
 CF_EXCEPTION_MODES = (('plain-arc', '-fno-objc-arc-exceptions'), ('arc-eh', '-fobjc-arc-exceptions'))
 WRAPPERS = {
     'PXPreparedWiFiMethod.inc': ('common/WiFiManager.m', ['- (NSDictionary *)generateWiFiInfo', '- (void)adoptCommittedWiFiInfo:(NSDictionary *)wifiInfo profileID:(NSString *)profileID']),
@@ -177,6 +181,28 @@ def source_contracts():
                     '- (double)latency', '- (BOOL)isExpensive', '- (BOOL)isConstrained', '- (id)gatherDiagnostics'):
         assert retired not in wifi_hooks, retired
     check_macro_arity(read('tests/PXMethodSwizzlerTests.m'), 'PXMethodSwizzlerTests.m')
+    factory = identifier.method(wifi_hooks, WIFI_FETCH_SIGNATURES[0])
+    assert factory.index('isKindOfClass:NSString.class') < factory.index('NSClassFromString(')
+    assert factory.count('[cls alloc]') == 1 and factory.count('[net init]') == 1
+    assert 'respondsToSelector:@selector(init)' not in factory and 'isKindOfClass:cls' in factory
+    assert '@finally' in factory and 'net = nil; ssid = nil; bssid = nil;' in factory
+    assert 'static NSString * const ssidKeys[]' in factory and 'static NSString * const bssidKeys[]' in factory
+    assert all('@"' + key + '"' in factory for key in ('SSID', '_SSID', 'ssid', '_ssid', 'BSSID', '_BSSID', 'bssid', '_bssid'))
+    fetch = identifier.method(wifi_hooks, WIFI_FETCH_SIGNATURES[1])
+    assert fetch.index('if (!completion)') < fetch.index('PX_RUNTIME_READ_OPERATION;')
+    assert 'orig_NEHotspotNetwork_fetchCurrent(self, _cmd, nil)' in fetch
+    assert fetch.index('if (network) { completion(network); return; }') < fetch.index('shouldSpoofForBundle(')
+    assert fetch.index('PXWiFiInfoHasIdentity(info)') < fetch.index('synthetic = PXCreateSpoofedNEHotspotNetwork(')
+    assert fetch.count('PX_RUNTIME_READ_OPERATION;') == 2
+    assert 'network = nil; synthetic = nil; info = nil;' in fetch
+    assert 'deliver = nil; completion = nil;' in fetch and fetch.count('@finally') == 2
+    assert fetch.count('@catch') == 1, 'only preparation exceptions may be swallowed'
+    assert fetch.index('@catch') < fetch.index('completion(synthetic);') < fetch.index('network = nil;')
+    assert 'dispatch_' not in fetch and 'dispatch_' not in factory
+    fetch_fixture = read('tests/PXWiFiFetchTests.m')
+    check_macro_arity(fetch_fixture, 'PXWiFiFetchTests.m')
+    for call in ('TestFactory();', 'TestForwarding();', 'TestExceptionalClosureLifetime();', 'TestDeferred();'):
+        assert fetch_fixture.count(call) == 1
     cf_builder = identifier.method(wifi_hooks, WIFI_CF_SIGNATURES[1])
     assert cf_builder.count('isKindOfClass:NSString.class') == 2
     finish_copy = identifier.method(wifi_hooks, WIFI_CF_SIGNATURES[2])
@@ -303,7 +329,7 @@ def source_contracts():
     assert 'method_getNumberOfArguments(entry) != 4' in abi and "returnType[0] == 'Q' && returnType[1] == 0" in abi
     for name in ('result', 'url', 'error'): assert f'{name}[sizeof({name}) - 1] = 0;' in abi
     check_macro_arity(read('tests/PXStorageObjCHookTests.m'), 'PXStorageObjCHookTests.m')
-    for file in ('tests/PXWiFiHookCacheTests.m', 'tests/PXRuntimeArtifactPreparationTests.m', 'tests/PXMethodSwizzlerTests.m', 'tests/PXWiFiCFHookTests.m'):
+    for file in ('tests/PXWiFiHookCacheTests.m', 'tests/PXRuntimeArtifactPreparationTests.m', 'tests/PXMethodSwizzlerTests.m', 'tests/PXWiFiCFHookTests.m', 'tests/PXWiFiFetchTests.m'):
         declarations = re.findall(r'^@(interface|implementation)\s+(\w+)(?:[ \t]*\(([^)]*)\))?', read(file), re.M)
         assert len(declarations) == len(set(declarations)), 'duplicate native fixture class declaration: ' + file
     for label in ('hook source arrival baseline seeded', 'hook mutable target baseline seeded'):
@@ -520,6 +546,8 @@ def generate_native_fragments(folder):
                     (line.startswith('static ') and any(name in line for name in cf_names) and line.endswith(';'))]
     assert len(declarations) == 5
     (folder / 'PXWiFiCFHooks.inc').write_text('\n\n'.join(declarations + [identifier.method(wifi, sig) for sig in WIFI_CF_SIGNATURES]), encoding='utf-8')
+    fetch_original = next(line for line in wifi.splitlines() if line.startswith('static void (*orig_NEHotspotNetwork_fetchCurrent)'))
+    (folder / 'PXWiFiFetchHooks.inc').write_text('\n\n'.join([fetch_original] + [identifier.method(wifi, sig) for sig in WIFI_FETCH_SIGNATURES]), encoding='utf-8')
     (folder / 'PXWiFiHookReader.inc').write_text('\n\n'.join(identifier.method(wifi, sig) for sig in
         ('static NSString *getCurrentProfileID(void)', 'static NSDictionary *getProfileWiFiInfo(void)')), encoding='utf-8')
     declarations = [identifier.method(storage, sig).split(' {', 1)[0] + ';' for sig in STORAGE_READ_SIGNATURES]
@@ -613,6 +641,13 @@ def native_tests():
                                 str(ROOT / 'tests/PXWiFiCFHookTests.m'), '-framework', 'Foundation', '-framework', 'CoreFoundation',
                                 '-o', str(cf_binary)], check=True, cwd=ROOT, timeout=60)
                 subprocess.run([str(cf_binary)], check=True, cwd=ROOT, timeout=60)
+                fetch_binary = folder / ('wifi-fetch-' + scheme + '-' + arc_mode)
+                print('WiFi fetch native matrix:', scheme, arc_mode, flush=True)
+                subprocess.run(['xcrun', 'clang', '-O0', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions', arc_flag,
+                                '-Wall', '-Wextra', '-Werror=implicit-function-declaration', '-I', str(folder), *defines,
+                                str(ROOT / 'tests/PXWiFiFetchTests.m'), '-framework', 'Foundation',
+                                '-o', str(fetch_binary)], check=True, cwd=ROOT, timeout=60)
+                subprocess.run([str(fetch_binary)], check=True, cwd=ROOT, timeout=60)
 
 
 if __name__ == '__main__':

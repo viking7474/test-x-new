@@ -357,61 +357,78 @@ static CFArrayRef replaced_CNCopySupportedInterfaces(void) {
 // Try to build a synthetic NEHotspotNetwork when public API returns nil
 // (no location permission / not associated) so property swizzles still apply.
 static id PXCreateSpoofedNEHotspotNetwork(NSString *ssid, NSString *bssid) {
-    Class cls = NSClassFromString(@"NEHotspotNetwork");
-    if (!cls || !ssid.length || !bssid.length) return nil;
-
     id net = nil;
     @try {
+        if (![ssid isKindOfClass:NSString.class] || ![bssid isKindOfClass:NSString.class] || !ssid.length || !bssid.length) return nil;
+        Class cls = NSClassFromString(@"NEHotspotNetwork");
+        if (!cls) return nil;
         net = [cls alloc];
-        if ([net respondsToSelector:@selector(init)]) {
-            net = [net init];
-        }
-    } @catch (__unused NSException *e) {
-        net = nil;
-    }
-    if (!net) {
-        @try { net = [[cls alloc] init]; } @catch (__unused NSException *e) { net = nil; }
-    }
-    if (!net) return nil;
+        // Do not message an uninitialized instance to inspect init availability,
+        // or retry a failed initializer with a second allocation/side effects.
+        net = [net init];
+        if (![net isKindOfClass:cls]) return nil;
 
-    // Private ivar / property names vary by iOS version — try all common ones.
-    NSArray<NSString *> *ssidKeys = @[ @"SSID", @"_SSID", @"ssid", @"_ssid" ];
-    NSArray<NSString *> *bssidKeys = @[ @"BSSID", @"_BSSID", @"bssid", @"_bssid" ];
-    for (NSString *k in ssidKeys) {
-        @try { [net setValue:ssid forKey:k]; } @catch (__unused NSException *e) {}
+        // Keep every existing KVC alias attempt: supported keys differ across iOS.
+        // Fixed literal tables avoid constructing two NSArray containers per fetch.
+        static NSString * const ssidKeys[] = { @"SSID", @"_SSID", @"ssid", @"_ssid" };
+        static NSString * const bssidKeys[] = { @"BSSID", @"_BSSID", @"bssid", @"_bssid" };
+        for (NSUInteger index = 0; index < sizeof(ssidKeys) / sizeof(ssidKeys[0]); index++) {
+            @try { [net setValue:ssid forKey:ssidKeys[index]]; } @catch (__unused NSException *e) {}
+        }
+        for (NSUInteger index = 0; index < sizeof(bssidKeys) / sizeof(bssidKeys[0]); index++) {
+            @try { [net setValue:bssid forKey:bssidKeys[index]]; } @catch (__unused NSException *e) {}
+        }
+        return net;
+    } @catch (__unused NSException *e) {
+        return nil;
+    } @finally {
+        // Includes the C function's strong input parameters on exceptional exits.
+        net = nil; ssid = nil; bssid = nil;
     }
-    for (NSString *k in bssidKeys) {
-        @try { [net setValue:bssid forKey:k]; } @catch (__unused NSException *e) {}
-    }
-    return net;
 }
 
 // +[NEHotspotNetwork fetchCurrentWithCompletionHandler:] (iOS 14+) — primary path for many info apps.
 static void (*orig_NEHotspotNetwork_fetchCurrent)(id, SEL, void (^)(id)) = NULL;
 static void replaced_NEHotspotNetwork_fetchCurrent(id self, SEL _cmd, void (^completion)(id network)) {
+    // Preserve the original API's validation/no-handler behavior. Do not install
+    // a nonnil wrapper and perform fallback I/O for a caller with no consumer.
+    if (!completion) {
+        if (orig_NEHotspotNetwork_fetchCurrent) orig_NEHotspotNetwork_fetchCurrent(self, _cmd, nil);
+        return;
+    }
     PX_RUNTIME_READ_OPERATION;
     void (^deliver)(id) = ^(id network) {
-    PX_RUNTIME_READ_OPERATION;
+        PX_RUNTIME_READ_OPERATION;
+        NSDictionary *info = nil;
+        id synthetic = nil;
         @try {
-            NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-            if (shouldSpoofForBundle(bundleID)) {
-                // If system gave us a network object, SSID/BSSID swizzles cover property reads.
-                // If nil (common without CoreLocation auth), synthesize one from profile.
-                if (!network) {
-                    NSDictionary *info = PXResolvedWiFiInfo();
-                    if (info) {
-                        network = PXCreateSpoofedNEHotspotNetwork(info[@"ssid"], info[@"bssid"]);
-                    }
+            // Property swizzles handle real networks; only nil needs fallback work.
+            if (network) { completion(network); return; }
+            @try {
+                if (shouldSpoofForBundle(NSBundle.mainBundle.bundleIdentifier)) {
+                    info = PXResolvedWiFiInfo();
+                    if (PXWiFiInfoHasIdentity(info))
+                        synthetic = PXCreateSpoofedNEHotspotNetwork(info[@"ssid"], info[@"bssid"]);
                 }
-            }
-        } @catch (__unused NSException *e) {}
-        if (completion) completion(network);
+            } @catch (__unused NSException *e) {}
+            // Client exceptions propagate; no dispatch, retry or extra delivery.
+            completion(synthetic);
+        } @finally {
+            // Explicit cleanup also works without -fobjc-arc-exceptions.
+            network = nil; synthetic = nil; info = nil;
+        }
     };
 
-    if (orig_NEHotspotNetwork_fetchCurrent) {
-        orig_NEHotspotNetwork_fetchCurrent(self, _cmd, deliver);
-    } else if (completion) {
-        deliver(nil);
+    @try {
+        if (orig_NEHotspotNetwork_fetchCurrent) {
+            orig_NEHotspotNetwork_fetchCurrent(self, _cmd, deliver);
+        } else {
+            // Retain the existing synchronous fallback for an unavailable original.
+            deliver(nil);
+        }
+    } @finally {
+        // An original/client exception must not strand our wrapper or handler.
+        deliver = nil; completion = nil;
     }
 }
 
