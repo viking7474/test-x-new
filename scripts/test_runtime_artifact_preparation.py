@@ -57,6 +57,12 @@ WIFI_FETCH_SIGNATURES = [
     'static id PXCreateSpoofedNEHotspotNetwork(NSString *ssid, NSString *bssid)',
     'static void replaced_NEHotspotNetwork_fetchCurrent(id self, SEL _cmd, void (^completion)(id network))',
 ]
+WIFI_GETTER_HELPERS = ['static BOOL PXWiFiGetterAllowed(void)', 'static NSString *PXWiFiGetterString(NSString *key)']
+WIFI_GETTER_METHODS = ['- (NSString *)weaponx_SSID', '- (NSString *)weaponx_BSSID',
+                       '- (double)weaponx_signalStrength', '- (BOOL)weaponx_secure']
+WIFI_GETTER_CF = ['static CFStringRef replaced_WiFiNetworkGetSSID(WiFiNetworkRef network)',
+                  'static CFStringRef replaced_WiFiNetworkGetBSSID(WiFiNetworkRef network)']
+WIFI_GETTER_PATH = [('- (NSString *)_getSSID', '[self originalSSID]'), ('- (id)_getBSSID', '[self originalBSSID]')]
 CF_EXCEPTION_MODES = (('plain-arc', '-fno-objc-arc-exceptions'), ('arc-eh', '-fobjc-arc-exceptions'))
 WRAPPERS = {
     'PXPreparedWiFiMethod.inc': ('common/WiFiManager.m', ['- (NSDictionary *)generateWiFiInfo', '- (void)adoptCommittedWiFiInfo:(NSDictionary *)wifiInfo profileID:(NSString *)profileID']),
@@ -181,6 +187,34 @@ def source_contracts():
                     '- (double)latency', '- (BOOL)isExpensive', '- (BOOL)isConstrained', '- (id)gatherDiagnostics'):
         assert retired not in wifi_hooks, retired
     check_macro_arity(read('tests/PXMethodSwizzlerTests.m'), 'PXMethodSwizzlerTests.m')
+    allowed = identifier.method(wifi_hooks, WIFI_GETTER_HELPERS[0])
+    assert 'return shouldSpoofForBundle(bundleID);' in allowed and 'return NO;' in allowed
+    assert '@finally' in allowed and allowed.index('@finally') < allowed.rindex('bundleID = nil;')
+    field = identifier.method(wifi_hooks, WIFI_GETTER_HELPERS[1])
+    assert field.index('if (!PXWiFiGetterAllowed()) return nil;') < field.index('PXResolvedWiFiInfo()')
+    assert field.index('isKindOfClass:NSDictionary.class') < field.index('value = info[key];')
+    assert field.count('info[key]') == 1 and 'isKindOfClass:NSString.class' in field
+    assert 'value = nil; info = nil;' in field and '@catch' in field and '@finally' in field
+    assert '.length' not in field and 'PXWiFiInfoHasIdentity' not in field
+    for signature in WIFI_GETTER_METHODS + WIFI_GETTER_CF + [row[0] for row in WIFI_GETTER_PATH]:
+        body = identifier.method(wifi_hooks, signature)
+        assert body.count('PX_RUNTIME_READ_OPERATION;') == 1 and '@catch' not in body
+        assert 'dispatch_' not in body and 'NSClassFromString' not in body
+        if 'signalStrength' not in signature and 'weaponx_secure' not in signature:
+            assert body.count('PXWiFiGetterString(') == 1
+    for signature in WIFI_GETTER_CF:
+        body = identifier.method(wifi_hooks, signature)
+        assert 'if (value) return CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)value);' in body
+        assert '@finally' in body and 'value = nil;' in body
+    strength = identifier.method(wifi_hooks, WIFI_GETTER_METHODS[2])
+    assert '0.7 + ((double)arc4random_uniform(20) / 100.0)' in strength
+    assert '!PXWiFiGetterAllowed()' in strength
+    secure = identifier.method(wifi_hooks, WIFI_GETTER_METHODS[3])
+    assert '!PXWiFiGetterAllowed()' in secure and 'return YES;' in secure
+    getter_fixture = read('tests/PXWiFiGetterTests.m')
+    check_macro_arity(getter_fixture, 'PXWiFiGetterTests.m')
+    for call in ('TestObjectGetters();', 'TestScalarGetters();', 'TestCGetters();', 'TestFailureAndLifetime();'):
+        assert getter_fixture.count(call) == 1
     factory = identifier.method(wifi_hooks, WIFI_FETCH_SIGNATURES[0])
     assert factory.index('isKindOfClass:NSString.class') < factory.index('NSClassFromString(')
     assert factory.count('[cls alloc]') == 1 and factory.count('[net init]') == 1
@@ -329,7 +363,7 @@ def source_contracts():
     assert 'method_getNumberOfArguments(entry) != 4' in abi and "returnType[0] == 'Q' && returnType[1] == 0" in abi
     for name in ('result', 'url', 'error'): assert f'{name}[sizeof({name}) - 1] = 0;' in abi
     check_macro_arity(read('tests/PXStorageObjCHookTests.m'), 'PXStorageObjCHookTests.m')
-    for file in ('tests/PXWiFiHookCacheTests.m', 'tests/PXRuntimeArtifactPreparationTests.m', 'tests/PXMethodSwizzlerTests.m', 'tests/PXWiFiCFHookTests.m', 'tests/PXWiFiFetchTests.m'):
+    for file in ('tests/PXWiFiHookCacheTests.m', 'tests/PXRuntimeArtifactPreparationTests.m', 'tests/PXMethodSwizzlerTests.m', 'tests/PXWiFiCFHookTests.m', 'tests/PXWiFiFetchTests.m', 'tests/PXWiFiGetterTests.m'):
         declarations = re.findall(r'^@(interface|implementation)\s+(\w+)(?:[ \t]*\(([^)]*)\))?', read(file), re.M)
         assert len(declarations) == len(set(declarations)), 'duplicate native fixture class declaration: ' + file
     for label in ('hook source arrival baseline seeded', 'hook mutable target baseline seeded'):
@@ -548,6 +582,12 @@ def generate_native_fragments(folder):
     (folder / 'PXWiFiCFHooks.inc').write_text('\n\n'.join(declarations + [identifier.method(wifi, sig) for sig in WIFI_CF_SIGNATURES]), encoding='utf-8')
     fetch_original = next(line for line in wifi.splitlines() if line.startswith('static void (*orig_NEHotspotNetwork_fetchCurrent)'))
     (folder / 'PXWiFiFetchHooks.inc').write_text('\n\n'.join([fetch_original] + [identifier.method(wifi, sig) for sig in WIFI_FETCH_SIGNATURES]), encoding='utf-8')
+    (folder / 'PXWiFiGetterHelpers.inc').write_text('\n\n'.join(identifier.method(wifi, sig) for sig in WIFI_GETTER_HELPERS), encoding='utf-8')
+    (folder / 'PXWiFiGetterMethods.inc').write_text('\n\n'.join(identifier.method(wifi, sig) for sig in WIFI_GETTER_METHODS), encoding='utf-8')
+    cf_originals = [line for line in wifi.splitlines() if line.startswith('static CFStringRef (*orig_WiFiNetworkGet')]
+    assert len(cf_originals) == 2
+    (folder / 'PXWiFiGetterCF.inc').write_text('\n\n'.join(cf_originals + [identifier.method(wifi, sig) for sig in WIFI_GETTER_CF]), encoding='utf-8')
+    (folder / 'PXWiFiGetterPath.inc').write_text('\n\n'.join(identifier.method(wifi, sig).replace('%orig', original) for sig, original in WIFI_GETTER_PATH), encoding='utf-8')
     (folder / 'PXWiFiHookReader.inc').write_text('\n\n'.join(identifier.method(wifi, sig) for sig in
         ('static NSString *getCurrentProfileID(void)', 'static NSDictionary *getProfileWiFiInfo(void)')), encoding='utf-8')
     declarations = [identifier.method(storage, sig).split(' {', 1)[0] + ';' for sig in STORAGE_READ_SIGNATURES]
@@ -648,6 +688,13 @@ def native_tests():
                                 str(ROOT / 'tests/PXWiFiFetchTests.m'), '-framework', 'Foundation',
                                 '-o', str(fetch_binary)], check=True, cwd=ROOT, timeout=60)
                 subprocess.run([str(fetch_binary)], check=True, cwd=ROOT, timeout=60)
+                getter_binary = folder / ('wifi-getters-' + scheme + '-' + arc_mode)
+                print('WiFi getter native matrix:', scheme, arc_mode, flush=True)
+                subprocess.run(['xcrun', 'clang', '-O0', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions', arc_flag,
+                                '-Wall', '-Wextra', '-Werror=implicit-function-declaration', '-I', str(folder), '-I', str(ROOT / 'TLinkIOSTweak'), *defines,
+                                str(ROOT / 'TLinkIOSTweak/MethodSwizzler.m'), str(ROOT / 'tests/PXWiFiGetterTests.m'),
+                                '-framework', 'Foundation', '-framework', 'CoreFoundation', '-o', str(getter_binary)], check=True, cwd=ROOT, timeout=60)
+                subprocess.run([str(getter_binary)], check=True, cwd=ROOT, timeout=60)
 
 
 if __name__ == '__main__':

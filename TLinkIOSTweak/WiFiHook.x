@@ -451,6 +451,37 @@ static id replaced_dictionaryWithScanResult(id self, SEL _cmd, id arg1) {
     } @catch (NSException *exception) { (void)exception; return original; }
 }
 
+// Getter preparation only. Originals stay outside these catches so a system
+// exception cannot be mistaken for unavailable spoof data or trigger a retry.
+static BOOL PXWiFiGetterAllowed(void) {
+    NSString *bundleID = nil;
+    @try {
+        bundleID = NSBundle.mainBundle.bundleIdentifier;
+        return shouldSpoofForBundle(bundleID);
+    } @catch (__unused NSException *exception) {
+        return NO;
+    } @finally {
+        bundleID = nil;
+    }
+}
+
+static NSString *PXWiFiGetterString(NSString *key) {
+    NSDictionary *info = nil;
+    id value = nil;
+    @try {
+        if (!PXWiFiGetterAllowed()) return nil;
+        info = PXResolvedWiFiInfo();
+        if (![info isKindOfClass:NSDictionary.class]) return nil;
+        value = info[key];
+        // Preserve empty strings and all existing spelling/format policies.
+        return [value isKindOfClass:NSString.class] ? value : nil;
+    } @catch (__unused NSException *exception) {
+        return nil;
+    } @finally {
+        value = nil; info = nil;
+    }
+}
+
 #pragma mark - Swizzle Implementations for NEHotspotNetwork
 
 // Swizzle replacements for NEHotspotNetwork
@@ -458,52 +489,30 @@ static id replaced_dictionaryWithScanResult(id self, SEL _cmd, id arg1) {
 
 - (NSString *)weaponx_SSID {
     PX_RUNTIME_READ_OPERATION;
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    if (!shouldSpoofForBundle(bundleID)) {
-        return [self weaponx_SSID]; // original after exchange
-    }
-    NSDictionary *wifiInfo = PXResolvedWiFiInfo();
-    if (wifiInfo[@"ssid"]) return wifiInfo[@"ssid"];
-    return [self weaponx_SSID];
+    NSString *value = PXWiFiGetterString(@"ssid");
+    if (value) return value;
+    return [self weaponx_SSID]; // original after exchange, outside preparation catch
 }
 
 - (NSString *)weaponx_BSSID {
     PX_RUNTIME_READ_OPERATION;
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    if (!shouldSpoofForBundle(bundleID)) {
-        return [self weaponx_BSSID];
-    }
-    NSDictionary *wifiInfo = PXResolvedWiFiInfo();
-    if (wifiInfo[@"bssid"]) return wifiInfo[@"bssid"];
+    NSString *value = PXWiFiGetterString(@"bssid");
+    if (value) return value;
     return [self weaponx_BSSID];
 }
 
 // Additional NEHotspotNetwork property hook for signal strength
 - (double)weaponx_signalStrength {
     PX_RUNTIME_READ_OPERATION;
-    // Check if we should spoof
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    if (!shouldSpoofForBundle(bundleID)) {
-        return [self weaponx_signalStrength]; // Call original
-    }
-    
-    // Return a realistic signal strength (0.7-0.9 range for good strength)
-    // NEHotspotNetwork.signalStrength is a double in [0.0, 1.0]; return the
-    // raw double to match the real ABI (never a boxed NSNumber).
-    double strength = 0.7 + ((double)arc4random_uniform(20) / 100.0);
-    return strength;
+    if (!PXWiFiGetterAllowed()) return [self weaponx_signalStrength];
+    // Preserve the existing double ABI and discrete 0.70...0.89 distribution.
+    return 0.7 + ((double)arc4random_uniform(20) / 100.0);
 }
 
 // Additional NEHotspotNetwork property hook for secure flag
 - (BOOL)weaponx_secure {
     PX_RUNTIME_READ_OPERATION;
-    // Check if we should spoof
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    if (!shouldSpoofForBundle(bundleID)) {
-        return [self weaponx_secure]; // Call original
-    }
-    
-    // Most networks are secure, so default to YES (true)
+    if (!PXWiFiGetterAllowed()) return [self weaponx_secure];
     return YES;
 }
 
@@ -516,32 +525,27 @@ static id replaced_dictionaryWithScanResult(id self, SEL _cmd, id arg1) {
 // Hook implementation for WiFiNetworkGetSSID
 static CFStringRef replaced_WiFiNetworkGetSSID(WiFiNetworkRef network) {
     PX_RUNTIME_READ_OPERATION;
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    if (!shouldSpoofForBundle(bundleID)) {
+    NSString *value = PXWiFiGetterString(@"ssid");
+    @try {
+        // Preserve the existing +1 spoof convention pending device evidence of
+        // the private Get contract. This must not become a borrowed pointer.
+        if (value) return CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)value);
         return orig_WiFiNetworkGetSSID ? orig_WiFiNetworkGetSSID(network) : NULL;
+    } @finally {
+        value = nil;
     }
-    NSDictionary *wifiInfo = PXResolvedWiFiInfo();
-    if (wifiInfo[@"ssid"]) {
-        // Preserve this tweak's retained-spoof convention pending private API
-        // ownership/lifetime verification. A +1 copy does not satisfy both Get
-        // and Copy contracts; do not infer caller ownership from this code.
-        return CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)wifiInfo[@"ssid"]);
-    }
-    return orig_WiFiNetworkGetSSID ? orig_WiFiNetworkGetSSID(network) : NULL;
 }
 
 // Hook implementation for WiFiNetworkGetBSSID
 static CFStringRef replaced_WiFiNetworkGetBSSID(WiFiNetworkRef network) {
     PX_RUNTIME_READ_OPERATION;
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    if (!shouldSpoofForBundle(bundleID)) {
+    NSString *value = PXWiFiGetterString(@"bssid");
+    @try {
+        if (value) return CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)value);
         return orig_WiFiNetworkGetBSSID ? orig_WiFiNetworkGetBSSID(network) : NULL;
+    } @finally {
+        value = nil;
     }
-    NSDictionary *wifiInfo = PXResolvedWiFiInfo();
-    if (wifiInfo[@"bssid"]) {
-        return CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)wifiInfo[@"bssid"]);
-    }
-    return orig_WiFiNetworkGetBSSID ? orig_WiFiNetworkGetBSSID(network) : NULL;
 }
 
 #pragma mark - Hook Installation
@@ -726,10 +730,8 @@ static void settingsChanged(CFNotificationCenterRef center, void *observer, CFSt
 %hook NWPath
 - (NSString *)_getSSID {
     PX_RUNTIME_READ_OPERATION;
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    if (!shouldSpoofForBundle(bundleID)) return %orig;
-    NSDictionary *wifiInfo = PXResolvedWiFiInfo();
-    if (wifiInfo[@"ssid"]) return wifiInfo[@"ssid"];
+    NSString *value = PXWiFiGetterString(@"ssid");
+    if (value) return value;
     return %orig;
 }
 %end
@@ -739,10 +741,8 @@ static void settingsChanged(CFNotificationCenterRef center, void *observer, CFSt
 %hook NWPath
 - (id)_getBSSID {
     PX_RUNTIME_READ_OPERATION;
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    if (!shouldSpoofForBundle(bundleID)) return %orig;
-    NSDictionary *wifiInfo = PXResolvedWiFiInfo();
-    if (wifiInfo[@"bssid"]) return wifiInfo[@"bssid"];
+    NSString *value = PXWiFiGetterString(@"bssid");
+    if (value) return value;
     return %orig;
 }
 %end
