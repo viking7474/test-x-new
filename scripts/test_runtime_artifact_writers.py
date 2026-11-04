@@ -150,12 +150,13 @@ def source_contracts():
     single = objc_method(network, '+ (BOOL)saveSingleAddress:(NSString *)ipAddress inMutation:(PXProfileArtifactMutation *)mutation error:(NSError **)error')
     assert single.index('PXStageRuntimeIPv4WithExistingPair') < single.index('generateSpoofedLocalIPv6AddressFromCurrent')
     assert single.index('} error:error]') < single.index('generateSpoofedLocalIPv6AddressFromCurrent')
-    for body, helper_name in ((objc_method(wifi, '- (void)saveWiFiInfoToCurrentProfile'), 'WiFi'),
+    for body, helper_name in ((objc_method(wifi, '- (void)saveWiFiInfoToCurrentProfileAtRevision:(uint64_t)revision'), 'WiFi'),
                               (objc_method(battery, '- (BOOL)persistBatteryRecord:(NSDictionary *)record'), 'Battery'),
                               (objc_method(uptime, '- (void)generateConsistentUptimeAndBootTimeForProfile:(NSString *)profilePath'), 'Uptime')):
         assert f'PXStageRuntime{helper_name}' in body
         assert '[mutation performSourceWrite:' in body
         assert 'writeToFile:deviceIdsPath' not in body
+    assert 'saveWiFiInfoToCurrentProfileAtRevision:[self beginWiFiCacheUpdate]' in objc_method(wifi, '- (void)saveWiFiInfoToCurrentProfile')
     assert 'writeToFile:BATTERY_PLIST_PATH' in battery, 'legacy global battery compatibility remains separate'
     storage_save = objc_method(storage, '- (BOOL)persistStorageToProfile:(NSString *)profileID current:(BOOL)current error:(NSError **)error')
     assert 'mutation.profileDirectory' in storage_save and 'acquireWithProfileIDResolver:' in storage_save and '[tx setDictionary:prepared atPath:storagePath' in storage_save

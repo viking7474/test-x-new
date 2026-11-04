@@ -10,10 +10,14 @@
 // commit. These legacy APIs remain cache-first: a candidate/error is not a
 // persistence acknowledgement. Reloads clear values from a previous profile
 // when the selected profile has no readable WiFi record.
+// Supersession before preparation may return nil; a returned candidate is not ACK.
 - (NSDictionary *)generateWiFiInfo;
+// Superseded concurrent work may return nil rather than restart an old target.
 - (NSDictionary *)currentWiFiInfo;
 // Read-only compatibility fallback for a fixed target. Never reloads, generates,
-// persists or resolves the active profile; nil means missing/mismatched cache.
+// persists or resolves the active profile. The ID/data pair is revision-checked;
+// nil also means superseded or an unacknowledged standalone candidate.
+// Only load, committed adoption and successful save expose a readable entry.
 - (NSDictionary *)cachedWiFiInfoForProfileID:(NSString *)profileID;
 - (void)setCurrentWiFiInfo:(NSDictionary *)wifiInfo;
 // Cache adoption after an explicit-target source commit; never saves.

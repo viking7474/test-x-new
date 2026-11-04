@@ -101,15 +101,18 @@ static NSDictionary *Capture(void) {
 }
 
 @interface PXPreparedWiFiFixture : NSObject
-@property (nonatomic, strong) NSMutableDictionary *wifiInfo;
-@property (nonatomic, strong) NSString *currentProfileId;
-@property (nonatomic, strong) NSError *error;
+@property (atomic, strong) NSMutableDictionary *wifiInfo;
+@property (atomic, strong) NSString *currentProfileId;
+@property (atomic, strong) NSError *error;
 - (NSDictionary *)generateWiFiInfo;
-- (void)saveWiFiInfoToCurrentProfile;
 - (void)adoptCommittedWiFiInfo:(NSDictionary *)wifiInfo profileID:(NSString *)profileID;
+@property (nonatomic) uint64_t wifiCacheRevision;
+@property (nonatomic) BOOL wifiCacheReadable;
+#include "PXWiFiCacheDeclarations.inc"
+- (NSDictionary *)generateWiFiInfoAtRevision:(uint64_t)revision;
 @end
 @implementation PXPreparedWiFiFixture
-- (void)saveWiFiInfoToCurrentProfile { gWiFiSaves++; CHECK(self.wifiInfo.count == 6, "WiFi cache ready before legacy save"); }
+- (void)saveWiFiInfoToCurrentProfileAtRevision:(uint64_t)revision { (void)revision; gWiFiSaves++; CHECK(self.wifiInfo.count == 6, "WiFi cache ready before legacy save"); }
 #include "PXPreparedWiFiMethod.inc"
 @end
 
@@ -307,9 +310,9 @@ static int PXPreparationFixtureSysctl(int *name, u_int namelen, void *oldp, size
 }
 @end
 @interface PXOwnedWiFiFixture : NSObject
-@property (nonatomic, strong) NSMutableDictionary *wifiInfo;
-@property (nonatomic, strong) NSString *currentProfileId;
-@property (nonatomic, strong) NSError *error;
+@property (atomic, strong) NSMutableDictionary *wifiInfo;
+@property (atomic, strong) NSString *currentProfileId;
+@property (atomic, strong) NSError *error;
 @property (nonatomic, strong) id profileChangeObserver;
 - (void)registerForProfileNotifications;
 - (id)profileManagerForWiFi;
@@ -325,9 +328,28 @@ static int PXPreparationFixtureSysctl(int *name, u_int namelen, void *oldp, size
 - (void)setCurrentWiFiInfo:(NSDictionary *)wifiInfo;
 - (BOOL)isValidSSID:(NSString *)ssid;
 - (BOOL)isValidBSSID:(NSString *)bssid;
+@property (nonatomic) uint64_t wifiCacheRevision;
+@property (nonatomic) BOOL wifiCacheReadable;
+#include "PXWiFiCacheDeclarations.inc"
+- (NSDictionary *)generateWiFiInfoAtRevision:(uint64_t)revision;
+- (uint64_t)loadWiFiInfoForProfileID:(NSString *)profileID revision:(uint64_t)revision;
 @end
 @implementation PXOwnedWiFiFixture
 #include "PXOwnedWiFiMethods.inc"
+@end
+static NSUInteger gLazyWiFiGenerations;
+@interface PXLazyWiFiRaceFixture : PXOwnedWiFiFixture
+@end
+@implementation PXLazyWiFiRaceFixture
+- (uint64_t)loadWiFiInfoForProfileID:(NSString *)profileID revision:(uint64_t)revision {
+    uint64_t completed = [self publishWiFiCache:[NSMutableDictionary dictionary] profileID:[profileID copy] revision:revision readable:YES];
+    [self beginWiFiCacheUpdate]; // A newer owner begins but has not published yet.
+    return completed;
+}
+- (NSDictionary *)generateWiFiInfoAtRevision:(uint64_t)revision {
+    gLazyWiFiGenerations++;
+    return [super generateWiFiInfoAtRevision:revision];
+}
 @end
 @interface PXObservedWiFiFixture : PXOwnedWiFiFixture
 @end
@@ -1231,6 +1253,43 @@ static void TestWiFiLifecycle(void) {
     [wifi setCurrentWiFiInfo:next];
     CHECK(!wifi.error && [wifi.wifiInfo isEqual:next] && [[NSDictionary dictionaryWithContentsOfFile:Path(PXProfileIdentityPath(@"a"), @"wifi_info.plist")] isEqual:next],
           "WiFi custom setter persists candidate through owned paired commit");
+    // A completed source write must not relabel a newer cache adopted while
+    // its source transaction was in flight.
+    NSDictionary *saveCandidate = @{ @"ssid": @"captured source A", @"bssid": @"02:11:22:33:44:55" };
+    WiFiSpy(wifi, saveCandidate);
+    NSDictionary *newerB = @{ @"ssid": @"newer cache B", @"bssid": @"02:22:33:44:55:66" };
+    __block BOOL adoptedDuringSave = NO;
+    gStore.testCheckpoint = ^(NSString *phase) {
+        if ([phase isEqual:@"source-written"] && !adoptedDuringSave) {
+            adoptedDuringSave = YES;
+            [wifi adoptCommittedWiFiInfo:newerB profileID:@"b"];
+        }
+    };
+    [wifi saveWiFiInfoToCurrentProfile]; gStore.testCheckpoint = nil;
+    CHECK(adoptedDuringSave && !wifi.error && [wifi.currentProfileId isEqual:@"b"] &&
+          [[wifi cachedWiFiInfoForProfileID:@"b"] isEqual:newerB] && ![wifi cachedWiFiInfoForProfileID:@"a"] &&
+          [[NSDictionary dictionaryWithContentsOfFile:Path(PXProfileIdentityPath(@"a"), @"wifi_info.plist")] isEqual:saveCandidate],
+          "committed WiFi save never relabels newer adopted bytes with its older target");
+    [wifi loadWiFiInfoFromCurrentProfile];
+    before = AllArtifactFiles(); copies = gWiFiCopies; NSUInteger warmSelections = gWiFiSelections;
+    gDuringWiFiWarmup = ^{ [wifi adoptCommittedWiFiInfo:newerB profileID:@"b"]; };
+    [wifi saveWiFiInfoToCurrentProfile]; gDuringWiFiWarmup = nil;
+    CHECK([before isEqual:AllArtifactFiles()] && copies == gWiFiCopies && warmSelections == gWiFiSelections &&
+          [[wifi cachedWiFiInfoForProfileID:@"b"] isEqual:newerB],
+          "WiFi save superseded during manager warmup stops before copy ownership and source writes");
+    [wifi loadWiFiInfoFromCurrentProfile];
+    WiFiSpy(wifi, saveCandidate); before = AllArtifactFiles(); reloads = gWiFiReloads;
+    gDuringWiFiCopy = ^{ [wifi adoptCommittedWiFiInfo:newerB profileID:@"b"]; };
+    NSDictionary *supersededRead = [wifi currentWiFiInfo];
+    CHECK(!supersededRead && [[wifi cachedWiFiInfoForProfileID:@"b"] isEqual:newerB] && reloads == gWiFiReloads && [before isEqual:AllArtifactFiles()],
+          "superseded WiFi lazy hit cannot reload its older target or overwrite newer cache");
+    @autoreleasepool {
+        PXLazyWiFiRaceFixture *lazy = [PXLazyWiFiRaceFixture new];
+        gLazyWiFiGenerations = 0;
+        CHECK(![lazy currentWiFiInfo] && gLazyWiFiGenerations == 0 && [before isEqual:AllArtifactFiles()],
+              "WiFi lazy miss carries its loader receipt and cannot steal newer pending generation");
+    }
+    [wifi loadWiFiInfoFromCurrentProfile];
     // Preserve the existing optional-manager authority and file-only fallback.
     CHECK(SetArtifactSelection(@"b"), "WiFi file authority B selected"); gWiFiMemoryID = @"a";
     [wifi setCurrentWiFiInfo:a];

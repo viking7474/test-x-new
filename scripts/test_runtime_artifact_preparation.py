@@ -57,6 +57,16 @@ WIFI_FETCH_SIGNATURES = [
     'static id PXCreateSpoofedNEHotspotNetwork(NSString *ssid, NSString *bssid)',
     'static void replaced_NEHotspotNetwork_fetchCurrent(id self, SEL _cmd, void (^completion)(id network))',
 ]
+WIFI_MANAGER_CACHE_METHODS = [
+    '- (uint64_t)beginWiFiCacheUpdate', '- (BOOL)wiFiCacheRevisionIsCurrent:(uint64_t)revision',
+    '- (uint64_t)publishWiFiCache:(NSMutableDictionary *)info profileID:(NSString *)profileID revision:(uint64_t)revision readable:(BOOL)readable',
+    '- (NSDictionary *)wiFiCacheSnapshotForProfileID:(NSString *)profileID requireReadable:(BOOL)readable',
+    '- (void)setWiFiCacheError:(NSError *)error revision:(uint64_t)revision',
+]
+WIFI_MANAGER_LOAD = '- (uint64_t)loadWiFiInfoForProfileID:(NSString *)profileID revision:(uint64_t)revision'
+WIFI_MANAGER_GENERATE = '- (NSDictionary *)generateWiFiInfoAtRevision:(uint64_t)revision'
+WIFI_MANAGER_CAS = '- (uint64_t)beginWiFiCacheUpdateIfRevision:(uint64_t)revision'
+WIFI_MANAGER_SAVE = '- (void)saveWiFiInfoToCurrentProfileAtRevision:(uint64_t)revision'
 WIFI_GETTER_HELPERS = ['static BOOL PXWiFiGetterAllowed(void)', 'static NSString *PXWiFiGetterString(NSString *key)']
 WIFI_GETTER_METHODS = ['- (NSString *)weaponx_SSID', '- (NSString *)weaponx_BSSID',
                        '- (double)weaponx_signalStrength', '- (BOOL)weaponx_secure']
@@ -65,8 +75,8 @@ WIFI_GETTER_CF = ['static CFStringRef replaced_WiFiNetworkGetSSID(WiFiNetworkRef
 WIFI_GETTER_PATH = [('- (NSString *)_getSSID', '[self originalSSID]'), ('- (id)_getBSSID', '[self originalBSSID]')]
 CF_EXCEPTION_MODES = (('plain-arc', '-fno-objc-arc-exceptions'), ('arc-eh', '-fobjc-arc-exceptions'))
 WRAPPERS = {
-    'PXPreparedWiFiMethod.inc': ('common/WiFiManager.m', ['- (NSDictionary *)generateWiFiInfo', '- (void)adoptCommittedWiFiInfo:(NSDictionary *)wifiInfo profileID:(NSString *)profileID']),
-    'PXOwnedWiFiMethods.inc': ('common/WiFiManager.m', [
+    'PXPreparedWiFiMethod.inc': ('common/WiFiManager.m', [*WIFI_MANAGER_CACHE_METHODS, WIFI_MANAGER_CAS, WIFI_MANAGER_GENERATE, '- (NSDictionary *)generateWiFiInfo', '- (void)adoptCommittedWiFiInfo:(NSDictionary *)wifiInfo profileID:(NSString *)profileID']),
+    'PXOwnedWiFiMethods.inc': ('common/WiFiManager.m', [*WIFI_MANAGER_CACHE_METHODS, WIFI_MANAGER_CAS, WIFI_MANAGER_SAVE, WIFI_MANAGER_LOAD, WIFI_MANAGER_GENERATE,
         '- (instancetype)init', '- (void)registerForProfileNotifications', '- (id)profileManagerForWiFi',
         '- (NSString *)getCurrentProfileID', '- (NSString *)profileIDFromManager:(id)manager',
         '- (void)loadWiFiInfoFromCurrentProfile', '- (void)loadWiFiInfoForProfileID:(NSString *)profileID',
@@ -111,14 +121,33 @@ def source_contracts():
     assert '-(NSTimeInterval)arc4random_uniform(86400)' in preparation, 'unsigned time offset must not wrap into the future'
     assert 'if (uptime < minUptime) uptime = minUptime;' in preparation
     assert 'UINT64_MAX / 1e9' in preparation and '!isfinite(parsedCapacity)' in preparation
-    wifi = identifier.method(read('common/WiFiManager.m'), WRAPPERS['PXPreparedWiFiMethod.inc'][1][0])
+    wifi = identifier.method(read('common/WiFiManager.m'), WIFI_MANAGER_GENERATE)
     assert 'PXPrepareRuntimeWiFiInfo()' in wifi and wifi.count('saveWiFiInfoToCurrentProfile') == 1
     wifi_source = read('common/WiFiManager.m')
-    save_wifi = identifier.method(wifi_source, '- (void)saveWiFiInfoToCurrentProfile')
-    assert save_wifi.index('[self profileManagerForWiFi]') < save_wifi.index('acquireWithIdentityResolver:') < save_wifi.index('[self.wifiInfo copy]')
+    save_wifi = identifier.method(wifi_source, WIFI_MANAGER_SAVE)
+    assert save_wifi.index('[self profileManagerForWiFi]') < save_wifi.index('acquireWithIdentityResolver:') < save_wifi.index('[candidate copy]')
     assert '[self profileIDFromManager:manager]' in save_wifi and '[mutation performSourceWrite:' in save_wifi
-    assert '@finally { [mutation invalidate]; }' in save_wifi and 'createDirectoryAtPath:' not in save_wifi
+    assert '@finally' in save_wifi and 'prepared = nil; candidate = nil; mutation = nil;' in save_wifi
+    assert 'createDirectoryAtPath:' not in save_wifi
     assert 'PXPerformRuntimeSourceWrite' not in wifi_source
+    begin = identifier.method(wifi_source, WIFI_MANAGER_CACHE_METHODS[0])
+    assert '@synchronized (self)' in begin and '++_wifiCacheRevision' in begin and '_wifiCacheReadable = NO;' in begin
+    publish = identifier.method(wifi_source, WIFI_MANAGER_CACHE_METHODS[2])
+    assert 'revision == _wifiCacheRevision' in publish and '++_wifiCacheRevision' in publish
+    assert publish.index('discardedInfo = self.wifiInfo') < publish.index('self.wifiInfo = info; self.currentProfileId = profileID;')
+    assert 'objc_precise_lifetime' in publish and '(void)discardedInfo; (void)discardedID;' in publish
+    snapshot = identifier.method(wifi_source, WIFI_MANAGER_CACHE_METHODS[3])
+    assert snapshot.index('@synchronized (self)') < snapshot.index('result = [info copy];') < snapshot.index('wiFiCacheRevisionIsCurrent:revision')
+    assert 'eligible = !readable || _wifiCacheReadable;' in snapshot and 'result = nil; owner = nil; info = nil;' in snapshot
+    for body in (begin, publish, snapshot):
+        for forbidden in ('dictionaryWithContentsOfFile:', 'profileManagerForWiFi', 'performSourceWrite:', 'dispatch_'):
+            assert forbidden not in body
+    assert '@property (atomic, strong) NSMutableDictionary *wifiInfo;' in wifi_source
+    assert '@property (atomic, strong) NSString *currentProfileId;' in wifi_source
+    for signature in (WIFI_MANAGER_GENERATE, '- (void)setCurrentWiFiInfo:(NSDictionary *)wifiInfo'):
+        candidate = identifier.method(wifi_source, signature)
+        assert 'readable:NO' in candidate and 'saveWiFiInfoToCurrentProfileAtRevision:revision' in candidate
+    check_macro_arity(read('tests/PXWiFiManagerCacheTests.m'), 'PXWiFiManagerCacheTests.m')
     wifi_hooks = read('TLinkIOSTweak/WiFiHook.x')
     wifi_cache_read = identifier.method(wifi_hooks, 'static NSDictionary *PXWiFiCachedInfo(NSString *profileId, NSTimeInterval now, uint64_t *generation)')
     wifi_cache_publish = identifier.method(wifi_hooks, 'static NSDictionary *PXWiFiPublishInfo(NSDictionary *info, NSString *profileId, NSTimeInterval now, uint64_t generation)')
@@ -145,7 +174,7 @@ def source_contracts():
     for forbidden in ('currentWiFiInfo]', 'generateWiFiInfo]', 'writeToFile:', 'createDirectoryAtPath:'):
         assert forbidden not in wifi_reader
     cached_wifi = identifier.method(wifi_source, '- (NSDictionary *)cachedWiFiInfoForProfileID:(NSString *)profileID')
-    assert cached_wifi.count('[self.currentProfileId isEqualToString:target]') == 2
+    assert '[self wiFiCacheSnapshotForProfileID:target requireReadable:YES]' in cached_wifi
     for forbidden in ('generateWiFiInfo', 'saveWiFi', 'loadWiFi', 'getCurrentProfileID'): assert forbidden not in cached_wifi
     hook_resolver = read('common/PXWiFiHookResolver.m')
     owner = identifier.method(hook_resolver, 'NSDictionary *PXResolveHookWiFiInfo(NSString *profileID, PXWiFiHookCacheReader cacheReader, NSError **error)')
@@ -278,11 +307,14 @@ def source_contracts():
     assert '@property (nonatomic, strong) id profileChangeObserver;' in wifi_source
     profile_manager = identifier.method(wifi_source, '- (id)profileManagerForWiFi')
     assert 'respondsToSelector:@selector(sharedManager)' in profile_manager
-    loader = identifier.method(wifi_source, '- (void)loadWiFiInfoForProfileID:(NSString *)profileID')
-    assert loader.index('self.wifiInfo = [NSMutableDictionary dictionary]') < loader.index('dictionaryWithContentsOfFile:')
+    loader = identifier.method(wifi_source, WIFI_MANAGER_LOAD)
+    assert loader.index('publishWiFiCache:empty') < loader.index('dictionaryWithContentsOfFile:')
     assert 'PXProfileIdentityPath(target)' in loader and 'PXProfilesPath()' not in loader
     getter = identifier.method(wifi_source, '- (NSDictionary *)currentWiFiInfo')
-    assert getter.count('getCurrentProfileID') == 1 and 'loadWiFiInfoForProfileID:currentID' in getter
+    assert getter.count('getCurrentProfileID') == 1 and 'loadWiFiInfoForProfileID:currentID revision:revision' in getter
+    assert getter.count('beginWiFiCacheUpdateIfRevision:revision') == 2
+    assert 'revision = [self loadWiFiInfoForProfileID:currentID revision:revision];' in getter
+    assert 'generateWiFiInfoAtRevision:revision' in getter
 
     battery = identifier.method(read('common/BatteryManager.m'), '- (NSDictionary *)generateBatteryInfo')
     assert 'PXPrepareRuntimeBatteryInfo(_currentLowPowerMode)' in battery
@@ -363,7 +395,7 @@ def source_contracts():
     assert 'method_getNumberOfArguments(entry) != 4' in abi and "returnType[0] == 'Q' && returnType[1] == 0" in abi
     for name in ('result', 'url', 'error'): assert f'{name}[sizeof({name}) - 1] = 0;' in abi
     check_macro_arity(read('tests/PXStorageObjCHookTests.m'), 'PXStorageObjCHookTests.m')
-    for file in ('tests/PXWiFiHookCacheTests.m', 'tests/PXRuntimeArtifactPreparationTests.m', 'tests/PXMethodSwizzlerTests.m', 'tests/PXWiFiCFHookTests.m', 'tests/PXWiFiFetchTests.m', 'tests/PXWiFiGetterTests.m'):
+    for file in ('tests/PXWiFiHookCacheTests.m', 'tests/PXRuntimeArtifactPreparationTests.m', 'tests/PXMethodSwizzlerTests.m', 'tests/PXWiFiCFHookTests.m', 'tests/PXWiFiFetchTests.m', 'tests/PXWiFiGetterTests.m', 'tests/PXWiFiManagerCacheTests.m'):
         declarations = re.findall(r'^@(interface|implementation)\s+(\w+)(?:[ \t]*\(([^)]*)\))?', read(file), re.M)
         assert len(declarations) == len(set(declarations)), 'duplicate native fixture class declaration: ' + file
     for label in ('hook source arrival baseline seeded', 'hook mutable target baseline seeded'):
@@ -570,6 +602,12 @@ def source_contracts():
 def generate_native_fragments(folder):
     for name, (source, signatures) in WRAPPERS.items():
         (folder / name).write_text('\n\n'.join(identifier.method(read(source), signature) for signature in signatures), encoding='utf-8')
+    wifi_manager = read('common/WiFiManager.m')
+    cache_declarations = [identifier.method(wifi_manager, sig).split(' {', 1)[0] + ';' for sig in WIFI_MANAGER_CACHE_METHODS + [WIFI_MANAGER_CAS, WIFI_MANAGER_SAVE]]
+    (folder / 'PXWiFiCacheDeclarations.inc').write_text('\n'.join(cache_declarations), encoding='utf-8')
+    (folder / 'PXWiFiCacheCoreDeclarations.inc').write_text('\n'.join(cache_declarations[:-1]), encoding='utf-8')
+    cache_methods = WIFI_MANAGER_CACHE_METHODS + [WIFI_MANAGER_CAS, WIFI_MANAGER_LOAD, '- (void)loadWiFiInfoForProfileID:(NSString *)profileID', '- (void)adoptCommittedWiFiInfo:(NSDictionary *)wifiInfo profileID:(NSString *)profileID', '- (NSDictionary *)cachedWiFiInfoForProfileID:(NSString *)profileID']
+    (folder / 'PXWiFiManagerCacheMethods.inc').write_text('\n\n'.join(identifier.method(wifi_manager, sig) for sig in cache_methods), encoding='utf-8')
     storage = read('common/StorageManager.m'); hooks = read('TLinkIOSTweak/StorageHooks.x')
     wifi = read('TLinkIOSTweak/WiFiHook.x')
     start = wifi.index('static os_unfair_lock gWiFiCacheLock =')
@@ -695,6 +733,12 @@ def native_tests():
                                 str(ROOT / 'TLinkIOSTweak/MethodSwizzler.m'), str(ROOT / 'tests/PXWiFiGetterTests.m'),
                                 '-framework', 'Foundation', '-framework', 'CoreFoundation', '-o', str(getter_binary)], check=True, cwd=ROOT, timeout=60)
                 subprocess.run([str(getter_binary)], check=True, cwd=ROOT, timeout=60)
+                manager_cache_binary = folder / ('wifi-manager-cache-' + scheme + '-' + arc_mode)
+                print('WiFi manager cache native matrix:', scheme, arc_mode, flush=True)
+                subprocess.run(['xcrun', 'clang', '-O0', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions', arc_flag,
+                                '-Wall', '-Wextra', '-Werror=implicit-function-declaration', '-I', str(folder), *defines,
+                                str(ROOT / 'tests/PXWiFiManagerCacheTests.m'), '-framework', 'Foundation', '-o', str(manager_cache_binary)], check=True, cwd=ROOT, timeout=60)
+                subprocess.run([str(manager_cache_binary)], check=True, cwd=ROOT, timeout=60)
 
 
 if __name__ == '__main__':

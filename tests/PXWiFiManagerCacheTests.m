@@ -1,0 +1,203 @@
+#import <Foundation/Foundation.h>
+#import <dispatch/dispatch.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+static NSUInteger gChecks, gFailures, gReads, gPaths, gCopies;
+static BOOL gThrowCopy;
+static NSMutableDictionary *gFiles;
+static void (^gDuringRead)(void);
+#define CHECK(value, label) do { gChecks++; if (!(value)) { gFailures++; fprintf(stderr, "FAIL: %s\n", label); } } while (0)
+static NSString *PXValidatedProfileID(NSString *value) {
+    return [value isKindOfClass:NSString.class] && ([value isEqual:@"a"] || [value isEqual:@"b"]) ? value : nil;
+}
+static NSString *PXProfileIdentityPath(NSString *value) {
+    gPaths++; return value ? [@"/fixture/" stringByAppendingString:value] : nil;
+}
+@interface NSDictionary (CacheFixture)
++ (instancetype)cacheFixtureRead:(NSString *)path;
+@end
+@implementation NSDictionary (CacheFixture)
++ (instancetype)cacheFixtureRead:(NSString * __unsafe_unretained)path {
+    gReads++; id value = gFiles[path];
+    void (^callback)(void) = gDuringRead; gDuringRead = nil;
+    @try { if (callback) callback(); return value; }
+    @finally { callback = nil; }
+}
+@end
+@interface PXCacheWiFi : NSObject
+@property (atomic, strong) NSMutableDictionary *wifiInfo;
+@property (atomic, strong) NSString *currentProfileId;
+@property (atomic, strong) NSError *error;
+@property (nonatomic) uint64_t wifiCacheRevision;
+@property (nonatomic) BOOL wifiCacheReadable;
+#include "PXWiFiCacheCoreDeclarations.inc"
+- (void)loadWiFiInfoForProfileID:(NSString *)profileID;
+- (uint64_t)loadWiFiInfoForProfileID:(NSString *)profileID revision:(uint64_t)revision;
+- (void)adoptCommittedWiFiInfo:(NSDictionary *)info profileID:(NSString *)profile;
+- (NSDictionary *)cachedWiFiInfoForProfileID:(NSString *)profile;
+@end
+@implementation PXCacheWiFi
+#define dictionaryWithContentsOfFile cacheFixtureRead
+#include "PXWiFiManagerCacheMethods.inc"
+#undef dictionaryWithContentsOfFile
+@end
+@interface PXCacheCopySpy : NSObject <NSCopying, NSMutableCopying>
+@property (nonatomic, copy) NSDictionary *record;
+@property (nonatomic, copy) void (^duringCopy)(void);
+@end
+@implementation PXCacheCopySpy
+- (BOOL)isKindOfClass:(Class)type { return type == NSDictionary.class || [super isKindOfClass:type]; }
+- (id)prepareCopy:(BOOL)mutable {
+    gCopies++;
+    if (gThrowCopy) [NSException raise:@"fixture.copy" format:@"copy failed"];
+    id result = mutable ? [self.record mutableCopy] : [self.record copy];
+    void (^callback)(void) = self.duringCopy; self.duringCopy = nil;
+    @try { if (callback) callback(); return result; }
+    @finally { callback = nil; result = nil; }
+}
+- (id)copyWithZone:(NSZone *)zone { (void)zone; return [self prepareCopy:NO]; }
+- (id)mutableCopyWithZone:(NSZone *)zone { (void)zone; return [self prepareCopy:YES]; }
+@end
+@interface PXCacheDestructor : NSObject
+@property (nonatomic, copy) void (^onDeath)(void);
+@end
+@implementation PXCacheDestructor
+- (void)dealloc { if (_onDeath) _onDeath(); }
+@end
+static NSDictionary *Record(NSString *value) { return @{ @"ssid": value, @"bssid": @"02:11:22:33:44:55" }; }
+static uint64_t Publish(PXCacheWiFi *manager, id info, NSString *profile) {
+    return [manager publishWiFiCache:info profileID:profile revision:[manager beginWiFiCacheUpdate] readable:YES];
+}
+static PXCacheCopySpy *Spy(NSDictionary *record) { PXCacheCopySpy *spy = [PXCacheCopySpy new]; spy.record = record; return spy; }
+static void Wait(dispatch_semaphore_t done) {
+    long result = dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
+    CHECK(result == 0, "cache collaborator may finish work on another thread without a held monitor");
+    if (result) exit(1);
+}
+static void TestSnapshotABA(void) {
+    PXCacheWiFi *manager = [PXCacheWiFi new];
+    NSDictionary *a = Record(@"old A"), *b = Record(@"B"), *newA = Record(@"new A");
+    [manager adoptCommittedWiFiInfo:a profileID:@"a"];
+    CHECK([[manager cachedWiFiInfoForProfileID:@"a"] isEqual:a] && ![manager cachedWiFiInfoForProfileID:@"b"], "read-only cache admits only matching owned pair");
+    NSUInteger reads = gReads, paths = gPaths;
+    PXCacheCopySpy *spy = Spy(a);
+    spy.duringCopy = ^{ [manager adoptCommittedWiFiInfo:b profileID:@"b"]; [manager adoptCommittedWiFiInfo:newA profileID:@"a"]; };
+    Publish(manager, spy, @"a");
+    CHECK(![manager cachedWiFiInfoForProfileID:@"a"] && [[manager cachedWiFiInfoForProfileID:@"a"] isEqual:newA], "A B A during copy rejects stale bytes despite matching final profile ID");
+    CHECK(gReads == reads && gPaths == paths, "read-only cache API performs no path or file resolution");
+    spy = Spy(a);
+    spy.duringCopy = ^{ [manager adoptCommittedWiFiInfo:newA profileID:@"a"]; };
+    Publish(manager, spy, @"a");
+    CHECK(![manager cachedWiFiInfoForProfileID:@"a"] && [[manager cachedWiFiInfoForProfileID:@"a"] isEqual:newA], "same-profile newer adoption invalidates an older copying reader");
+    spy = Spy(a);
+    spy.duringCopy = ^{
+        dispatch_semaphore_t done = dispatch_semaphore_create(0);
+        [NSThread detachNewThreadWithBlock:^{ [manager adoptCommittedWiFiInfo:b profileID:@"b"]; dispatch_semaphore_signal(done); }];
+        Wait(done);
+    };
+    Publish(manager, spy, @"a");
+    CHECK(![manager cachedWiFiInfoForProfileID:@"a"] && [[manager cachedWiFiInfoForProfileID:@"b"] isEqual:b], "copy callback runs outside monitor and cannot return a displaced pair");
+    uint64_t revision = [manager beginWiFiCacheUpdate];
+    CHECK(![manager cachedWiFiInfoForProfileID:@"b"], "pending candidate is not exposed as acknowledged read-only cache");
+    [manager publishWiFiCache:[a mutableCopy] profileID:@"a" revision:revision readable:NO];
+    CHECK(![manager cachedWiFiInfoForProfileID:@"a"] && [[manager wiFiCacheSnapshotForProfileID:@"a" requireReadable:NO] isEqual:a], "legacy candidate stays available while hook fallback excludes unacknowledged data");
+    revision = [manager beginWiFiCacheUpdate];
+    [manager adoptCommittedWiFiInfo:b profileID:@"b"];
+    CHECK(![manager publishWiFiCache:[a mutableCopy] profileID:@"a" revision:revision readable:YES] && [[manager cachedWiFiInfoForProfileID:@"b"] isEqual:b], "superseded publisher cannot relabel a newer cache");
+    NSError *newError = [NSError errorWithDomain:@"fixture" code:9 userInfo:nil]; manager.error = newError;
+    [manager setWiFiCacheError:nil revision:revision];
+    CHECK(manager.error == newError, "superseded error result cannot clear newer diagnostic");
+    revision = [manager beginWiFiCacheUpdate];
+    uint64_t admitted = [manager beginWiFiCacheUpdateIfRevision:revision];
+    CHECK(admitted && [manager wiFiCacheRevisionIsCurrent:admitted] && ![manager beginWiFiCacheUpdateIfRevision:revision], "conditional admission advances a matching receipt and rejects stale reuse");
+}
+static void TestLoadAndAdoptOrdering(void) {
+    PXCacheWiFi *manager = [PXCacheWiFi new];
+    NSDictionary *a = Record(@"file A"), *b = Record(@"new B");
+    gFiles[@"/fixture/a/wifi_info.plist"] = a;
+    gDuringRead = ^{
+        CHECK(![manager cachedWiFiInfoForProfileID:@"a"], "load clears read eligibility before file callback");
+        [manager adoptCommittedWiFiInfo:b profileID:@"b"];
+    };
+    [manager loadWiFiInfoForProfileID:@"a"];
+    CHECK([[manager cachedWiFiInfoForProfileID:@"b"] isEqual:b] && ![manager cachedWiFiInfoForProfileID:@"a"], "stale loader cannot overwrite later committed adoption");
+    gFiles[@"/fixture/b/wifi_info.plist"] = b;
+    gDuringRead = ^{ [manager loadWiFiInfoForProfileID:@"b"]; };
+    [manager loadWiFiInfoForProfileID:@"a"];
+    CHECK([[manager cachedWiFiInfoForProfileID:@"b"] isEqual:b], "newer nested load wins over old file result");
+    PXCacheCopySpy *spy = Spy(a);
+    spy.duringCopy = ^{ [manager adoptCommittedWiFiInfo:b profileID:@"b"]; };
+    [manager adoptCommittedWiFiInfo:(id)spy profileID:@"a"];
+    CHECK([[manager cachedWiFiInfoForProfileID:@"b"] isEqual:b], "adoption captures revision before caller-controlled mutable copy");
+    [gFiles removeObjectForKey:@"/fixture/a/wifi_info.plist"];
+    [manager loadWiFiInfoForProfileID:@"a"];
+    NSDictionary *empty = [manager cachedWiFiInfoForProfileID:@"a"];
+    CHECK(empty && empty.count == 0 && [manager.currentProfileId isEqual:@"a"] && manager.wifiInfo.count == 0, "missing file clears old profile bytes and preserves empty cache policy");
+    gFiles[@"/fixture/a/wifi_info.plist"] = @[@"not dictionary"];
+    [manager loadWiFiInfoForProfileID:@"a"];
+    CHECK(manager.wifiInfo.count == 0, "malformed root never enters legacy dictionary cache");
+}
+static void TestLifetime(void) {
+    PXCacheWiFi *manager = [PXCacheWiFi new];
+    __weak PXCacheCopySpy *weakSpy = nil;
+    @autoreleasepool {
+        PXCacheCopySpy *spy = Spy(Record(@"A")); weakSpy = spy;
+        Publish(manager, spy, @"a"); spy = nil;
+        gThrowCopy = YES; BOOL raised = NO;
+        @try { (void)[manager cachedWiFiInfoForProfileID:@"a"]; }
+        @catch (NSException *e) { raised = [e.name isEqual:@"fixture.copy"]; }
+        gThrowCopy = NO;
+        CHECK(raised, "snapshot copy exception propagates with normal collaborator semantics");
+        [manager adoptCommittedWiFiInfo:Record(@"B") profileID:@"b"];
+    }
+    CHECK(weakSpy == nil, "snapshot exception releases retained old cache after replacement and pool drain");
+    __block NSUInteger destroyed = 0;
+    @autoreleasepool {
+        PXCacheDestructor *probe = [PXCacheDestructor new];
+        probe.onDeath = ^{
+            dispatch_semaphore_t done = dispatch_semaphore_create(0);
+            __block NSDictionary *observed = nil;
+            [NSThread detachNewThreadWithBlock:^{ @autoreleasepool { observed = [manager cachedWiFiInfoForProfileID:@"b"]; } dispatch_semaphore_signal(done); }];
+            Wait(done);
+            CHECK([observed[@"ssid"] isEqual:@"complete B"], "dealloc reentry observes completed new pair outside monitor"); destroyed++;
+        };
+        Publish(manager, probe, @"a"); probe = nil;
+        [manager adoptCommittedWiFiInfo:Record(@"complete B") profileID:@"b"];
+    }
+    CHECK(destroyed == 1, "displaced cache destructor runs once after publication");
+}
+static void TestConcurrentPairs(void) {
+    PXCacheWiFi *manager = [PXCacheWiFi new];
+    NSDictionary *a = Record(@"A"), *b = Record(@"B");
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    [NSThread detachNewThreadWithBlock:^{
+        @autoreleasepool {
+            for (NSUInteger index = 0; index < 1000; index++) {
+                [manager adoptCommittedWiFiInfo:(index % 2 ? a : b) profileID:(index % 2 ? @"a" : @"b")];
+            }
+        }
+        dispatch_semaphore_signal(done);
+    }];
+    NSUInteger wrong = 0;
+    for (NSUInteger index = 0; index < 1000; index++) {
+        @autoreleasepool {
+            NSDictionary *forA = [manager cachedWiFiInfoForProfileID:@"a"];
+            NSDictionary *forB = [manager cachedWiFiInfoForProfileID:@"b"];
+            if ((forA && ![forA[@"ssid"] isEqual:@"A"]) || (forB && ![forB[@"ssid"] isEqual:@"B"])) wrong++;
+        }
+    }
+    Wait(done);
+    CHECK(wrong == 0, "concurrent publication and reads never associate another profile's bytes");
+    CHECK([[manager cachedWiFiInfoForProfileID:@"a"] isEqual:a], "completed concurrent writer leaves final acknowledged pair readable");
+}
+int main(void) {
+    @autoreleasepool {
+        gFiles = [NSMutableDictionary new];
+        @try { TestSnapshotABA(); TestLoadAndAdoptOrdering(); TestLifetime(); TestConcurrentPairs(); }
+        @catch (NSException *e) { gFailures++; fprintf(stderr, "FAIL: unexpected manager cache exception: %s\n", e.description.UTF8String); }
+        printf("WiFi manager cache: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);
+        return gFailures ? 1 : 0;
+    }
+}
