@@ -443,9 +443,13 @@ def source_contracts():
     assert read('tests/PXRuntimeArtifactPreparationTests.m').count('TestHookWiFiResolver();') == 1
     observer = identifier.method(wifi_source, '- (void)registerForProfileNotifications')
     assert '@synchronized (self)' in observer and 'if (self.profileChangeObserver) return;' in observer
-    assert '__weak typeof(self) weakSelf' in observer and '__strong typeof(weakSelf) owner' in observer
+    assert '__weak typeof(self) weakSelf' in observer and '__strong id owner = weakSelf;' in observer and 'typeof(weakSelf) owner' not in observer
     assert '[owner handleWiFiProfileNotification:note]' in observer
     assert '@finally { owner = nil; note = nil; }' in observer
+    observer_fixture = read('tests/PXWiFiManagerCacheTests.m')
+    assert '#include "PXWiFiObserver.inc"' in observer_fixture
+    assert 'observer throwing callback releases its strong owner and note after pool drain' in observer_fixture
+    assert 'observer retained block ignores a deallocated weak owner' in observer_fixture
     handler = identifier.method(wifi_source, WIFI_MANAGER_RESOLUTION[3])
     assert handler.index('isKindOfClass:NSDictionary.class') < handler.index('payload[@"ProfileId"]')
     assert 'loadWiFiInfoFromCurrentProfile' in handler and 'currentProfileId = eventID' not in handler
@@ -914,6 +918,7 @@ def generate_native_fragments(folder):
     (folder / 'PXBatteryReaderDeclarations.inc').write_text('\n'.join(identifier.method(battery_source, sig).split(' {', 1)[0] + ';' for sig in BATTERY_READER_METHODS), encoding='utf-8')
     (folder / 'PXBatteryReaderMethods.inc').write_text('\n\n'.join(identifier.method(battery_source, sig) for sig in BATTERY_READER_METHODS), encoding='utf-8')
     wifi_manager = read('common/WiFiManager.m')
+    (folder / 'PXWiFiObserver.inc').write_text(identifier.method(wifi_manager, '- (void)registerForProfileNotifications'), encoding='utf-8')
     cache_declarations = [identifier.method(wifi_manager, sig).split(' {', 1)[0] + ';' for sig in WIFI_MANAGER_CACHE_METHODS + [WIFI_MANAGER_CAS, WIFI_MANAGER_SAVE]]
     (folder / 'PXWiFiCacheDeclarations.inc').write_text('\n'.join(cache_declarations), encoding='utf-8')
     (folder / 'PXWiFiCacheCoreDeclarations.inc').write_text('\n'.join(cache_declarations[:-1]), encoding='utf-8')

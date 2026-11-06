@@ -66,7 +66,9 @@
         __weak typeof(self) weakSelf = self;
         self.profileChangeObserver = [NSNotificationCenter.defaultCenter addObserverForName:@"WeaponXProfileChanged"
             object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
-                __strong typeof(weakSelf) owner = weakSelf;
+                // A captured weakSelf binding can be top-level const in typeof.
+                // Keep this owned cleanup slot mutable on all supported compilers.
+                __strong id owner = weakSelf;
                 @try {
                     if (!owner) return;
                     [owner handleWiFiProfileNotification:note];

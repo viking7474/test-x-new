@@ -362,10 +362,73 @@ static void TestConcurrentPairs(void) {
     CHECK(wrong == 0, "concurrent publication and reads never associate another profile's bytes");
     CHECK([[manager cachedWiFiInfoForProfileID:@"a"] isEqual:a], "completed concurrent writer leaves final acknowledged pair readable");
 }
+// Compile the exact registration body with a facade type distinct from WiFiManager.
+// Delivery is explicit here; the owned fixture retains its real notification tests.
+static void (^gObserverCallback)(NSNotification *);
+static NSUInteger gObserverRegistrations, gObserverDeliveries;
+static BOOL gObserverThrows;
+@interface PXObserverCenter : NSObject
++ (instancetype)defaultCenter;
+- (id)addObserverForName:(NSString *)name object:(id)object queue:(NSOperationQueue *)queue usingBlock:(void (^)(NSNotification *))block;
+@end
+@implementation PXObserverCenter
++ (instancetype)defaultCenter { return [self new]; }
+- (id)addObserverForName:(NSString *)name object:(id)object queue:(NSOperationQueue *)queue usingBlock:(void (^)(NSNotification *))block {
+    gObserverRegistrations++;
+    CHECK([name isEqual:@"WeaponXProfileChanged"] && !object && queue == NSOperationQueue.mainQueue,
+          "observer keeps notification identity and main operation queue");
+    gObserverCallback = [block copy]; return [NSObject new];
+}
+@end
+@interface PXObserverFixture : NSObject
+@property (nonatomic, strong) id profileChangeObserver;
+- (void)registerForProfileNotifications;
+- (void)handleWiFiProfileNotification:(NSNotification *)note;
+@end
+@implementation PXObserverFixture
+#define NSNotificationCenter PXObserverCenter
+#include "PXWiFiObserver.inc"
+#undef NSNotificationCenter
+- (void)handleWiFiProfileNotification:(NSNotification *)note {
+    @try {
+        gObserverDeliveries++;
+        if (gObserverThrows) [NSException raise:@"fixture.observer" format:@"observer failed"];
+    } @finally { note = nil; }
+}
+@end
+static void TestObserverOwnerCleanup(void) {
+    gObserverRegistrations = gObserverDeliveries = 0; gObserverThrows = NO;
+    __weak PXObserverFixture *weakOwner = nil;
+    @autoreleasepool {
+        PXObserverFixture *owner = [PXObserverFixture new]; weakOwner = owner;
+        [owner registerForProfileNotifications]; id token = owner.profileChangeObserver;
+        [owner registerForProfileNotifications];
+        CHECK(gObserverRegistrations == 1 && token && token == owner.profileChangeObserver,
+              "observer exact registration remains idempotent");
+        gObserverCallback([NSNotification notificationWithName:@"WeaponXProfileChanged" object:nil]);
+        CHECK(gObserverDeliveries == 1, "observer mutable strong owner still dispatches to the live instance");
+    }
+    CHECK(!weakOwner, "observer retained callback keeps only a weak owner between deliveries");
+    gObserverCallback([NSNotification notificationWithName:@"WeaponXProfileChanged" object:nil]);
+    CHECK(gObserverDeliveries == 1, "observer retained block ignores a deallocated weak owner");
+    __weak NSNotification *weakNote = nil; BOOL raised = NO;
+    @autoreleasepool {
+        PXObserverFixture *owner = [PXObserverFixture new]; weakOwner = owner;
+        [owner registerForProfileNotifications];
+        NSNotification *note = [NSNotification notificationWithName:@"WeaponXProfileChanged" object:nil]; weakNote = note;
+        gObserverThrows = YES;
+        @try { gObserverCallback(note); }
+        @catch (__unused NSException *exception) { raised = YES; }
+        note = nil; owner = nil;
+    }
+    CHECK(raised && !weakOwner && !weakNote,
+          "observer throwing callback releases its strong owner and note after pool drain");
+    gObserverThrows = NO; gObserverCallback = nil;
+}
 int main(void) {
     @autoreleasepool {
         gFiles = [NSMutableDictionary new];
-        @try { TestSnapshotABA(); TestLoadAndAdoptOrdering(); TestLifetime(); TestDisplayAndTypedReaders(); TestProfileResolutionAndAdmission(); TestConcurrentPairs(); }
+        @try { TestSnapshotABA(); TestLoadAndAdoptOrdering(); TestLifetime(); TestDisplayAndTypedReaders(); TestProfileResolutionAndAdmission(); TestConcurrentPairs(); TestObserverOwnerCleanup(); }
         @catch (NSException *e) { gFailures++; fprintf(stderr, "FAIL: unexpected manager cache exception: %s\n", e.description.UTF8String); }
         printf("WiFi manager cache: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);
         return gFailures ? 1 : 0;

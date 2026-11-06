@@ -209,3 +209,34 @@ are retained; superseded requests avoid obsolete writes and repair attempts.
 
 New native assertions, Theos builds and device behavior require macOS CI/device
 verification. No new native/build/device pass, commit, push or deployment is claimed.
+
+
+## Build follow-up: WiFi observer owner qualifier
+
+The reported macOS compile failure is in the previously existing WiFi registration
+body extracted into PXOwnedWiFiMethods.inc. In that block, typeof(weakSelf) carries
+a top-level const qualifier on the captured binding; its strong local owner cannot
+then be assigned nil in finally. This is a shared source/compiler typing problem,
+not a rootful-only dependency or a Battery cache-layout failure.
+
+Use an explicit `__strong id owner = weakSelf;` local in WiFiManager.m. It retains
+the same live instance, invokes the same declared handler and clears owner/note
+in the same finally, while avoiding inferred const. Keep the weak capture,
+idempotent token registration, notification name and main operation queue.
+No newer typeof-unqualifying language extension or cached class/IMP is needed.
+Other strong typeof(weakSelf) locals were inspected: they are not reassigned, so
+there is no reason to rewrite those declarations for this error.
+
+The existing four-mode WiFi cache fixture now compiles the exact registration
+body through PXWiFiObserver.inc with a distinct facade class, and specifies normal,
+throwing, duplicate-registration and deallocated-weak-owner cases. Throwing mock
+handler arguments have explicit cleanup so they do not create a false owner/note
+lifetime failure. The real owned fixture's notification/dealloc tests remain.
+No new binary/queue or production behavior is added for this regression test.
+
+Local verification: 62/63 Python + 4/4 Node; the established Git Bash permission
+failure remains. Source hardening/RootHide static/metadata 6/6, four generators,
+exact owned/observer extraction, three negative controls, recipe capture and diff
+checks pass. Production code outside registration is byte-for-byte unchanged;
+H6S BatteryManager and BatteryHooks are untouched by this follow-up. Native
+Foundation/Theos execution still requires macOS CI; no new build pass is claimed.
