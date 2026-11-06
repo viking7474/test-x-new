@@ -72,6 +72,14 @@ WIFI_MANAGER_RESOLUTION = [
     '- (NSString *)profileIDFromManager:(id)manager', '- (NSString *)getCurrentProfileID',
     '- (void)loadWiFiInfoFromCurrentProfile', '- (void)handleWiFiProfileNotification:(NSNotification *)note',
 ]
+BATTERY_ENABLE_METHODS = [
+    'static NSString *getCurrentBundleID(void)', 'static BOOL shouldSpoofBatteryForBundle(NSString *bundleID)',
+    'static const char *PXBatterySkipTypeQualifiers(const char *type)',
+    'static BOOL PXBatteryTypeMatches(const char *type, const char *expected)',
+    'static BOOL PXBatteryMethodHasABI(Method method, BOOL returnsBool)',
+    'static BOOL PXBatterySignatureHasABI(NSMethodSignature *signature, BOOL returnsBool)',
+    'static BOOL isBatterySpoofingEnabled(void)',
+]
 BATTERY_SNAPSHOT_METHODS = [
     'static NSString *PXProfileBatteryInfoPath(void)', 'static PXBatterySnapshot PXGetBatterySnapshot(void)',
     'static uint64_t PXInvalidateBatterySnapshot(void)',
@@ -479,6 +487,38 @@ def source_contracts():
     assert 'battery float endpoints include exact one-percent without regeneration' in battery_reader_fixture
     assert 'battery real plist reader accepts exact one-percent and numeric levels without repairs or publication' in read('tests/PXRuntimeArtifactPreparationTests.m')
     battery_hooks = read('TLinkIOSTweak/BatteryHooks.x')
+    bundle_reader, battery_scope, skip_types, match_type, method_abi, signature_abi, enable_gate = [identifier.method(battery_hooks, sig) for sig in BATTERY_ENABLE_METHODS]
+    assert 'loadScopedApps' not in battery_hooks and 'isInScopedAppsList' not in battery_hooks
+    assert 'PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionNone)' in battery_scope
+    assert 'NSSelectorFromString' not in enable_gate and 'static Class' not in enable_gate and 'dispatch_once' not in enable_gate
+    assert 'method_getNumberOfArguments(method) != (returnsBool ? 3u : 2u)' in method_abi
+    assert 'method_getReturnType(method, result, sizeof(result) - 1)' in method_abi
+    for slot in ('receiver', 'selector', 'argument'):
+        assert f'{slot}[32] = {{0}}' in method_abi
+    assert 'PXBatteryTypeMatches(receiver, "@") && PXBatteryTypeMatches(selector, ":")' in method_abi
+    assert 'PXBatteryTypeMatches(argument, "@")' in method_abi and '@encode(BOOL)' in method_abi
+    assert "type[1] == 0 || type[1] == '\"'" in match_type and 'strcmp(type, expected) == 0' in match_type
+    assert 'signature.numberOfArguments != (returnsBool ? 3u : 2u)' in signature_abi
+    assert 'signature.methodReturnLength != (returnsBool ? sizeof(BOOL) : sizeof(id))' in signature_abi
+    assert '@encode(BOOL)' in signature_abi and 'getArgumentTypeAtIndex:2' in signature_abi
+    assert '@finally { signature = nil; }' in signature_abi
+    assert enable_gate.index('shouldSpoofBatteryForBundle(bundleID)') < enable_gate.index('NSClassFromString(@"IdentifierManager")')
+    assert enable_gate.index('if (!PXBatteryMethodHasABI(factory, NO)) return NO;') < enable_gate.index('manager = [managerClass sharedManager];')
+    assert enable_gate.index('if (!PXBatteryMethodHasABI(enabled, YES)) return NO;') < enable_gate.index('return [manager isIdentifierEnabled:@"Battery"];')
+    assert 'class_getInstanceMethod(object_getClass(manager), enabledSelector)' in enable_gate
+    assert 'if (!PXBatterySignatureHasABI(signature, NO)) return NO;' in enable_gate and 'if (!PXBatterySignatureHasABI(signature, YES)) return NO;' in enable_gate
+    assert '__unsafe_unretained id returned = nil;' in enable_gate and '[invocation getReturnValue:&returned]; manager = returned;' in enable_gate
+    assert 'BOOL value = NO; [invocation getReturnValue:&value];' in enable_gate
+    assert '@finally { invocation = nil; signature = nil; manager = nil; bundleID = nil; }' in enable_gate
+    assert '@finally { mainBundle = nil; }' in bundle_reader and '@finally { proc = nil; bundleID = nil; }' in battery_scope
+    gate_fixture = read('tests/PXBatteryEnableGateTests.m')
+    check_macro_arity(gate_fixture, 'PXBatteryEnableGateTests.m')
+    for label in ('concrete battery gate avoids provider signature requests and invocation factory calls while preserving one call per read',
+                  'battery forwarded ABI mismatch rejects before return-buffer copy or invocation',
+                  'battery factory full forwarding preserves object return ownership and invocation',
+                  'battery gate dispatches current swizzle rather than cached IMP',
+                  'battery scope preparation releases its owned input after a predicate exception'):
+        assert label in gate_fixture
     battery_path, battery_snapshot, battery_invalidate = [identifier.method(battery_hooks, sig) for sig in BATTERY_SNAPSHOT_METHODS]
     assert battery_path.count('PXActiveProfileID()') == 1
     assert 'PXActiveProfileIdentityPath()' not in battery_path and 'PXActiveProfileRootPath()' not in battery_path
@@ -799,6 +839,7 @@ def generate_native_fragments(folder):
     for name, (source, signatures) in WRAPPERS.items():
         (folder / name).write_text('\n\n'.join(identifier.method(read(source), signature) for signature in signatures), encoding='utf-8')
     battery_hooks = read('TLinkIOSTweak/BatteryHooks.x')
+    (folder / 'PXBatteryEnableGate.inc').write_text('\n\n'.join(identifier.method(battery_hooks, sig) for sig in BATTERY_ENABLE_METHODS), encoding='utf-8')
     battery_globals = battery_hooks[battery_hooks.index('typedef struct {'):battery_hooks.index('static BOOL gHavePostedLPM')]
     battery_depth = next(line for line in battery_hooks.splitlines() if line.startswith('static __thread int gPXBatterySnapshotDepth ='))
     (folder / 'PXBatterySnapshot.inc').write_text(battery_globals + '\n' + battery_depth + '\n\n' + '\n\n'.join(identifier.method(battery_hooks, sig) for sig in BATTERY_SNAPSHOT_METHODS), encoding='utf-8')
@@ -913,6 +954,12 @@ def native_tests():
                             '-framework', 'Foundation', '-o', str(swizzle_binary)], check=True, cwd=ROOT, timeout=60)
             subprocess.run([str(swizzle_binary)], check=True, cwd=ROOT, timeout=60)
             for arc_mode, arc_flag in CF_EXCEPTION_MODES:
+                battery_gate_binary = folder / ('battery-enable-gate-' + scheme + '-' + arc_mode)
+                print('Battery enable gate native matrix:', scheme, arc_mode, flush=True)
+                subprocess.run(['xcrun', 'clang', '-O0', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions', arc_flag,
+                                '-Wall', '-Wextra', '-Werror=implicit-function-declaration', '-I', str(folder), *defines,
+                                str(ROOT / 'tests/PXBatteryEnableGateTests.m'), '-framework', 'Foundation', '-o', str(battery_gate_binary)], check=True, cwd=ROOT, timeout=60)
+                subprocess.run([str(battery_gate_binary)], check=True, cwd=ROOT, timeout=60)
                 battery_snapshot_binary = folder / ('battery-snapshot-' + scheme + '-' + arc_mode)
                 print('Battery snapshot native matrix:', scheme, arc_mode, flush=True)
                 subprocess.run(['xcrun', 'clang', '-O0', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions', arc_flag,

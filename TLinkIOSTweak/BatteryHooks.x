@@ -11,6 +11,7 @@
 #include <math.h>
 #include <stdint.h>
 #include <time.h>
+#include <string.h>
 
 
 
@@ -68,92 +69,112 @@ static __thread int gPXBatterySnapshotDepth = 0;
 
 // Helper: get current bundle ID
 static NSString *getCurrentBundleID(void) {
+    NSBundle *mainBundle = nil;
     @try {
-        NSBundle *mainBundle = [NSBundle mainBundle];
-        if (!mainBundle) {
-            return nil;
-        }
-        return [mainBundle bundleIdentifier];
+        mainBundle = [NSBundle mainBundle];
+        return mainBundle ? [mainBundle bundleIdentifier] : nil;
     } @catch (NSException *e) {
         return nil;
-    }
-}
-
-// Helper: load scoped apps from plist (with cache)
-static NSDictionary *loadScopedApps(void) {
-    PX_RUNTIME_READ_OPERATION;
-    return PXScopedAppsSnapshot();
-}
-
-// Helper: check if current app is in scoped apps list and enabled
-static BOOL isInScopedAppsList(void) {
-    PX_RUNTIME_READ_OPERATION;
-    @try {
-        NSString *bundleID = getCurrentBundleID();
-        if (!bundleID || [bundleID length] == 0) {
-            return NO;
-        }
-        NSDictionary *scopedApps = loadScopedApps();
-        if (!scopedApps || scopedApps.count == 0) {
-            return NO;
-        }
-        id appEntry = scopedApps[bundleID];
-        if (!appEntry || ![appEntry isKindOfClass:[NSDictionary class]]) {
-            return NO;
-        }
-        BOOL isEnabled = [appEntry[@"enabled"] boolValue];
-        return isEnabled;
-    } @catch (NSException *e) {
-        return NO;
-    }
+    } @finally { mainBundle = nil; }
 }
 
 // Helper: should spoof battery for this bundle (with cache)
 static BOOL shouldSpoofBatteryForBundle(NSString *bundleID) {
     PX_RUNTIME_READ_OPERATION;
-    if (!bundleID) return NO;
-    NSString *proc = [NSProcessInfo processInfo].processName;
-    return PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionNone);
+    NSString *proc = nil;
+    @try {
+        if (!bundleID) return NO;
+        proc = [NSProcessInfo processInfo].processName;
+        return PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionNone);
+    } @finally { proc = nil; bundleID = nil; }
 }
 
-// Helper to check if battery spoofing is enabled for this app/profile
+// Validate concrete and forwarded calls without caching live runtime methods.
+static const char *PXBatterySkipTypeQualifiers(const char *type) {
+    while (type && *type && strchr("rnNoORV", *type)) type++;
+    return type;
+}
+
+static BOOL PXBatteryTypeMatches(const char *type, const char *expected) {
+    type = PXBatterySkipTypeQualifiers(type);
+    if (!type || !*type) return NO;
+    if (strcmp(expected, "@") == 0)
+        return type[0] == '@' && (type[1] == 0 || type[1] == '"');
+    return strcmp(type, expected) == 0;
+}
+
+static BOOL PXBatteryMethodHasABI(Method method, BOOL returnsBool) {
+    if (!method || method_getNumberOfArguments(method) != (returnsBool ? 3u : 2u)) return NO;
+    char result[32] = {0}, receiver[32] = {0}, selector[32] = {0}, argument[32] = {0};
+    method_getReturnType(method, result, sizeof(result) - 1);
+    method_getArgumentType(method, 0, receiver, sizeof(receiver) - 1);
+    method_getArgumentType(method, 1, selector, sizeof(selector) - 1);
+    if (returnsBool) method_getArgumentType(method, 2, argument, sizeof(argument) - 1);
+    return PXBatteryTypeMatches(result, returnsBool ? @encode(BOOL) : "@") &&
+        PXBatteryTypeMatches(receiver, "@") && PXBatteryTypeMatches(selector, ":") &&
+        (!returnsBool || PXBatteryTypeMatches(argument, "@"));
+}
+
+static BOOL PXBatterySignatureHasABI(NSMethodSignature *signature, BOOL returnsBool) {
+    @try {
+        if (![signature isKindOfClass:NSMethodSignature.class] ||
+            signature.numberOfArguments != (returnsBool ? 3u : 2u) ||
+            signature.methodReturnLength != (returnsBool ? sizeof(BOOL) : sizeof(id))) return NO;
+        return PXBatteryTypeMatches(signature.methodReturnType, returnsBool ? @encode(BOOL) : "@") &&
+            PXBatteryTypeMatches([signature getArgumentTypeAtIndex:0], "@") &&
+            PXBatteryTypeMatches([signature getArgumentTypeAtIndex:1], ":") &&
+            (!returnsBool || PXBatteryTypeMatches([signature getArgumentTypeAtIndex:2], "@"));
+    } @finally { signature = nil; }
+}
+
 static BOOL isBatterySpoofingEnabled(void) {
     PX_RUNTIME_READ_OPERATION;
+    NSString *bundleID = nil;
+    id manager = nil;
+    NSMethodSignature *signature = nil;
+    NSInvocation *invocation = nil;
     @try {
-        NSString *bundleID = getCurrentBundleID();
-        if (!bundleID) {
-            return NO;
-        }
-        if (!shouldSpoofBatteryForBundle(bundleID)) {
-            return NO;
-        }
+        bundleID = getCurrentBundleID();
+        if (!bundleID || !shouldSpoofBatteryForBundle(bundleID)) return NO;
+        // Do not cache missing classes, managers, IMPs or enable values: runtime
+        // availability/swizzles and the captured RootHide toggle remain live.
         Class managerClass = NSClassFromString(@"IdentifierManager");
-        if (!managerClass) {
-            return NO;
-        }
-        id manager = [managerClass respondsToSelector:@selector(sharedManager)] ? [managerClass sharedManager] : nil;
-        if (!manager) {
-            return NO;
-        }
-        SEL isEnabledSel = NSSelectorFromString(@"isIdentifierEnabled:");
-        if (![manager respondsToSelector:isEnabledSel]) {
-            return NO;
-        }
-        NSString *batteryStr = @"Battery";
-        BOOL enabled = NO;
-        NSMethodSignature *sig = [manager methodSignatureForSelector:isEnabledSel];
-        if (sig) {
-            NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:sig];
-            [invocation setSelector:isEnabledSel];
-            [invocation setTarget:manager];
-            [invocation setArgument:&batteryStr atIndex:2];
+        SEL sharedSelector = @selector(sharedManager);
+        if (!managerClass || ![managerClass respondsToSelector:sharedSelector]) return NO;
+        Method factory = class_getClassMethod(managerClass, sharedSelector);
+        if (factory) {
+            if (!PXBatteryMethodHasABI(factory, NO)) return NO;
+            manager = [managerClass sharedManager];
+        } else {
+            // Preserve full forwarding when no concrete method was resolved.
+            signature = [managerClass methodSignatureForSelector:sharedSelector];
+            if (!PXBatterySignatureHasABI(signature, NO)) return NO;
+            invocation = [NSInvocation invocationWithMethodSignature:signature];
+            invocation.selector = sharedSelector; invocation.target = managerClass;
             [invocation invoke];
-            [invocation getReturnValue:&enabled];
+            __unsafe_unretained id returned = nil;
+            [invocation getReturnValue:&returned]; manager = returned;
+            invocation = nil; signature = nil;
         }
-        return enabled;
+        SEL enabledSelector = @selector(isIdentifierEnabled:);
+        if (!manager || ![manager respondsToSelector:enabledSelector]) return NO;
+        Method enabled = class_getInstanceMethod(object_getClass(manager), enabledSelector);
+        if (enabled) {
+            if (!PXBatteryMethodHasABI(enabled, YES)) return NO;
+            return [manager isIdentifierEnabled:@"Battery"];
+        }
+        signature = [manager methodSignatureForSelector:enabledSelector];
+        if (!PXBatterySignatureHasABI(signature, YES)) return NO;
+        invocation = [NSInvocation invocationWithMethodSignature:signature];
+        invocation.selector = enabledSelector; invocation.target = manager;
+        NSString *batteryType = @"Battery";
+        [invocation setArgument:&batteryType atIndex:2];
+        [invocation invoke];
+        BOOL value = NO; [invocation getReturnValue:&value];
+        return value;
     } @catch (...) {
         return NO;
-    }
+    } @finally { invocation = nil; signature = nil; manager = nil; bundleID = nil; }
 }
 
 static NSString *PXProfileBatteryInfoPath(void) {

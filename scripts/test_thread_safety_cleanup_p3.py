@@ -186,9 +186,10 @@ def run_source_matrix(matrix: Matrix) -> None:
     for token in forbidden_scope_tokens:
         matrix.check(f"source: removed local scoped cache token {token}", token not in PROJECT_TWEAK_TEXT and token not in COMMON_TEXT)
 
-    scoped_consumers = ["battery", "boot", "ios", "theme", "pasteboard", "network"]
+    scoped_consumers = ["boot", "ios", "theme", "pasteboard", "network"]
     matrix.check("source: scoped consumers read shared immutable snapshot", all("PXScopedAppsSnapshot()" in SOURCES[name] for name in scoped_consumers))
     matrix.check("source: Storage uses centralized snapshot scope predicate", "PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionAllowSafariAuthStack)" in SOURCES["storage"] and "PXScopeSnapshot *snap = PXCurrentSnapshot();" in scope_decision)
+    matrix.check("source: Battery uses centralized snapshot scope predicate", "PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionNone)" in function_body(SOURCES["battery"], "shouldSpoofBatteryForBundle") and "PXScopeSnapshot *snap = PXCurrentSnapshot();" in scope_decision)
     matrix.check("source: WiFi uses centralized snapshot scope predicate", "PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack)" in function_body(SOURCES["wifi"], "shouldSpoofForBundle") and "PXScopeSnapshot *snap = PXCurrentSnapshot();" in scope_decision)
     matrix.check("source: direct scope consumers use shared membership helper", "PXBundleIsEnabledInScope" in SOURCES["locale"] and "PXBundleIsEnabledInScope" in SOURCES["missing"])
 
