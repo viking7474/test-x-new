@@ -12,7 +12,7 @@ static CFTypeRef gLastOriginal;
 static CFDictionaryRef *gWatchedOutput, *gSeenOutput;
 static CFDictionaryRef gSeenInitial;
 static NSUInteger gScanCopyMode, gScanWrites, gScanWriteFailure, gScanCopyDeaths, gScanStandardDeaths;
-static __weak id gScanWorkingCopy;
+static __weak id gScanWorkingCopy, gBridgeInput;
 #define CHECK(value, label) do { gChecks++; if (!(value)) { gFailures++; fprintf(stderr, "FAIL: %s\n", label); } } while (0)
 #define PX_RUNTIME_READ_OPERATION do { gOperations++; } while (0)
 static BOOL shouldSpoofForBundle(NSString *bundle) {
@@ -25,6 +25,15 @@ static NSDictionary *PXResolvedWiFiInfo(void) {
     if (gThrowWiFi) [NSException raise:@"fixture.wifi" format:@"WiFi failed"];
     return gWiFi;
 }
+@interface PXWiFiEncodingFailure : NSObject
+@end
+@implementation PXWiFiEncodingFailure
+- (BOOL)isKindOfClass:(Class)type { return type == NSString.class || [super isKindOfClass:type]; }
+- (NSUInteger)length { return 5; }
+- (NSData *)dataUsingEncoding:(NSStringEncoding)encoding {
+    (void)encoding; [NSException raise:@"fixture.encoding" format:@"encoding failed"]; return nil;
+}
+@end
 @interface PXWiFiCFProbe : NSObject
 @end
 @implementation PXWiFiCFProbe
@@ -73,7 +82,7 @@ static id OriginalScan(id __unsafe_unretained self, SEL command, id __unsafe_unr
 // explicit cleanup cannot release a callee-owned parameter reference.
 static CFTypeRef PXFixtureBridge(CFTypeRef value) CF_RETURNS_RETAINED;
 static CFTypeRef PXFixtureBridge(CFTypeRef value) {
-    gBridgeCalls++;
+    gBridgeCalls++; gBridgeInput = (__bridge id)value;
     if (gThrowBridge) [NSException raise:@"fixture.bridge" format:@"retain failed"];
     return gFailBridge ? NULL : CFRetain(value);
 }
@@ -149,7 +158,7 @@ static void Reset(void) {
     orig_Apple80211GetInfoCopy = OriginalApple;
     orig_dictionaryWithScanResult = OriginalScan;
     gScanCopyMode = gScanWrites = gScanWriteFailure = gScanCopyDeaths = gScanStandardDeaths = 0;
-    gScanWorkingCopy = nil;
+    gScanWorkingCopy = nil; gBridgeInput = nil;
 }
 static void TestLifetimeOracle(void) {
     Reset();
@@ -203,6 +212,64 @@ static void TestNetworkCopy(void) {
     Reset();
     CHECK(!PXCreateSpoofedNetworkInfoDict((id)@7, @"mac") && !PXCreateSpoofedNetworkInfoDict(@"", @"mac") && !gBridgeCalls,
           "network dictionary builder rejects malformed or empty strings before allocation and encoding");
+}
+static void TestPreparationLifetime(void) {
+    for (NSUInteger fault = 0; fault < 2; fault++) {
+        Reset(); gFailBridge = fault == 0; gThrowBridge = fault == 1;
+        __weak id weakInfo = nil, weakSSID = nil, weakBSSID = nil;
+        @autoreleasepool {
+            gWiFi = [@{ @"ssid": [@"owned WiFi" mutableCopy], @"bssid": [@"02:11:22:33:44:55" mutableCopy] } mutableCopy];
+            weakInfo = gWiFi; weakSSID = gWiFi[@"ssid"]; weakBSSID = gWiFi[@"bssid"];
+            CFDictionaryRef result = replaced_CNCopyCurrentNetworkInfo(CFSTR("en0"));
+            CHECK((CFTypeRef)result == gLastOriginal && gOriginalCalls == 1 && gBridgeCalls == 1 && !gSourceReleases,
+                  "network failed retain keeps the caller-owned original and never retries");
+            if (result) CFRelease(result); gWiFi = nil;
+        }
+        CHECK(!weakInfo && !weakSSID && !weakBSSID && !gBridgeInput,
+              "network preparation failure releases provider root builder dictionary and mutable fields after pool drain");
+    }
+    Reset(); __weak id weakSSID = nil, weakBSSID = nil; BOOL threw = NO;
+    @autoreleasepool {
+        id ssid = [PXWiFiEncodingFailure new]; NSString *bssid = [@"02:11:22:33:44:55" mutableCopy];
+        weakSSID = ssid; weakBSSID = bssid;
+        @try { CFDictionaryRef value = PXCreateSpoofedNetworkInfoDict(ssid, bssid); if (value) CFRelease(value); }
+        @catch (NSException *exception) { threw = [exception.name isEqual:@"fixture.encoding"]; }
+        CHECK(threw && !gBridgeCalls && !gOriginalCalls, "network builder encoding exception propagates before ownership transfer");
+        ssid = nil; bssid = nil;
+    }
+    CHECK(!weakSSID && !weakBSSID, "network builder encoding unwind releases its dictionary and both input parameters");
+    Reset();
+    @autoreleasepool {
+        NSString *ssid = [@"retained output" mutableCopy], *bssid = [@"02:11:22:33:44:55" mutableCopy];
+        weakSSID = ssid; weakBSSID = bssid;
+        CFDictionaryRef value = PXCreateSpoofedNetworkInfoDict(ssid, bssid);
+        ssid = nil; bssid = nil;
+        CHECK(value && gBridgeInput == (__bridge id)value && weakSSID && weakBSSID && gBridgeCalls == 1,
+              "network builder result keeps its independent CF owner after local cleanup");
+        if (value) CFRelease(value);
+    }
+    CHECK(!weakSSID && !weakBSSID && !gBridgeInput,
+          "network builder output and descendants die after caller release and pool drain");
+    for (NSUInteger fault = 0; fault < 2; fault++) {
+        Reset(); gFailBridge = fault == 0; gThrowBridge = fault == 1;
+        CFArrayRef value = replaced_CNCopySupportedInterfaces();
+        CHECK(value && (CFTypeRef)value == gLastOriginal && CFArrayGetCount(value) == 0 && gOriginalCalls == 1 &&
+              gBridgeCalls == 1 && gScopeCalls == 1 && !gSourceReleases,
+              "interface failed retain preserves the original owned empty array without retry");
+        if (value) CFRelease(value);
+    }
+    Reset(); gThrowOriginal = YES; threw = NO;
+    @try { (void)replaced_CNCopySupportedInterfaces(); }
+    @catch (NSException *exception) { threw = [exception.name isEqual:@"fixture.original"]; }
+    CHECK(threw && gOriginalCalls == 1 && !gScopeCalls && !gBridgeCalls,
+          "interface original exception propagates before scope or preparation");
+    for (NSUInteger fault = 0; fault < 2; fault++) {
+        Reset(); gAllowed = fault != 0; gThrowScope = fault == 1;
+        CFArrayRef value = replaced_CNCopySupportedInterfaces();
+        CHECK(value && (CFTypeRef)value == gLastOriginal && CFArrayGetCount(value) == 0 && gOriginalCalls == 1 && !gBridgeCalls && !gSourceReleases,
+              "interface denied or throwing scope preserves its original without synthesis");
+        if (value) CFRelease(value);
+    }
 }
 static void TestInterfaces(void) {
     for (int kind = 0; kind < 4; kind++) {
@@ -366,7 +433,7 @@ static void TestScan(void) {
 }
 int main(void) {
     @autoreleasepool {
-        @try { TestLifetimeOracle(); TestNetworkCopy(); TestInterfaces(); TestAppleOutput(); TestScan(); TestScanLifetime(); }
+        @try { TestLifetimeOracle(); TestNetworkCopy(); TestPreparationLifetime(); TestInterfaces(); TestAppleOutput(); TestScan(); TestScanLifetime(); }
         @catch (NSException *exception) { gFailures++; fprintf(stderr, "FAIL: unexpected WiFi CF exception: %s\n", exception.description.UTF8String); }
         printf("WiFi CF boundaries: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);
         return gFailures ? 1 : 0;

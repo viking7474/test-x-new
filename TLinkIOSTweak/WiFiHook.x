@@ -290,23 +290,30 @@ static NSDictionary *getProfileWiFiInfo(void) {
 // Build a CNCopy-compatible network info dictionary (public + private key variants).
 // Always returns a new retained CFDictionary when ssid/bssid are non-empty.
 static CFDictionaryRef PXCreateSpoofedNetworkInfoDict(NSString *ssid, NSString *bssid) {
-    if (![ssid isKindOfClass:NSString.class] || ![bssid isKindOfClass:NSString.class] || !ssid.length || !bssid.length) return NULL;
-    NSMutableDictionary *spoofedInfo = [NSMutableDictionary dictionary];
-    // Canonical CaptiveNetwork keys
-    spoofedInfo[@"SSID"] = ssid;
-    spoofedInfo[@"BSSID"] = bssid;
-    // Some apps read lowercase / alternate keys
-    spoofedInfo[@"ssid"] = ssid;
-    spoofedInfo[@"bssid"] = bssid;
-    spoofedInfo[@"NetworkType"] = @"Infrastructure";
-    spoofedInfo[@"networkType"] = @"Infrastructure";
-    // SSIDDATA (NSData) used by older / private readers
-    NSData *ssidData = [ssid dataUsingEncoding:NSUTF8StringEncoding];
-    if (ssidData) {
-        spoofedInfo[@"SSIDDATA"] = ssidData;
-        spoofedInfo[@"ssidData"] = ssidData;
+    NSMutableDictionary *spoofedInfo = nil;
+    NSData *ssidData = nil;
+    @try {
+        if (![ssid isKindOfClass:NSString.class] || ![bssid isKindOfClass:NSString.class] || !ssid.length || !bssid.length) return NULL;
+        spoofedInfo = [NSMutableDictionary dictionary];
+        // Canonical CaptiveNetwork keys
+        spoofedInfo[@"SSID"] = ssid;
+        spoofedInfo[@"BSSID"] = bssid;
+        // Some apps read lowercase / alternate keys
+        spoofedInfo[@"ssid"] = ssid;
+        spoofedInfo[@"bssid"] = bssid;
+        spoofedInfo[@"NetworkType"] = @"Infrastructure";
+        spoofedInfo[@"networkType"] = @"Infrastructure";
+        // SSIDDATA (NSData) used by older / private readers
+        ssidData = [ssid dataUsingEncoding:NSUTF8StringEncoding];
+        if (ssidData) {
+            spoofedInfo[@"SSIDDATA"] = ssidData;
+            spoofedInfo[@"ssidData"] = ssidData;
+        }
+        return CFBridgingRetain(spoofedInfo);
+    } @finally {
+        // The returned CF retain is independent of our local Objective-C roots.
+        ssidData = nil; spoofedInfo = nil; bssid = nil; ssid = nil;
     }
-    return CFBridgingRetain(spoofedInfo);
 }
 
 // Both inputs follow Copy ownership. Preparation has finished before this
@@ -330,13 +337,16 @@ static CFDictionaryRef replaced_CNCopyCurrentNetworkInfo(CFStringRef interfaceNa
     PX_RUNTIME_READ_OPERATION;
     CFDictionaryRef original = orig_CNCopyCurrentNetworkInfo ? orig_CNCopyCurrentNetworkInfo(interfaceName) : NULL;
     CFDictionaryRef replacement = NULL;
+    NSString *bundleID = nil;
+    NSDictionary *wifiInfo = nil;
     @try {
-        NSString *bundleID = NSBundle.mainBundle.bundleIdentifier;
+        bundleID = NSBundle.mainBundle.bundleIdentifier;
         if (!shouldSpoofForBundle(bundleID)) return original;
-        NSDictionary *wifiInfo = PXResolvedWiFiInfo();
+        wifiInfo = PXResolvedWiFiInfo();
         if (PXWiFiInfoHasIdentity(wifiInfo))
             replacement = PXCreateSpoofedNetworkInfoDict(wifiInfo[@"ssid"], wifiInfo[@"bssid"]);
-    } @catch (NSException *exception) { (void)exception; return original; }
+    } @catch (__unused NSException *exception) { return original; }
+      @finally { wifiInfo = nil; bundleID = nil; }
     return (CFDictionaryRef)PXWiFiReplaceOwnedCopy(original, replacement);
 }
 
@@ -351,11 +361,15 @@ static CFArrayRef replaced_CNCopySupportedInterfaces(void) {
         if (original && (CFGetTypeID(original) != CFArrayGetTypeID() || CFArrayGetCount(original) > 0)) return original;
     } @catch (NSException *exception) { (void)exception; return original; }
     CFArrayRef replacement = NULL;
+    NSString *bundleID = nil;
+    NSArray *interfaces = nil;
     @try {
-        NSString *bundleID = NSBundle.mainBundle.bundleIdentifier;
+        bundleID = NSBundle.mainBundle.bundleIdentifier;
         if (!shouldSpoofForBundle(bundleID)) return original;
-        replacement = (CFArrayRef)CFBridgingRetain(@[@"en0"]);
-    } @catch (NSException *exception) { (void)exception; return original; }
+        interfaces = @[@"en0"];
+        replacement = (CFArrayRef)CFBridgingRetain(interfaces);
+    } @catch (__unused NSException *exception) { return original; }
+      @finally { interfaces = nil; bundleID = nil; }
     return (CFArrayRef)PXWiFiReplaceOwnedCopy(original, replacement);
 }
 

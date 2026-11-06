@@ -343,6 +343,7 @@ def source_contracts():
         assert fetch_fixture.count(call) == 1
     cf_builder = identifier.method(wifi_hooks, WIFI_CF_SIGNATURES[1])
     assert cf_builder.count('isKindOfClass:NSString.class') == 2
+    assert '@finally' in cf_builder and 'ssidData = nil; spoofedInfo = nil; bssid = nil; ssid = nil;' in cf_builder
     finish_copy = identifier.method(wifi_hooks, WIFI_CF_SIGNATURES[2])
     assert 'if (!replacement) return original;' in finish_copy and 'CFRelease(replacement); @throw;' in finish_copy
     for index in (3, 4):
@@ -352,6 +353,12 @@ def source_contracts():
     interfaces = identifier.method(wifi_hooks, WIFI_CF_SIGNATURES[4])
     assert interfaces.index('PX_RUNTIME_READ_OPERATION;') < interfaces.index('CFArrayRef original =')
     assert interfaces.index('CFGetTypeID(original) != CFArrayGetTypeID()') < interfaces.index('CFArrayGetCount(original)') < interfaces.index('shouldSpoofForBundle(')
+    assert 'interfaces = @[@"en0"];' in interfaces and 'CFBridgingRetain(interfaces)' in interfaces
+    assert '@finally { interfaces = nil; bundleID = nil; }' in interfaces
+    network = identifier.method(wifi_hooks, WIFI_CF_SIGNATURES[3])
+    assert '@finally { wifiInfo = nil; bundleID = nil; }' in network
+    assert network.index('orig_CNCopyCurrentNetworkInfo(interfaceName)') < network.index('@try')
+    assert interfaces.index('orig_CNCopySupportedInterfaces()') < interfaces.index('@try')
     apple = identifier.method(wifi_hooks, WIFI_CF_SIGNATURES[5])
     assert apple.index('if (!info) return orig_') < apple.index('PX_RUNTIME_READ_OPERATION;')
     assert apple.index('if (!admitted) return orig_') < apple.index('*info = NULL;') < apple.index('int result = orig_')
@@ -379,6 +386,13 @@ def source_contracts():
     assert 'CFRetain(value)' in bridge and 'PXFixtureBridge(id value)' not in cf_fixture
     assert '#define CFBridgingRetain(value) PXFixtureBridge((__bridge CFTypeRef)(value))' in cf_fixture
     assert cf_fixture.count('TestLifetimeOracle();') == 1
+    assert cf_fixture.count('TestPreparationLifetime();') == 1
+    for case in ('network preparation failure releases provider root builder dictionary and mutable fields after pool drain',
+                 'network builder encoding unwind releases its dictionary and both input parameters',
+                 'network builder result keeps its independent CF owner after local cleanup',
+                 'interface failed retain preserves the original owned empty array without retry',
+                 'interface original exception propagates before scope or preparation'):
+        assert case in cf_fixture, case
     assert cf_fixture.count('TestScanLifetime();') == 1
     assert 'OriginalScan(id __unsafe_unretained self, SEL command, id __unsafe_unretained input)' in cf_fixture
     for case in ('scan exceptional preparation releases its partial copy and retained roots after pool drain',
