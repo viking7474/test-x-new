@@ -14,6 +14,10 @@ static NSString *gDirectory;
 static PXRuntimeReadSnapshot *gView;
 static NSDictionary *gProviderValues;
 static id gStorageOverride;
+static id gWiFiOverride;
+static NSUInteger gWiFiSnapshots, gWiFiLegacyReads;
+static BOOL gThrowWiFiSnapshot;
+static void (^gDuringWiFiSnapshot)(void);
 static NSMutableArray *gStorageWrites;
 static NSUInteger gBatteryReloads, gBatteryGenerations;
 static NSUInteger gAtomicStorageCalls;
@@ -45,6 +49,12 @@ static PXRuntimeReadSnapshot *PXCaptureRuntimeSnapshot(void) { gCaptures++; retu
 static PXReaderIdentity *gIdentity;
 static PXIdentitySnapshot *PXFixtureCurrentIdentitySnapshot(void) { gCaptures++; return (id)gIdentity; }
 #define PXCurrentIdentitySnapshot PXFixtureCurrentIdentitySnapshot
+// Compile-only selector declarations; no NSObject runtime method is installed.
+@interface NSObject (PXWiFiDisplayDeclarations)
+- (NSDictionary *)cachedWiFiDisplayInfo;
+- (NSString *)currentSSID;
+- (NSString *)currentBSSID;
+@end
 #include "PXReaderStatics.inc"
 
 @interface PXReaderProvider : NSObject
@@ -81,8 +91,22 @@ static PXIdentitySnapshot *PXFixtureCurrentIdentitySnapshot(void) { gCaptures++;
 - (NSString *)currentBSSID;
 @end
 @implementation WiFiManager
-- (NSString *)currentSSID { return PXReaderProviderValue(@"ssid", nil); }
-- (NSString *)currentBSSID { return PXReaderProviderValue(@"bssid", nil); }
++ (instancetype)sharedManager { return gWiFiOverride ?: [super sharedManager]; }
+- (NSString *)currentSSID { gWiFiLegacyReads++; return PXReaderProviderValue(@"ssid", nil); }
+- (NSString *)currentBSSID { gWiFiLegacyReads++; return PXReaderProviderValue(@"bssid", nil); }
+@end
+@interface PXReaderModernWiFi : WiFiManager
+- (NSDictionary *)cachedWiFiDisplayInfo;
+@end
+@implementation PXReaderModernWiFi
+- (NSDictionary *)cachedWiFiDisplayInfo {
+    gWiFiSnapshots++;
+    if (gThrowWiFiSnapshot) [NSException raise:@"fixture.wifi" format:@"snapshot failed"];
+    id result = PXReaderProviderValue(@"wifiSnapshot", nil);
+    void (^callback)(void) = gDuringWiFiSnapshot; gDuringWiFiSnapshot = nil;
+    @try { if (callback) callback(); return result; }
+    @finally { callback = nil; result = nil; }
+}
 @end
 @interface StorageManager : PXReaderProvider
 - (NSString *)totalStorageCapacity;
@@ -257,6 +281,41 @@ static void TestManagerReaders(PXReaderFixture *reader) {
     CHECK([reader setCustomSerialNumber:@"12345678"] && [reader setCustomDeviceName:@""], "serial minimum and device name empty-input delegation preserved");
 }
 
+static void TestWiFiDisplaySnapshot(PXReaderFixture *reader) {
+    Put(@"device_ids.plist", @{});
+    [NSFileManager.defaultManager removeItemAtPath:File(@"wifi_info.plist") error:NULL];
+    gWiFiOverride = [PXReaderModernWiFi new];
+    @try {
+        gWiFiSnapshots = gWiFiLegacyReads = 0;
+        gProviderValues = @{ @"wifiSnapshot": @{ @"ssid": @"A", @"bssid": @"mac A" } };
+        gDuringWiFiSnapshot = ^{ gProviderValues = @{ @"ssid": @"B", @"bssid": @"mac B" }; };
+        CHECK([[reader currentValueForIdentifier:@"WiFi"] isEqual:@"A (mac A)"] && gWiFiSnapshots == 1 && !gWiFiLegacyReads, "modern WiFi display formats one snapshot even when provider changes before return");
+        for (id invalid in @[NSNull.null, @42, @[], @"bad root", @{}]) {
+            gProviderValues = @{ @"wifiSnapshot": invalid, @"ssid": @"B", @"bssid": @"mac B" };
+            CHECK(![reader currentValueForIdentifier:@"WiFi"] && !gWiFiLegacyReads, "modern malformed or missing pair never falls back to getters from another observation");
+        }
+        gProviderValues = @{ @"ssid": @"B", @"bssid": @"mac B" };
+        CHECK(![reader currentValueForIdentifier:@"WiFi"] && !gWiFiLegacyReads, "nil modern snapshot is not retried with legacy getters");
+        gProviderValues = @{ @"wifiSnapshot": @{ @"ssid": @42, @"bssid": @7 } };
+        CHECK([[reader currentValueForIdentifier:@"WiFi"] isEqual:@"42 (7)"], "display sanitizer retains legacy numeric scalar formatting");
+        gProviderValues = @{ @"wifiSnapshot": @{ @"ssid": @"", @"bssid": @"" } };
+        CHECK([[reader currentValueForIdentifier:@"WiFi"] isEqual:@" ()"], "modern display preserves empty strings and pair format");
+        gProviderValues = @{ @"wifiSnapshot": @{ @"ssid": @"A", @"bssid": @[] } };
+        CHECK([[reader currentValueForIdentifier:@"WiFi"] isEqual:@"A"], "invalid BSSID still allows existing SSID-only display");
+        gThrowWiFiSnapshot = YES;
+        CHECK(![reader currentValueForIdentifier:@"WiFi"] && !gWiFiLegacyReads, "optional snapshot exception is unavailable without legacy retry");
+        gThrowWiFiSnapshot = NO;
+        NSUInteger reads = gWiFiSnapshots;
+        Put(@"wifi_info.plist", @{ @"ssid": @"disk", @"bssid": @"disk mac" });
+        CHECK([[reader currentValueForIdentifier:@"WiFi"] isEqual:@"disk (disk mac)"] && gWiFiSnapshots == reads, "valid sidecar still precedes modern cache snapshot");
+        Put(@"device_ids.plist", @{ @"WiFi": @"canonical" });
+        CHECK([[reader currentValueForIdentifier:@"WiFi"] isEqual:@"canonical"] && gWiFiSnapshots == reads, "canonical value still precedes sidecar and modern provider");
+    } @finally {
+        gWiFiOverride = nil; gDuringWiFiSnapshot = nil; gThrowWiFiSnapshot = NO; gProviderValues = nil;
+        [NSFileManager.defaultManager removeItemAtPath:File(@"wifi_info.plist") error:NULL];
+        Put(@"device_ids.plist", @{});
+    }
+}
 static void TestProviderFallbacks(PXReaderFixture *reader) {
     // Separate fixture state from the earlier disk/sidecar matrix. Keep exact
     // production fallback order and observe optional compatibility setter calls.
@@ -457,7 +516,7 @@ int main(void) {
         gDirectory = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
         CHECK([NSFileManager.defaultManager createDirectoryAtPath:gDirectory withIntermediateDirectories:YES attributes:nil error:NULL], "reader directory created");
         PXReaderFixture *reader = [PXReaderFixture new];
-        @try { TestManagerReaders(reader); TestProviderFallbacks(reader); TestInjectedReaders(reader); }
+        @try { TestManagerReaders(reader); TestProviderFallbacks(reader); TestWiFiDisplaySnapshot(reader); TestInjectedReaders(reader); }
         @catch (NSException *exception) { gFailures++; fprintf(stderr, "FAIL: unexpected reader exception: %s\n", exception.description.UTF8String); }
         [NSFileManager.defaultManager removeItemAtPath:gDirectory error:NULL];
         fprintf(stdout, "Identifier reader safety: %lu/%lu checks passed\n", (unsigned long)(gChecks - gFailures), (unsigned long)gChecks);

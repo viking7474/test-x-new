@@ -33,6 +33,7 @@ static NSString *PXProfileIdentityPath(NSString *value) {
 @property (nonatomic) uint64_t wifiCacheRevision;
 @property (nonatomic) BOOL wifiCacheReadable;
 #include "PXWiFiCacheCoreDeclarations.inc"
+#include "PXWiFiCacheReaderDeclarations.inc"
 - (void)loadWiFiInfoForProfileID:(NSString *)profileID;
 - (uint64_t)loadWiFiInfoForProfileID:(NSString *)profileID revision:(uint64_t)revision;
 - (void)adoptCommittedWiFiInfo:(NSDictionary *)info profileID:(NSString *)profile;
@@ -168,6 +169,67 @@ static void TestLifetime(void) {
     }
     CHECK(destroyed == 1, "displaced cache destructor runs once after publication");
 }
+@interface PXCacheBoolConverter : NSObject
+@end
+@implementation PXCacheBoolConverter
+- (BOOL)boolValue { return YES; }
+@end
+@interface PXCacheThrowingBool : NSObject
+@end
+@implementation PXCacheThrowingBool
+- (BOOL)boolValue { [NSException raise:@"fixture.bool" format:@"converter failed"]; return NO; }
+@end
+static void TestDisplayAndTypedReaders(void) {
+    PXCacheWiFi *manager = [PXCacheWiFi new];
+    NSDate *stamp = [NSDate dateWithTimeIntervalSince1970:123456];
+    NSDictionary *record = @{ @"ssid": @"", @"bssid": @"aB:11", @"networkType": @"", @"wifiStandard": @"custom", @"autoJoin": @"YES", @"lastConnectionTime": stamp };
+    [manager adoptCommittedWiFiInfo:record profileID:@"a"];
+    NSError *sentinel = [NSError errorWithDomain:@"fixture" code:7 userInfo:nil]; manager.error = sentinel;
+    NSUInteger reads = gReads, paths = gPaths;
+    CHECK([[manager currentSSID] isEqual:@""] && [[manager currentBSSID] isEqual:@"aB:11"] && [[manager currentNetworkType] isEqual:@""] && [[manager currentWiFiStandard] isEqual:@"custom"], "typed string accessors preserve empty spelling case and custom standards");
+    CHECK([manager currentAutoJoinStatus] && [manager lastConnectionTime] == stamp, "typed metadata preserves string bool conversion and valid date identity");
+    CHECK([[manager cachedWiFiDisplayInfo] isEqual:record] && manager.error == sentinel && reads == gReads && paths == gPaths, "combined display and field readers have no selection I/O write or diagnostic effects");
+    NSArray *bad = @[NSNull.null, @42, @[], @{}, NSDate.date];
+    for (id value in bad) {
+        [manager adoptCommittedWiFiInfo:@{ @"ssid": value, @"bssid": value, @"networkType": value, @"wifiStandard": value, @"lastConnectionTime": value } profileID:@"a"];
+        CHECK(![manager currentSSID] && ![manager currentBSSID] && [[manager currentNetworkType] isEqual:@"Infrastructure"] && [[manager currentWiFiStandard] isEqual:@"802.11ac"], "malformed string fields use typed sentinels without escaping containers");
+        if (![value isKindOfClass:NSDate.class]) {
+            NSDate *before = [NSDate date]; id observed = [manager lastConnectionTime]; NSDate *after = [NSDate date];
+            CHECK([observed isKindOfClass:NSDate.class] && [observed timeIntervalSinceDate:before] >= 0 && [after timeIntervalSinceDate:observed] >= 0, "malformed date field uses existing current date fallback");
+        }
+    }
+    for (id value in @[NSNull.null, @[], @{}, NSDate.date]) {
+        [manager adoptCommittedWiFiInfo:@{ @"autoJoin": value } profileID:@"a"];
+        CHECK(![manager currentAutoJoinStatus], "unsupported autoJoin object returns NO without boolValue crash");
+    }
+    [manager adoptCommittedWiFiInfo:@{ @"autoJoin": [PXCacheBoolConverter new] } profileID:@"a"];
+    CHECK([manager currentAutoJoinStatus], "legacy live-memory bool converter remains supported");
+    [manager adoptCommittedWiFiInfo:@{ @"autoJoin": [PXCacheThrowingBool new] } profileID:@"a"];
+    manager.error = sentinel;
+    CHECK(![manager currentAutoJoinStatus] && manager.error == sentinel, "throwing optional converter returns NO without changing lastError");
+    Publish(manager, @[@"foreign root"], @"a");
+    CHECK(![manager cachedWiFiDisplayInfo] && ![manager currentSSID] && ![manager currentAutoJoinStatus], "foreign cache root is unavailable rather than subscripted");
+    NSDictionary *a = Record(@"A"), *b = Record(@"B");
+    PXCacheCopySpy *spy = Spy(a);
+    spy.duringCopy = ^{ [manager adoptCommittedWiFiInfo:b profileID:@"b"]; [manager adoptCommittedWiFiInfo:a profileID:@"a"]; };
+    Publish(manager, spy, @"a");
+    CHECK(![manager cachedWiFiDisplayInfo] && [[manager cachedWiFiDisplayInfo] isEqual:a], "display snapshot rejects A B A during copy without retrying");
+    spy = Spy(a);
+    spy.duringCopy = ^{
+        dispatch_semaphore_t done = dispatch_semaphore_create(0);
+        [NSThread detachNewThreadWithBlock:^{ [manager adoptCommittedWiFiInfo:b profileID:@"b"]; dispatch_semaphore_signal(done); }];
+        Wait(done);
+    };
+    Publish(manager, spy, @"a");
+    CHECK(![manager cachedWiFiDisplayInfo] && [[manager cachedWiFiDisplayInfo] isEqual:b], "display copies outside monitor and rejects a concurrent replacement");
+    spy = Spy(a); Publish(manager, spy, @"a"); gThrowCopy = YES;
+    CHECK(![manager cachedWiFiDisplayInfo], "display copy exception becomes an unavailable snapshot");
+    gThrowCopy = NO;
+    uint64_t revision = [manager beginWiFiCacheUpdate];
+    [manager publishWiFiCache:[a mutableCopy] profileID:@"a" revision:revision readable:NO];
+    CHECK([[manager cachedWiFiDisplayInfo] isEqual:a] && ![manager cachedWiFiInfoForProfileID:@"a"], "display keeps legacy candidate visibility while hook cache still requires acknowledgement");
+    CHECK(gReads == reads && gPaths == paths, "entire display metadata matrix remains cache-only");
+}
 static void TestConcurrentPairs(void) {
     PXCacheWiFi *manager = [PXCacheWiFi new];
     NSDictionary *a = Record(@"A"), *b = Record(@"B");
@@ -195,7 +257,7 @@ static void TestConcurrentPairs(void) {
 int main(void) {
     @autoreleasepool {
         gFiles = [NSMutableDictionary new];
-        @try { TestSnapshotABA(); TestLoadAndAdoptOrdering(); TestLifetime(); TestConcurrentPairs(); }
+        @try { TestSnapshotABA(); TestLoadAndAdoptOrdering(); TestLifetime(); TestDisplayAndTypedReaders(); TestConcurrentPairs(); }
         @catch (NSException *e) { gFailures++; fprintf(stderr, "FAIL: unexpected manager cache exception: %s\n", e.description.UTF8String); }
         printf("WiFi manager cache: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);
         return gFailures ? 1 : 0;

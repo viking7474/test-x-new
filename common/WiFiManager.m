@@ -28,6 +28,7 @@
 - (NSDictionary *)wiFiCacheSnapshotForProfileID:(NSString *)profileID requireReadable:(BOOL)readable;
 - (void)setWiFiCacheError:(NSError *)error revision:(uint64_t)revision;
 - (void)saveWiFiInfoToCurrentProfileAtRevision:(uint64_t)revision;
+- (id)wiFiCachedValueForKey:(NSString *)key valueClass:(Class)valueClass;
 @end
 
 @implementation WiFiManager
@@ -367,28 +368,60 @@
 
 #pragma mark - Accessors
 
+// Individual getters observe one retained root. They do not reload/generate.
+- (id)wiFiCachedValueForKey:(NSString *)key valueClass:(Class)valueClass {
+    NSDictionary *info = nil;
+    id value = nil;
+    @try {
+        info = self.wifiInfo;
+        if (![info isKindOfClass:NSDictionary.class]) return nil;
+        value = info[key];
+        return !valueClass || [value isKindOfClass:valueClass] ? value : nil;
+    } @catch (__unused NSException *exception) {
+        return nil;
+    } @finally { value = nil; info = nil; key = nil; }
+}
+
+// A combined display read preserves the legacy cache-first candidate policy.
+// It is deliberately separate from the acknowledged, fixed-target hook cache.
+- (NSDictionary *)cachedWiFiDisplayInfo {
+    NSDictionary *info = nil, *result = nil;
+    uint64_t revision = 0;
+    @try {
+        @synchronized (self) { info = self.wifiInfo; revision = _wifiCacheRevision; }
+        if (![info isKindOfClass:NSDictionary.class]) return nil;
+        result = [info copy];
+        return [self wiFiCacheRevisionIsCurrent:revision] ? result : nil;
+    } @catch (__unused NSException *exception) {
+        return nil;
+    } @finally { result = nil; info = nil; }
+}
+
 - (NSString *)currentSSID {
-    return self.wifiInfo[@"ssid"];
+    return [self wiFiCachedValueForKey:@"ssid" valueClass:NSString.class];
 }
 
 - (NSString *)currentBSSID {
-    return self.wifiInfo[@"bssid"];
+    return [self wiFiCachedValueForKey:@"bssid" valueClass:NSString.class];
 }
 
 - (NSString *)currentNetworkType {
-    return self.wifiInfo[@"networkType"] ?: @"Infrastructure";
+    return [self wiFiCachedValueForKey:@"networkType" valueClass:NSString.class] ?: @"Infrastructure";
 }
 
 - (NSString *)currentWiFiStandard {
-    return self.wifiInfo[@"wifiStandard"] ?: @"802.11ac";
+    return [self wiFiCachedValueForKey:@"wifiStandard" valueClass:NSString.class] ?: @"802.11ac";
 }
 
 - (BOOL)currentAutoJoinStatus {
-    return [self.wifiInfo[@"autoJoin"] boolValue];
+    id value = [self wiFiCachedValueForKey:@"autoJoin" valueClass:Nil];
+    @try { return [value respondsToSelector:@selector(boolValue)] && [value boolValue]; }
+    @catch (__unused NSException *exception) { return NO; }
+    @finally { value = nil; }
 }
 
 - (NSDate *)lastConnectionTime {
-    return self.wifiInfo[@"lastConnectionTime"] ?: [NSDate date];
+    return [self wiFiCachedValueForKey:@"lastConnectionTime" valueClass:NSDate.class] ?: [NSDate date];
 }
 
 #pragma mark - Validation

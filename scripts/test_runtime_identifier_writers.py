@@ -143,8 +143,19 @@ def source_contracts():
     for receiver, keys in (('wifiInfo', ('ssid', 'bssid')), ('storageDict', ('TotalStorage', 'FreeStorage'))):
         for key in keys:
             assert f'PXIdentifierDisplayString({receiver}[@"{key}"])' in display
-    for selector in ('currentSSID', 'currentBSSID', 'totalStorageCapacity', 'freeStorageSpace'):
+    for selector in ('totalStorageCapacity', 'freeStorageSpace'):
         assert f'PXIdentifierDisplayString([sharedManager {selector}])' in display
+    wifi_display = method(manager, 'static NSString *PXIdentifierWiFiDisplay(id manager)')
+    assert 'PXIdentifierWiFiDisplay(sharedManager)' in display
+    assert manager.index('static NSString *PXIdentifierWiFiDisplay(id manager) {') < manager.index(READER_SIGNATURES[1] + ' {')
+    assert 'respondsToSelector:@selector(cachedWiFiDisplayInfo)' in wifi_display
+    assert wifi_display.count('[manager cachedWiFiDisplayInfo]') == 1
+    assert 'if (![info isKindOfClass:NSDictionary.class]) return nil;' in wifi_display
+    assert 'info = nil; ssid = nil; bssid = nil; manager = nil;' in wifi_display
+    for selector in ('currentSSID', 'currentBSSID'):
+        assert f'PXIdentifierDisplayString([manager {selector}])' in wifi_display
+    for forbidden in ('currentWiFiInfo]', 'generateWiFiInfo]', 'getCurrentProfileID', 'dispatch_'):
+        assert forbidden not in wifi_display
     assert 'stringByAppendingPathComponent:@"system_uptime.plist"]' in display
     for name in ('uptimePath', 'bootTimePath'):
         assert f'{name} = [identityDir stringByAppendingPathComponent:' in display
@@ -331,6 +342,7 @@ def generate_native_fragments(folder):
     (folder / 'PXReaderDeclarations.inc').write_text('\n'.join(m.split(' {', 1)[0] + ';' for m in reader_methods), encoding='utf-8')
     (folder / 'PXReaderMethods.inc').write_text('\n\n'.join(reader_methods), encoding='utf-8')
     reader_statics = [method(manager, 'static NSString *PXIdentifierDisplayString(id value)'),
+                      method(manager, 'static NSString *PXIdentifierWiFiDisplay(id manager)'),
                       method(manager, 'static NSString *PXIdentifierBatteryPercentage(id value)'),
                       method(manager, 'static BOOL PXRuntimeSnapshotImpliesIdentifierEnabled(NSString *type, PXRuntimeReadSnapshot *runtimeView)'),
                       method(read('common/PXRuntimeIdentifierWriter.m'), 'static NSDictionary<NSString *, NSString *> *PXIdentifierSidecarMap(void)'),
@@ -366,13 +378,14 @@ def native_tests():
                            check=True, cwd=ROOT, timeout=60)
             for _ in range(3):
                 subprocess.run([str(binary)], check=True, cwd=ROOT, timeout=60)
-            reader_binary = folder / ('readers-' + scheme)
-            subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-fblocks', '-Wall', '-Wextra',
-                            '-Werror=implicit-function-declaration', '-I', str(ROOT / 'common'), '-I', str(folder),
-                            *defines, str(ROOT / 'common/PXRuntimeSnapshotReader.m'),
-                            str(ROOT / 'tests/PXIdentifierReaderTests.m'), '-framework', 'Foundation',
-                            '-framework', 'CoreFoundation', '-o', str(reader_binary)], check=True, cwd=ROOT, timeout=60)
-            subprocess.run([str(reader_binary)], check=True, cwd=ROOT, timeout=60)
+            for arc_mode, arc_flag in (('plain-arc', '-fno-objc-arc-exceptions'), ('arc-eh', '-fobjc-arc-exceptions')):
+                reader_binary = folder / ('readers-' + scheme + '-' + arc_mode)
+                subprocess.run(['xcrun', 'clang', '-O0', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions', arc_flag, '-Wall', '-Wextra',
+                                '-Werror=implicit-function-declaration', '-I', str(ROOT / 'common'), '-I', str(folder),
+                                *defines, str(ROOT / 'common/PXRuntimeSnapshotReader.m'),
+                                str(ROOT / 'tests/PXIdentifierReaderTests.m'), '-framework', 'Foundation',
+                                '-framework', 'CoreFoundation', '-o', str(reader_binary)], check=True, cwd=ROOT, timeout=60)
+                subprocess.run([str(reader_binary)], check=True, cwd=ROOT, timeout=60)
 
 
 if __name__ == '__main__':

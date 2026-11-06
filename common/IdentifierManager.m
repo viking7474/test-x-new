@@ -361,6 +361,30 @@ static NSString *PXIdentifierDisplayString(id value) {
     return nil;
 }
 
+static NSString *PXIdentifierWiFiDisplay(id manager) {
+    NSDictionary *info = nil;
+    NSString *ssid = nil, *bssid = nil;
+    @try {
+        if ([manager respondsToSelector:@selector(cachedWiFiDisplayInfo)]) {
+            // A miss is authoritative for this read: never combine a modern
+            // snapshot with separate legacy getters from another revision.
+            info = [manager cachedWiFiDisplayInfo];
+            if (![info isKindOfClass:NSDictionary.class]) return nil;
+            ssid = PXIdentifierDisplayString(info[@"ssid"]);
+            bssid = PXIdentifierDisplayString(info[@"bssid"]);
+        } else {
+            // Preserve optional-provider compatibility when the API is absent.
+            if ([manager respondsToSelector:@selector(currentSSID)])
+                ssid = PXIdentifierDisplayString([manager currentSSID]);
+            if ([manager respondsToSelector:@selector(currentBSSID)])
+                bssid = PXIdentifierDisplayString([manager currentBSSID]);
+        }
+        return ssid && bssid ? [NSString stringWithFormat:@"%@ (%@)", ssid, bssid] : ssid;
+    } @catch (__unused NSException *exception) {
+        return nil;
+    } @finally { info = nil; ssid = nil; bssid = nil; manager = nil; }
+}
+
 // Preserve legacy float/truncation formatting, but never convert non-finite
 // or out-of-int-range values to int. Invalid data follows the existing fallback path.
 static NSString *PXIdentifierBatteryPercentage(id value) {
@@ -2838,26 +2862,8 @@ return @"Not Set";
         if (wifiManager && [wifiManager respondsToSelector:@selector(sharedManager)]) {
             id sharedManager = [wifiManager sharedManager];
             if (sharedManager) {
-                // Get WiFi info based on available methods
-                NSString *ssid = nil;
-                NSString *bssid = nil;
-                
-                if ([sharedManager respondsToSelector:@selector(currentSSID)]) {
-                    ssid = PXIdentifierDisplayString([sharedManager currentSSID]);
-                }
-                
-                if ([sharedManager respondsToSelector:@selector(currentBSSID)]) {
-                    bssid = PXIdentifierDisplayString([sharedManager currentBSSID]);
-                }
-                
-                if (ssid && bssid) {
-                    NSString *formattedValue = [NSString stringWithFormat:@"%@ (%@)", ssid, bssid];
-                    PXLog(@"[WeaponX] WiFi info from WiFiManager: %@", formattedValue);
-                    return formattedValue;
-                } else if (ssid) {
-                    PXLog(@"[WeaponX] WiFi SSID only from WiFiManager: %@", ssid);
-                    return ssid;
-                }
+                NSString *value = PXIdentifierWiFiDisplay(sharedManager);
+                if (value) return value;
             }
         }
     }

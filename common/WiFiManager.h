@@ -23,6 +23,11 @@
 // Cache adoption after an explicit-target source commit; never saves.
 - (void)adoptCommittedWiFiInfo:(NSDictionary *)wifiInfo profileID:(NSString *)profileID;
 
+// Cache-only display snapshot from one revision, including legacy candidates.
+// Never resolves selection, reloads, generates, persists or clears lastError.
+// Nil means unavailable, malformed or superseded; the returned copy is shallow.
+- (NSDictionary *)cachedWiFiDisplayInfo;
+
 // Individual property getters/setters
 - (NSString *)currentSSID;
 - (NSString *)currentBSSID;

@@ -63,6 +63,11 @@ WIFI_MANAGER_CACHE_METHODS = [
     '- (NSDictionary *)wiFiCacheSnapshotForProfileID:(NSString *)profileID requireReadable:(BOOL)readable',
     '- (void)setWiFiCacheError:(NSError *)error revision:(uint64_t)revision',
 ]
+WIFI_MANAGER_READERS = [
+    '- (id)wiFiCachedValueForKey:(NSString *)key valueClass:(Class)valueClass',
+    '- (NSDictionary *)cachedWiFiDisplayInfo', '- (NSString *)currentSSID', '- (NSString *)currentBSSID',
+    '- (NSString *)currentNetworkType', '- (NSString *)currentWiFiStandard', '- (BOOL)currentAutoJoinStatus', '- (NSDate *)lastConnectionTime',
+]
 WIFI_MANAGER_LOAD = '- (uint64_t)loadWiFiInfoForProfileID:(NSString *)profileID revision:(uint64_t)revision'
 WIFI_MANAGER_GENERATE = '- (NSDictionary *)generateWiFiInfoAtRevision:(uint64_t)revision'
 WIFI_MANAGER_CAS = '- (uint64_t)beginWiFiCacheUpdateIfRevision:(uint64_t)revision'
@@ -147,6 +152,18 @@ def source_contracts():
     for signature in (WIFI_MANAGER_GENERATE, '- (void)setCurrentWiFiInfo:(NSDictionary *)wifiInfo'):
         candidate = identifier.method(wifi_source, signature)
         assert 'readable:NO' in candidate and 'saveWiFiInfoToCurrentProfileAtRevision:revision' in candidate
+    value_reader = identifier.method(wifi_source, WIFI_MANAGER_READERS[0])
+    assert value_reader.index('isKindOfClass:NSDictionary.class') < value_reader.index('value = info[key]')
+    assert 'isKindOfClass:valueClass' in value_reader and '@finally' in value_reader
+    display_cache = identifier.method(wifi_source, WIFI_MANAGER_READERS[1])
+    assert display_cache.index('@synchronized (self)') < display_cache.index('result = [info copy]') < display_cache.index('wiFiCacheRevisionIsCurrent:revision')
+    for body in (value_reader, display_cache):
+        for token in ('loadWiFi', 'generateWiFi', 'getCurrentProfileID', 'profileManagerForWiFi', 'self.error', 'dictionaryWithContentsOfFile:', 'performSourceWrite:', 'dispatch_'):
+            assert token not in body
+    for signature in WIFI_MANAGER_READERS[2:]:
+        assert 'wiFiCachedValueForKey:' in identifier.method(wifi_source, signature)
+    auto_join = identifier.method(wifi_source, '- (BOOL)currentAutoJoinStatus')
+    assert 'respondsToSelector:@selector(boolValue)' in auto_join and '@catch' in auto_join and '@finally' in auto_join
     check_macro_arity(read('tests/PXWiFiManagerCacheTests.m'), 'PXWiFiManagerCacheTests.m')
     wifi_hooks = read('TLinkIOSTweak/WiFiHook.x')
     wifi_cache_read = identifier.method(wifi_hooks, 'static NSDictionary *PXWiFiCachedInfo(NSString *profileId, NSTimeInterval now, uint64_t *generation)')
@@ -606,7 +623,8 @@ def generate_native_fragments(folder):
     cache_declarations = [identifier.method(wifi_manager, sig).split(' {', 1)[0] + ';' for sig in WIFI_MANAGER_CACHE_METHODS + [WIFI_MANAGER_CAS, WIFI_MANAGER_SAVE]]
     (folder / 'PXWiFiCacheDeclarations.inc').write_text('\n'.join(cache_declarations), encoding='utf-8')
     (folder / 'PXWiFiCacheCoreDeclarations.inc').write_text('\n'.join(cache_declarations[:-1]), encoding='utf-8')
-    cache_methods = WIFI_MANAGER_CACHE_METHODS + [WIFI_MANAGER_CAS, WIFI_MANAGER_LOAD, '- (void)loadWiFiInfoForProfileID:(NSString *)profileID', '- (void)adoptCommittedWiFiInfo:(NSDictionary *)wifiInfo profileID:(NSString *)profileID', '- (NSDictionary *)cachedWiFiInfoForProfileID:(NSString *)profileID']
+    (folder / 'PXWiFiCacheReaderDeclarations.inc').write_text('\n'.join(identifier.method(wifi_manager, sig).split(' {', 1)[0] + ';' for sig in WIFI_MANAGER_READERS), encoding='utf-8')
+    cache_methods = WIFI_MANAGER_CACHE_METHODS + WIFI_MANAGER_READERS + [WIFI_MANAGER_CAS, WIFI_MANAGER_LOAD, '- (void)loadWiFiInfoForProfileID:(NSString *)profileID', '- (void)adoptCommittedWiFiInfo:(NSDictionary *)wifiInfo profileID:(NSString *)profileID', '- (NSDictionary *)cachedWiFiInfoForProfileID:(NSString *)profileID']
     (folder / 'PXWiFiManagerCacheMethods.inc').write_text('\n\n'.join(identifier.method(wifi_manager, sig) for sig in cache_methods), encoding='utf-8')
     storage = read('common/StorageManager.m'); hooks = read('TLinkIOSTweak/StorageHooks.x')
     wifi = read('TLinkIOSTweak/WiFiHook.x')
