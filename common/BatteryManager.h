@@ -4,7 +4,7 @@
 
 + (instancetype)sharedManager;
 
-// Battery level (0.0-1.0 range)
+// Battery level string; reads accept 0.01-1.0 in float precision.
 - (NSString *)batteryLevel;
 - (void)setBatteryLevel:(NSString *)level;
 - (NSString *)generateBatteryLevel;
@@ -27,6 +27,8 @@
 // canonical active ID, retain global-only persistence under lifecycle ownership.
 // Busy/pending/invalid or unavailable namespace never changes the mirror. Reads
 // retain profile/legacy/global fallback and never create profile directories.
+// Reads accept string/numeric levels; unsupported fields use missing-field policy.
+// Level requests retain existing repair behavior for invalid/non-finite values.
 - (void)saveBatteryInfoToDisk;
 - (void)loadBatteryInfoFromDisk;
 

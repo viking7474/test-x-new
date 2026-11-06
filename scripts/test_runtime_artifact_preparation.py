@@ -72,6 +72,11 @@ WIFI_MANAGER_RESOLUTION = [
     '- (NSString *)profileIDFromManager:(id)manager', '- (NSString *)getCurrentProfileID',
     '- (void)loadWiFiInfoFromCurrentProfile', '- (void)handleWiFiProfileNotification:(NSNotification *)note',
 ]
+BATTERY_READER_METHODS = [
+    '- (NSString *)batteryInfoPathForCurrentProfile',
+    '- (void)applyLoadedBatteryInfo:(NSDictionary *)info profileSpecific:(BOOL)profileSpecific',
+    '- (void)loadBatteryInfoFromDisk', '- (NSString *)batteryLevel',
+]
 WIFI_MANAGER_LOAD = '- (uint64_t)loadWiFiInfoForProfileID:(NSString *)profileID revision:(uint64_t)revision'
 WIFI_MANAGER_GENERATE = '- (NSDictionary *)generateWiFiInfoAtRevision:(uint64_t)revision'
 WIFI_MANAGER_CAS = '- (uint64_t)beginWiFiCacheUpdateIfRevision:(uint64_t)revision'
@@ -101,6 +106,7 @@ WRAPPERS = {
         '- (NSString *)randomizeBatteryLevel', '- (BOOL)lowPowerModeEnabled', '- (void)setLowPowerModeEnabled:(BOOL)enabled',
         '- (NSDictionary *)generateBatteryInfo', '- (void)adoptCommittedBatteryInfo:(NSDictionary *)batteryInfo',
         '- (void)publishCommittedBatteryInfo:(NSDictionary *)batteryInfo timestamp:(NSDate *)timestamp', '- (NSError *)lastError',
+        '- (void)applyLoadedBatteryInfo:(NSDictionary *)info profileSpecific:(BOOL)profileSpecific',
         '- (NSString *)batteryInfoPathForCurrentProfile', '- (void)loadBatteryInfoFromDisk', '- (void)saveBatteryInfoToDisk',
         '- (NSDictionary *)batteryRecordForLevel:(NSString *)level lowPowerMode:(BOOL)enabled',
         '- (BOOL)persistBatteryRecord:(NSDictionary *)record', '- (BOOL)mirrorBatteryRecord:(NSDictionary *)record error:(NSError **)error']),
@@ -449,6 +455,20 @@ def source_contracts():
     assert 'createDirectoryAtPath:' not in path_reader and 'PXProfileArtifactMutation' not in path_reader and 'PXLog(' not in path_reader
     level_reader = identifier.method(battery_source, '- (NSString *)batteryLevel')
     assert 'saveBatteryInfoToDisk' not in level_reader and level_reader.count('[self generateBatteryLevel]') == 2
+    assert 'isKindOfClass:NSString.class' in level_reader
+    assert '!isfinite(storedLevel)' in level_reader and 'storedLevel < 0.01f || storedLevel > 1.0f' in level_reader
+    load_battery = identifier.method(battery_source, '- (void)loadBatteryInfoFromDisk')
+    assert load_battery.index('profileBatteryPath]') < load_battery.index('legacyPath]') < load_battery.index('BATTERY_PLIST_PATH]')
+    assert 'applyLoadedBatteryInfo:batteryInfo profileSpecific:YES' in load_battery and 'applyLoadedBatteryInfo:batteryInfo profileSpecific:NO' in load_battery
+    apply_battery = identifier.method(battery_source, BATTERY_READER_METHODS[1])
+    assert '[level copy]' in apply_battery and '[[level stringValue] copy]' in apply_battery
+    assert 'isKindOfClass:NSNumber.class' in apply_battery and 'isKindOfClass:NSString.class' in apply_battery
+    assert 'hasLowPower ? [lowPower boolValue] : NO' in apply_battery and 'else if (profileSpecific)' in apply_battery and 'else if (!_lowPowerModeLoaded)' in apply_battery
+    assert '@finally { normalized = nil; lowPower = nil; level = nil; info = nil; }' in apply_battery
+    battery_reader_fixture = read('tests/PXBatteryReaderTests.m')
+    check_macro_arity(battery_reader_fixture, 'PXBatteryReaderTests.m')
+    assert 'battery float endpoints include exact one-percent without regeneration' in battery_reader_fixture
+    assert 'battery real plist reader accepts exact one-percent and numeric levels without repairs or publication' in read('tests/PXRuntimeArtifactPreparationTests.m')
     low_power = identifier.method(battery_source, '- (void)setLowPowerModeEnabled:(BOOL)enabled')
     assert low_power.index('if (![self persistBatteryRecord:record]) return;') < low_power.index('postNotificationName:')
     assert 'if (![self persistBatteryRecord:record]) return batteryInfo;' in battery
@@ -728,6 +748,9 @@ def generate_native_fragments(folder):
     (folder / 'PXWiFiResolverLifetime.inc').write_text(resolver_source[resolver_source.index('static __thread BOOL gWiFiHookResolving'):], encoding='utf-8')
     for name, (source, signatures) in WRAPPERS.items():
         (folder / name).write_text('\n\n'.join(identifier.method(read(source), signature) for signature in signatures), encoding='utf-8')
+    battery_source = read('common/BatteryManager.m')
+    (folder / 'PXBatteryReaderDeclarations.inc').write_text('\n'.join(identifier.method(battery_source, sig).split(' {', 1)[0] + ';' for sig in BATTERY_READER_METHODS), encoding='utf-8')
+    (folder / 'PXBatteryReaderMethods.inc').write_text('\n\n'.join(identifier.method(battery_source, sig) for sig in BATTERY_READER_METHODS), encoding='utf-8')
     wifi_manager = read('common/WiFiManager.m')
     cache_declarations = [identifier.method(wifi_manager, sig).split(' {', 1)[0] + ';' for sig in WIFI_MANAGER_CACHE_METHODS + [WIFI_MANAGER_CAS, WIFI_MANAGER_SAVE]]
     (folder / 'PXWiFiCacheDeclarations.inc').write_text('\n'.join(cache_declarations), encoding='utf-8')
@@ -834,6 +857,12 @@ def native_tests():
                             '-framework', 'Foundation', '-o', str(swizzle_binary)], check=True, cwd=ROOT, timeout=60)
             subprocess.run([str(swizzle_binary)], check=True, cwd=ROOT, timeout=60)
             for arc_mode, arc_flag in CF_EXCEPTION_MODES:
+                battery_reader_binary = folder / ('battery-reader-' + scheme + '-' + arc_mode)
+                print('Battery reader native matrix:', scheme, arc_mode, flush=True)
+                subprocess.run(['xcrun', 'clang', '-O0', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions', arc_flag,
+                                '-Wall', '-Wextra', '-Werror=implicit-function-declaration', '-I', str(folder), *defines,
+                                str(ROOT / 'tests/PXBatteryReaderTests.m'), '-framework', 'Foundation', '-o', str(battery_reader_binary)], check=True, cwd=ROOT, timeout=60)
+                subprocess.run([str(battery_reader_binary)], check=True, cwd=ROOT, timeout=60)
                 wifi_binary = folder / ('wifi-hook-cache-' + scheme + '-' + arc_mode)
                 print('WiFi cache/reader native matrix:', scheme, arc_mode, flush=True)
                 subprocess.run(['xcrun', 'clang', '-O0', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions', arc_flag,

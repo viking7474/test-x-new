@@ -6,6 +6,7 @@
 #import "PXProfileArtifactMutation.h"
 #import "PXProfileLifecycleLease.h"
 #import "PXProfileDeletionJournal.h"
+#include <math.h>
 
 // Define file paths
 #define BATTERY_PLIST_PATH @"/var/mobile/Library/Preferences/com.weaponx.battery.plist"
@@ -18,6 +19,7 @@
 @property (nonatomic, assign) BOOL currentLowPowerMode;
 @property (nonatomic, assign) BOOL lowPowerModeLoaded;
 @property (nonatomic, strong) NSError *error;
+- (void)applyLoadedBatteryInfo:(NSDictionary *)info profileSpecific:(BOOL)profileSpecific;
 - (NSDictionary *)batteryRecordForLevel:(NSString *)level lowPowerMode:(BOOL)enabled;
 - (BOOL)persistBatteryRecord:(NSDictionary *)record;
 - (BOOL)mirrorBatteryRecord:(NSDictionary *)record error:(NSError **)error;
@@ -66,13 +68,14 @@ static BatteryManager *sharedManager = nil;
     [self loadBatteryInfoFromDisk];
     
     // If we don't have a value yet, generate one
-    if (!_currentBatteryLevel || _currentBatteryLevel.length == 0) {
+    if (![_currentBatteryLevel isKindOfClass:NSString.class] || _currentBatteryLevel.length == 0) {
         _currentBatteryLevel = [self generateBatteryLevel];
     }
     
-    // Validate the value is within range
-    float storedLevel = [_currentBatteryLevel floatValue];
-    if (storedLevel < 0.01 || storedLevel > 1.0) {
+    // Compare in float precision so a stored 1% value is not rounded below
+    // a double 0.01 threshold and spuriously regenerated.
+    float storedLevel = [_currentBatteryLevel isKindOfClass:NSString.class] ? [_currentBatteryLevel floatValue] : NAN;
+    if (!isfinite(storedLevel) || storedLevel < 0.01f || storedLevel > 1.0f) {
         // Fix invalid values
         PXLog(@"[WeaponX] ⚠️ Fixing invalid battery level: %@", _currentBatteryLevel);
         _currentBatteryLevel = [self generateBatteryLevel];
@@ -190,57 +193,69 @@ static BatteryManager *sharedManager = nil;
 
 // Private helper to get the path to profile-specific battery_info.plist
 - (NSString *)batteryInfoPathForCurrentProfile {
-    NSDictionary *selection = [NSDictionary dictionaryWithContentsOfFile:PXCurrentProfileInfoPath()];
-    NSString *identity = PXProfileIdentityPath(PXValidatedProfileID(selection[@"ProfileId"]));
-    // A read must never recreate a retired profile/identity directory.
-    return identity.length ? [identity stringByAppendingPathComponent:@"battery_info.plist"] : nil;
+    NSDictionary *selection = nil;
+    NSString *identity = nil;
+    @try {
+        selection = [NSDictionary dictionaryWithContentsOfFile:PXCurrentProfileInfoPath()];
+        if (![selection isKindOfClass:NSDictionary.class]) return nil;
+        identity = PXProfileIdentityPath(PXValidatedProfileID(selection[@"ProfileId"]));
+        // A read must never recreate a retired profile/identity directory.
+        return identity.length ? [identity stringByAppendingPathComponent:@"battery_info.plist"] : nil;
+    } @finally { identity = nil; selection = nil; }
 }
 
 // Load battery values from disk
-- (void)loadBatteryInfoFromDisk {
-    NSDictionary *batteryInfo = nil;
-    
-    // First try identity/battery_info.plist (canonical)
-    NSString *profileBatteryPath = [self batteryInfoPathForCurrentProfile];
-    if (profileBatteryPath) {
-        batteryInfo = [NSDictionary dictionaryWithContentsOfFile:profileBatteryPath];
-        
-        // Legacy fallback: <profile>/battery_info.plist (pre-identity path)
-        if (!batteryInfo) {
-            NSString *identityDir = [profileBatteryPath stringByDeletingLastPathComponent];
-            NSString *profileDir = [identityDir stringByDeletingLastPathComponent];
-            NSString *legacyPath = [profileDir stringByAppendingPathComponent:@"battery_info.plist"];
-            batteryInfo = [NSDictionary dictionaryWithContentsOfFile:legacyPath];
-        }
-    }
-    
-    if (batteryInfo) {
-        if (batteryInfo[kBatteryLevelKey]) {
-            _currentBatteryLevel = batteryInfo[kBatteryLevelKey];
-        }
-        // LowPowerMode: present key → use it; missing → default NO
-        if (batteryInfo[kLowPowerModeKey] != nil) {
-            _currentLowPowerMode = [batteryInfo[kLowPowerModeKey] boolValue];
-        } else {
-            _currentLowPowerMode = NO;
-        }
-        _lowPowerModeLoaded = YES;
-        return;
-    }
-    
-    // If profile-specific load failed, try global plist
-    batteryInfo = [NSDictionary dictionaryWithContentsOfFile:BATTERY_PLIST_PATH];
-    if (batteryInfo) {
-        // Extract the values we need
-        _currentBatteryLevel = batteryInfo[kBatteryLevelKey] ?: _currentBatteryLevel;
-        if (batteryInfo[kLowPowerModeKey] != nil) {
-            _currentLowPowerMode = [batteryInfo[kLowPowerModeKey] boolValue];
-            _lowPowerModeLoaded = YES;
+- (void)applyLoadedBatteryInfo:(NSDictionary *)info profileSpecific:(BOOL)profileSpecific {
+    id level = nil, lowPower = nil;
+    NSString *normalized = nil;
+    @try {
+        if (![info isKindOfClass:NSDictionary.class]) return;
+        level = info[kBatteryLevelKey]; lowPower = info[kLowPowerModeKey];
+        if ([level isKindOfClass:NSString.class]) normalized = [level copy];
+        else if ([level isKindOfClass:NSNumber.class]) normalized = [[level stringValue] copy];
+        BOOL hasLowPower = [lowPower isKindOfClass:NSString.class] || [lowPower isKindOfClass:NSNumber.class];
+        BOOL enabled = hasLowPower ? [lowPower boolValue] : NO;
+        // Unsupported fields follow the existing missing-field policy. Preserve
+        // raw NSString spelling and accept legacy numeric levels as strings.
+        if (normalized) _currentBatteryLevel = normalized;
+        if (hasLowPower) {
+            _currentLowPowerMode = enabled; _lowPowerModeLoaded = YES;
+        } else if (profileSpecific) {
+            _currentLowPowerMode = NO; _lowPowerModeLoaded = YES;
         } else if (!_lowPowerModeLoaded) {
             _currentLowPowerMode = NO;
         }
-    } else if (!_lowPowerModeLoaded) {
-        _currentLowPowerMode = NO;
+    } @finally { normalized = nil; lowPower = nil; level = nil; info = nil; }
+}
+
+- (void)loadBatteryInfoFromDisk {
+    NSDictionary *batteryInfo = nil;
+    NSString *profileBatteryPath = nil, *identityDir = nil, *profileDir = nil, *legacyPath = nil;
+    @try {
+        // Preserve canonical identity -> pre-identity profile -> global order.
+        profileBatteryPath = [self batteryInfoPathForCurrentProfile];
+        if (profileBatteryPath) {
+            batteryInfo = [NSDictionary dictionaryWithContentsOfFile:profileBatteryPath];
+            if (![batteryInfo isKindOfClass:NSDictionary.class]) {
+                identityDir = [profileBatteryPath stringByDeletingLastPathComponent];
+                profileDir = [identityDir stringByDeletingLastPathComponent];
+                legacyPath = [profileDir stringByAppendingPathComponent:@"battery_info.plist"];
+                batteryInfo = [NSDictionary dictionaryWithContentsOfFile:legacyPath];
+            }
+        }
+        if ([batteryInfo isKindOfClass:NSDictionary.class]) {
+            [self applyLoadedBatteryInfo:batteryInfo profileSpecific:YES];
+            return;
+        }
+        batteryInfo = [NSDictionary dictionaryWithContentsOfFile:BATTERY_PLIST_PATH];
+        if ([batteryInfo isKindOfClass:NSDictionary.class]) {
+            [self applyLoadedBatteryInfo:batteryInfo profileSpecific:NO];
+        } else if (!_lowPowerModeLoaded) {
+            _currentLowPowerMode = NO;
+        }
+    } @finally {
+        legacyPath = nil; profileDir = nil; identityDir = nil;
+        profileBatteryPath = nil; batteryInfo = nil;
     }
 }
 

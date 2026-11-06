@@ -409,6 +409,7 @@ static void PXOwnedBatteryDarwin(CFNotificationCenterRef center, CFStringRef nam
 - (void)adoptCommittedBatteryInfo:(NSDictionary *)batteryInfo;
 - (void)publishCommittedBatteryInfo:(NSDictionary *)batteryInfo timestamp:(NSDate *)timestamp;
 - (NSError *)lastError;
+- (void)applyLoadedBatteryInfo:(NSDictionary *)info profileSpecific:(BOOL)profileSpecific;
 - (NSString *)batteryInfoPathForCurrentProfile;
 - (void)loadBatteryInfoFromDisk;
 - (void)saveBatteryInfoToDisk;
@@ -1581,6 +1582,19 @@ static void TestBatteryLifecycle(void) {
     CHECK([battery persistBatteryRecord:record] && !battery.error &&
           [[NSDictionary dictionaryWithContentsOfFile:normalMirror][@"BatteryLevel"] isEqual:@"0.62"], "battery captures immutable level once for profile and mirror");
     CHECK(local == gOwnedBatteryLocal && darwin == gOwnedBatteryDarwin, "plain battery persistence does not add batch notifications");
+    NSString *readPath = Path(PXProfileIdentityPath(@"a"), @"battery_info.plist");
+    NSData *readBefore = [NSData dataWithContentsOfFile:readPath];
+    @try {
+        for (NSDictionary *input in @[@{ @"BatteryLevel": @"0.01", @"LowPowerMode": @NO },
+                                      @{ @"BatteryLevel": @0.625, @"LowPowerMode": @[] }]) {
+            CHECK([input writeToFile:readPath atomically:YES], "battery scalar reader real plist fixture seeded");
+            writes = gWrites; mirrors = gOwnedBatteryMirrors;
+            NSString *expected = [input[@"BatteryLevel"] isKindOfClass:NSString.class] ? input[@"BatteryLevel"] : @"0.625";
+            CHECK([[battery batteryLevel] isEqual:expected] && ![battery lowPowerModeEnabled] &&
+                  writes == gWrites && mirrors == gOwnedBatteryMirrors && local == gOwnedBatteryLocal && darwin == gOwnedBatteryDarwin,
+                  "battery real plist reader accepts exact one-percent and numeric levels without repairs or publication");
+        }
+    } @finally { CHECK([readBefore writeToFile:readPath atomically:YES], "battery scalar reader restores exact artifact bytes"); }
     for (NSString *invalid in @[@"", @"2.0"]) {
         CHECK(SeedBatteryRecord(@"a", invalid), "invalid legacy battery level seeded for repair");
         commits = 0; mirrors = gOwnedBatteryMirrors;
