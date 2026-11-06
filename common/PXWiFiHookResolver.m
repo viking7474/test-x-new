@@ -78,6 +78,10 @@ NSDictionary *PXResolveHookWiFiInfo(NSString *profileID, PXWiFiHookCacheReader c
         id candidate = nil;
         NSError *cacheError = nil;
         PXProfileArtifactMutation *mutation = nil;
+        // Own method-argument blocks in named slots. A temporary block
+        // copy can otherwise retain captures when a callee throws under plain ARC.
+        NSString *(^identityResolver)(void) = nil;
+        BOOL (^sourceWrite)(PXRuntimeSourceTransaction *, NSError **) = nil;
         NSString *wifiPath = nil, *idsPath = nil;
         __block NSDictionary *selection = nil, *wifi = nil, *ids = nil, *resolved = nil;
         __block BOOL wifiExists = NO, idsExist = NO;
@@ -90,14 +94,14 @@ NSDictionary *PXResolveHookWiFiInfo(NSString *profileID, PXWiFiHookCacheReader c
                 PXWiFiHookError(error, 3023, @"WiFi cache provider failed"); return nil;
             } @finally { candidate = nil; cacheError = nil; }
             // Keep acquisition exceptions outside the preparation catch, as before.
-            mutation = [PXProfileArtifactMutation acquireWithIdentityResolver:^NSString *{
-                return PXProfileIdentityPath(target);
-            } error:error];
+            identityResolver = ^NSString *{ return PXProfileIdentityPath(target); };
+            mutation = [PXProfileArtifactMutation acquireWithIdentityResolver:identityResolver error:error];
+            identityResolver = nil;
             @try {
                 if (!mutation) return nil;
                 wifiPath = [mutation.identityDirectory stringByAppendingPathComponent:@"wifi_info.plist"];
                 idsPath = [mutation.identityDirectory stringByAppendingPathComponent:@"device_ids.plist"];
-                if (![mutation performSourceWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **failure) {
+                sourceWrite = ^BOOL(PXRuntimeSourceTransaction *tx, NSError **failure) {
                     @try {
                         selection = PXWiFiHookSelection(tx, target, failure);
                         if (!selection) return NO;
@@ -107,7 +111,10 @@ NSDictionary *PXResolveHookWiFiInfo(NSString *profileID, PXWiFiHookCacheReader c
                         resolved = PXWiFiHookSourceInfo(wifi, ids);
                         return YES;
                     } @finally { tx = nil; }
-                } error:error]) return nil;
+                };
+                BOOL readSucceeded = [mutation performSourceWrite:sourceWrite error:error];
+                sourceWrite = nil;
+                if (!readSucceeded) return nil;
                 if (resolved) return resolved;
                 // Matching cache remains read-only and never seeds a source write.
                 if (cached) return cached;
@@ -115,7 +122,7 @@ NSDictionary *PXResolveHookWiFiInfo(NSString *profileID, PXWiFiHookCacheReader c
                 prepared = PXWiFiHookFreeze(preparedInput);
                 preparedInput = nil; // The frozen packet is sufficient for commit.
                 if (!prepared) { PXWiFiHookError(error, 3023, @"Invalid prepared WiFi hook record"); return nil; }
-                BOOL committed = [mutation performSourceWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **failure) {
+                sourceWrite = ^BOOL(PXRuntimeSourceTransaction *tx, NSError **failure) {
                     NSDictionary *currentWifi = nil, *currentIDs = nil;
                     NSMutableDictionary *merged = nil;
                     NSString *display = nil;
@@ -135,7 +142,9 @@ NSDictionary *PXResolveHookWiFiInfo(NSString *profileID, PXWiFiHookCacheReader c
                         merged[@"WiFi"] = display;
                         return [tx setDictionary:merged atPath:idsPath error:failure];
                     } @finally { display = nil; merged = nil; currentIDs = nil; currentWifi = nil; tx = nil; }
-                } error:error];
+                };
+                BOOL committed = [mutation performSourceWrite:sourceWrite error:error];
+                sourceWrite = nil;
                 return committed ? prepared : nil;
             } @catch (__unused NSException *exception) {
                 PXWiFiHookError(error, 3023, @"WiFi hook preparation failed"); return nil;
@@ -145,6 +154,7 @@ NSDictionary *PXResolveHookWiFiInfo(NSString *profileID, PXWiFiHookCacheReader c
             // Keep this thread's guard until cleanup finishes; nested calls must
             // never clear the outer resolver's guard.
             @try {
+                sourceWrite = nil; identityResolver = nil;
                 mutation = nil; resolved = nil; ids = nil; wifi = nil; selection = nil;
                 prepared = nil; preparedInput = nil; idsPath = nil; wifiPath = nil; cached = nil;
             } @finally { gWiFiHookResolving = NO; }

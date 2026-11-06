@@ -135,3 +135,77 @@ resolver-owned graphs; native/device evidence is still required.
 Foundation/xcrun/Theos and an iOS device are unavailable on this Windows host.
 New native assertions, package builds and device behavior require macOS CI/device
 verification. No new native/build/device pass, commit, push or deployment is claimed.
+
+
+## Native follow-up — method argument block ownership (2026-11-06)
+
+User CI reached rootful plain-ARC resolver lifetime 61/65. The four failed
+cases were commit-read, selection-match, stage and merge. Each reported only
+mutation=1 and frozen=1 after the pool drained; transaction, input/provider,
+selection, original sources, codec data, prepared input and merged roots were
+already released. This is a runtime assertion failure after compilation, rather
+than an unused-function warning or a missing RootHide dependency.
+
+The commit callback was still an inline Objective-C method argument. Its heap
+copy captures the mutation and frozen prepared packet by value. Clearing their
+parent locals in finally does not release an independently retained block copy;
+plain ARC does not promise cleanup of that argument temporary if the method call
+unwinds. The earlier explicit cleanup covered the named roots and callback
+frames, but left this caller-side temporary boundary unowned. The four failures
+have this boundary in common. The read callback and acquisition resolver also
+used inline method arguments, though their remaining captures were not exposed
+by the original object-root oracle (byref roots were cleared; an immutable target
+can also conceal retained callback lifetime).
+
+PXResolveHookWiFiInfo now owns both source callbacks through a named strong
+sourceWrite slot and the acquisition callback through a named identityResolver
+slot. Each slot is cleared after normal synchronous completion and in the
+existing parent finally on exceptional exit. Capability invalidation still comes
+before the exceptional callback/snapshot cleanup, and TLS is cleared last. No
+__block conversion of mutation/prepared, unsafe capture, new catch, exception
+swallowing, extra source transaction or global ARC build flag is introduced.
+Acquisition exceptions still propagate; source-preparation exceptions still
+reach the existing 3023 catch. Admission, provider, selection/source comparisons,
+paired write and returned data policies retain their order.
+
+The lifetime fixture retains the ten original fault cases and every original
+object-root assertion. A weak callback table additionally observes the actual
+method argument blocks in its borrowed stand-ins. It checks their release after
+pool drain on all exceptional cases and on generated success, existing source
+and read-only cache returns. This detects leaked callback objects even when the
+resolver has cleared their byref capture cells. The production resolver fragment
+remains an exact extraction; no test-only ownership change is injected into it.
+
+This fixture intentionally permits source collaborators to throw out to the
+resolver. The real PXRuntimeSourceStore normally catches body exceptions and
+returns an error before its caller unwinds. Accordingly, the CI failure proves
+an exceptional caller-lifetime gap under this fault injection, not that every
+normal failed source transaction leaks, nor a measured leak on a device. Cleanup
+of foreign callees and unrelated full-expression temporaries remains outside
+this patch. Shared common source applies to rootful and RootHide; injected
+captured-view authority, bootstrap, hook installation, packaging/dependencies,
+Makefile, writer enrollment and the iOS 15.8.8/AIDA64 fix are untouched. Rootful
+is the first native matrix entry; a failure there prevents later matrix entries
+from running and does not establish a rootful-only defect.
+
+Validation on this Windows host:
+
+- 62/63 Python suites and 4/4 Node suites passed. The remaining retirement suite
+  has the established Git Bash mkdir /c/Users/ADMIN permission failure
+  (4 failures, 1 error, 1 skip), unrelated to resolver source.
+- Artifact source contracts, Phase-10 source hardening and RootHide build/static
+  package checks (metadata/negative controls 6/6) passed.
+- Four fragment generators completed, including byte-exact resolver extraction.
+  Helper bodies, error/policy literals and source/provider operation counts are
+  preserved. Eight negative source controls rejected missing slot cleanup,
+  incorrect callback arguments and missing weak-block observations/assertions.
+- Recipe capture verified rootful/RootHide x plain-arc/arc-eh resolver compiles
+  at -O0 and their corresponding binary invocations. Those compiler/binary calls
+  were captured, not executed. The existing real-source tests remain enrolled.
+
+Foundation/xcrun/Theos are unavailable locally. The updated native lifetime
+assertions and package builds must be verified by macOS CI; no native or device
+pass is claimed. No measured performance improvement is claimed. The change
+binds the existing method-argument block copies to explicit cleanup and adds no
+provider, disk, notification, dispatch or polling work. Full Patch 4 remains
+partial at the existing rollout marker.

@@ -7,7 +7,7 @@ static BOOL gHeld;
 static NSString *gFault;
 static id gProvider;
 static NSDictionary *gSourceWiFi, *gSourceIDs;
-static NSHashTable *gSelectionRoots, *gDataRoots, *gFrozenRoots, *gPreparedRoots;
+static NSHashTable *gSelectionRoots, *gDataRoots, *gFrozenRoots, *gPreparedRoots, *gCallbackRoots;
 static __weak id gMutationRoot, gMergedRoot;
 #define CHECK(value, label) do { gChecks++; if (!(value)) { gFailures++; fprintf(stderr, "FAIL: %s\n", label); } } while (0)
 static BOOL Fault(NSString *value) { return [gFault isEqual:value]; }
@@ -45,12 +45,16 @@ static PXResolverTransaction *gTransaction;
 @implementation PXResolverMutation
 + (instancetype)acquireWithIdentityResolver:(NSString *(^ __unsafe_unretained)(void))resolver error:(NSError **)error {
     (void)error; gAcquires++;
+    [gCallbackRoots addObject:resolver];
     if (Fault(@"acquire")) Raise();
     PXResolverMutation *mutation = [self new]; mutation.identityDirectory = resolver();
     mutation.active = YES; gHeld = YES; gMutationRoot = mutation; return mutation;
 }
 - (BOOL)performSourceWrite:(BOOL (^ __unsafe_unretained)(PXResolverTransaction *, NSError **))body error:(NSError **)error {
     CHECK(gHeld, "resolver source callback holds its fixture capability");
+    // Observe the caller's heap block without owning it. Inline argument copies
+    // can leak the block itself even if its __block capture slots are cleared.
+    [gCallbackRoots addObject:body];
     return body(gTransaction, error);
 }
 - (void)invalidate { if (self.active) { self.active = NO; gHeld = NO; gReleases++; } }
@@ -128,6 +132,7 @@ static void Reset(NSString *fault) {
     gSelectionRoots = [NSHashTable weakObjectsHashTable]; gDataRoots = [NSHashTable weakObjectsHashTable];
     gFrozenRoots = [NSHashTable weakObjectsHashTable]; gPreparedRoots = [NSHashTable weakObjectsHashTable];
     gMutationRoot = nil; gMergedRoot = nil;
+    gCallbackRoots = [NSHashTable weakObjectsHashTable];
     gTransaction = [PXResolverTransaction new];
     gSourceWiFi = [@{ @"unused": @"wifi basis" } mutableCopy]; gSourceIDs = [@{ @"keep": @YES } mutableCopy];
     gProvider = Fault(@"provider-pair") ? (id)[PXResolverThrowingPair new] : nil;
@@ -161,28 +166,41 @@ static void TestFailure(NSString *fault) {
             fault.UTF8String, weakProvider != nil, weakWiFi != nil, weakIDs != nil, weakTransaction != nil, weakInput != nil,
             weakToken != nil, gMutationRoot != nil, gMergedRoot != nil, (unsigned long)gSelectionRoots.allObjects.count,
             (unsigned long)gDataRoots.allObjects.count, (unsigned long)gFrozenRoots.allObjects.count, (unsigned long)gPreparedRoots.allObjects.count);
+    if (gCallbackRoots.allObjects.count)
+        fprintf(stderr, "DETAIL: resolver fault=%s callbacks=%lu\n", fault.UTF8String, (unsigned long)gCallbackRoots.allObjects.count);
+    CHECK(!gCallbackRoots.allObjects.count, "resolver exceptional exit releases its method argument blocks after pool drain");
     CHECK(!weakProvider && !weakWiFi && !weakIDs && !weakTransaction && !weakInput && !weakToken && !gMutationRoot && !gMergedRoot &&
           !gSelectionRoots.allObjects.count && !gDataRoots.allObjects.count && !gFrozenRoots.allObjects.count && !gPreparedRoots.allObjects.count,
           "resolver exceptional exit releases its retained inputs snapshots and block capture after pool drain");
 }
 static void TestSuccessAndNestedGuard(void) {
-    Reset(nil); __block BOOL nested = NO;
-    NSDictionary *result = PXResolveHookWiFiInfo(@"a", ^NSDictionary *(NSString * __unsafe_unretained target, NSError **error) {
-        (void)target; (void)error; NSError *failure = nil;
-        nested = !PXResolveHookWiFiInfo(@"a", nil, &failure) && failure.code == 3025 && gWiFiHookResolving;
-        return nil;
-    }, NULL);
-    CHECK(nested && [result[@"ssid"] isEqual:@"generated"] && gStages == 1 && gSets == 1 && !gHeld && !gWiFiHookResolving,
-          "resolver nested rejection preserves outer guard and successful generated return ownership");
+    Reset(nil);
+    @autoreleasepool {
+        __block BOOL nested = NO;
+        NSDictionary *result = PXResolveHookWiFiInfo(@"a", ^NSDictionary *(NSString * __unsafe_unretained target, NSError **error) {
+            (void)target; (void)error; NSError *failure = nil;
+            nested = !PXResolveHookWiFiInfo(@"a", nil, &failure) && failure.code == 3025 && gWiFiHookResolving;
+            return nil;
+        }, NULL);
+        CHECK(nested && [result[@"ssid"] isEqual:@"generated"] && gStages == 1 && gSets == 1 && !gHeld && !gWiFiHookResolving,
+              "resolver nested rejection preserves outer guard and successful generated return ownership");
+    }
+    CHECK(!gCallbackRoots.allObjects.count, "resolver generated success releases method argument blocks after pool drain");
     gSourceWiFi = [@{ @"ssid": @"source", @"bssid": @"source-mac" } mutableCopy];
-    NSDictionary *source = PXResolveHookWiFiInfo(@"a", nil, NULL);
-    CHECK(source == gSourceWiFi && !gHeld && !gWiFiHookResolving, "resolver existing source return survives snapshot cleanup without copying");
+    @autoreleasepool {
+        NSDictionary *source = PXResolveHookWiFiInfo(@"a", nil, NULL);
+        CHECK(source == gSourceWiFi && !gHeld && !gWiFiHookResolving, "resolver existing source return survives snapshot cleanup without copying");
+    }
+    CHECK(!gCallbackRoots.allObjects.count, "resolver source hit releases method argument blocks after pool drain");
     Reset(nil); gProvider = [@{ @"ssid": @"cached", @"bssid": @"cache-mac" } mutableCopy];
-    NSDictionary *cached = PXResolveHookWiFiInfo(@"a", ^NSDictionary *(NSString * __unsafe_unretained target, NSError **error) {
-        (void)target; (void)error; return gProvider;
-    }, NULL);
-    CHECK([cached[@"ssid"] isEqual:@"cached"] && !gStages && !gSets && gReleases == 1 && !gHeld && !gWiFiHookResolving,
-          "resolver read-only cache return survives cleanup without seeding a write");
+    @autoreleasepool {
+        NSDictionary *cached = PXResolveHookWiFiInfo(@"a", ^NSDictionary *(NSString * __unsafe_unretained target, NSError **error) {
+            (void)target; (void)error; return gProvider;
+        }, NULL);
+        CHECK([cached[@"ssid"] isEqual:@"cached"] && !gStages && !gSets && gReleases == 1 && !gHeld && !gWiFiHookResolving,
+              "resolver read-only cache return survives cleanup without seeding a write");
+    }
+    CHECK(!gCallbackRoots.allObjects.count, "resolver cache hit releases method argument blocks after pool drain");
     gProvider = nil; gSourceWiFi = nil; gSourceIDs = nil; gTransaction = nil;
 }
 int main(void) {

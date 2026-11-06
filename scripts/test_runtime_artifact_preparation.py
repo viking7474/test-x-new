@@ -283,6 +283,15 @@ def source_contracts():
     assert 'prepared = nil; preparedInput = nil; idsPath = nil; wifiPath = nil; cached = nil;' in owner
     assert '@finally { display = nil; merged = nil; currentIDs = nil; currentWifi = nil; tx = nil; }' in owner
     assert owner.index('[mutation invalidate]') < owner.index('mutation = nil; resolved = nil;') < owner.index('gWiFiHookResolving = NO;')
+    assert 'NSString *(^identityResolver)(void) = nil;' in owner
+    assert 'BOOL (^sourceWrite)(PXRuntimeSourceTransaction *, NSError **) = nil;' in owner
+    assert '[PXProfileArtifactMutation acquireWithIdentityResolver:identityResolver error:error]' in owner
+    assert owner.count('[mutation performSourceWrite:sourceWrite error:error]') == 2
+    assert 'performSourceWrite:^' not in owner and 'acquireWithIdentityResolver:^' not in owner
+    assert owner.count('sourceWrite = nil;') == 3  # Both normal exits and exceptional parent cleanup.
+    assert owner.count('identityResolver = nil;') == 2
+    assert 'sourceWrite = nil; identityResolver = nil;' in owner
+    assert owner.index('[mutation invalidate]') < owner.index('sourceWrite = nil; identityResolver = nil;') < owner.index('mutation = nil; resolved = nil;')
     freeze = identifier.method(hook_resolver, 'static NSDictionary *PXWiFiHookFreeze(id info)')
     assert freeze.index('PXWiFiHookHasPair(info)') < freeze.index('data = [NSPropertyListSerialization')
     assert freeze.index('PXWiFiHookHasPair(info)') < freeze.index('@try', freeze.index('@try') + 4)
@@ -297,6 +306,10 @@ def source_contracts():
     check_macro_arity(resolver_fixture, 'PXWiFiResolverLifetimeTests.m')
     assert '#include "PXWiFiResolverLifetime.inc"' in resolver_fixture
     assert resolver_fixture.count('TestSuccessAndNestedGuard();') == 1
+    assert '[gCallbackRoots addObject:body];' in resolver_fixture and '[gCallbackRoots addObject:resolver];' in resolver_fixture
+    assert 'resolver exceptional exit releases its method argument blocks after pool drain' in resolver_fixture
+    for case in ('generated success', 'source hit', 'cache hit'):
+        assert f'resolver {case} releases method argument blocks after pool drain' in resolver_fixture
     for forbidden in ('createDirectoryAtPath:', 'writeToFile:', 'sharedManager', 'currentWiFiInfo', 'postNotification', 'dispatch_'):
         assert forbidden not in hook_resolver
     for field in ('SSID', 'BSSID'): assert f'[deviceIds[@"{field}"] isKindOfClass:NSString.class]' in wifi_reader
