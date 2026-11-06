@@ -58,6 +58,7 @@ static BOOL PXPublishBatterySnapshot(PXBatterySnapshot snapshot, uint64_t genera
     return accepted;
 }
 
+// LPM baseline and accepted notification submissions share gBatterySnapshotLock.
 static BOOL gHavePostedLPM = NO;
 static BOOL gLastPostedLPM = NO;
 
@@ -259,29 +260,40 @@ static PXBatterySnapshot PXGetBatterySnapshot(void) {
 #endif
 }
 
-static void PXInvalidateBatterySnapshot(void) {
+static uint64_t PXInvalidateBatterySnapshot(void) {
     os_unfair_lock_lock(&gBatterySnapshotLock);
-    gBatterySnapshotGeneration++;
+    uint64_t generation = ++gBatterySnapshotGeneration;
     PXBatterySnapshot empty = {0}; gBatterySnap = empty;
+    os_unfair_lock_unlock(&gBatterySnapshotLock);
+    return generation;
+}
+
+static void PXObserveBatteryLowPowerMode(BOOL enabled, uint64_t generation, BOOL seedOnly) {
+    os_unfair_lock_lock(&gBatterySnapshotLock);
+    if (generation == gBatterySnapshotGeneration && (!seedOnly || !gHavePostedLPM)) {
+        BOOL changed = !gHavePostedLPM || gLastPostedLPM != enabled;
+        gHavePostedLPM = YES;
+        gLastPostedLPM = enabled;
+        if (!seedOnly && changed) {
+            // This capture-free async submission stays in the decision lock to
+            // preserve accepted transition order. Observer execution is outside
+            // the lock on the main queue; never synchronously wait here.
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [[NSNotificationCenter defaultCenter]
+                    postNotificationName:NSProcessInfoPowerStateDidChangeNotification
+                                  object:[NSProcessInfo processInfo]];
+            });
+        }
+    }
     os_unfair_lock_unlock(&gBatterySnapshotLock);
 }
 
-static void PXMaybePostLPMChangeNotification(void) {
-    PX_RUNTIME_READ_OPERATION;
+static void PXSeedBatteryLPMBaseline(void) {
+    uint64_t generation = 0;
+    (void)PXReadBatterySnapshot(&generation);
     if (!isBatterySpoofingEnabled()) return;
-
     PXBatterySnapshot snap = PXGetBatterySnapshot();
-    if (!snap.hasLPM) return;
-
-    if (!gHavePostedLPM || gLastPostedLPM != snap.lowPowerMode) {
-        gHavePostedLPM = YES;
-        gLastPostedLPM = snap.lowPowerMode;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [[NSNotificationCenter defaultCenter]
-                postNotificationName:NSProcessInfoPowerStateDidChangeNotification
-                              object:[NSProcessInfo processInfo]];
-        });
-    }
+    if (snap.hasLPM) PXObserveBatteryLowPowerMode(snap.lowPowerMode, generation, YES);
 }
 
 static void batterySettingsChanged(CFNotificationCenterRef center,
@@ -289,27 +301,14 @@ static void batterySettingsChanged(CFNotificationCenterRef center,
                                    CFStringRef name,
                                    const void *object,
                                    CFDictionaryRef userInfo) {
+    // Claim before capture/scope/provider work can reenter or yield to another
+    // settings callback. The receipt also revokes in-flight live cache loads.
+    uint64_t generation = PXInvalidateBatterySnapshot();
     PX_RUNTIME_READ_OPERATION;
     PXInvalidateScopeDecisionCache();
-    BOOL previousLPM = gHavePostedLPM ? gLastPostedLPM : NO;
-    BOOL hadPrevious = gHavePostedLPM;
-
-    PXInvalidateBatterySnapshot();
-
-    if (!isBatterySpoofingEnabled()) {
-        return;
-    }
-
+    if (!isBatterySpoofingEnabled()) return;
     PXBatterySnapshot snap = PXGetBatterySnapshot();
-    if (snap.hasLPM && (!hadPrevious || previousLPM != snap.lowPowerMode)) {
-        gHavePostedLPM = YES;
-        gLastPostedLPM = snap.lowPowerMode;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [[NSNotificationCenter defaultCenter]
-                postNotificationName:NSProcessInfoPowerStateDidChangeNotification
-                              object:[NSProcessInfo processInfo]];
-        });
-    }
+    if (snap.hasLPM) PXObserveBatteryLowPowerMode(snap.lowPowerMode, generation, NO);
 }
 
 // Hook for -[UIDevice batteryLevel]
@@ -403,13 +402,7 @@ static BOOL hook_isLowPowerModeEnabled(NSProcessInfo *self, SEL _cmd) {
 
         // Seed LPM observation baseline without posting on first load.
         // Prefer plist-only path (PXGetBatterySnapshot) — safe under installed UIDevice hooks.
-        if (isBatterySpoofingEnabled()) {
-            PXBatterySnapshot snap = PXGetBatterySnapshot();
-            if (snap.hasLPM) {
-                gHavePostedLPM = YES;
-                gLastPostedLPM = snap.lowPowerMode;
-            }
-        }
+        PXSeedBatteryLPMBaseline();
 
         PXFileDebugAIDA64Log("[Battery.ctor] exit");
     }

@@ -74,7 +74,12 @@ WIFI_MANAGER_RESOLUTION = [
 ]
 BATTERY_SNAPSHOT_METHODS = [
     'static NSString *PXProfileBatteryInfoPath(void)', 'static PXBatterySnapshot PXGetBatterySnapshot(void)',
-    'static void PXInvalidateBatterySnapshot(void)',
+    'static uint64_t PXInvalidateBatterySnapshot(void)',
+]
+BATTERY_NOTIFICATION_METHODS = [
+    'static void PXObserveBatteryLowPowerMode(BOOL enabled, uint64_t generation, BOOL seedOnly)',
+    'static void PXSeedBatteryLPMBaseline(void)',
+    'static void batterySettingsChanged(CFNotificationCenterRef center,\n                                   void *observer,\n                                   CFStringRef name,\n                                   const void *object,\n                                   CFDictionaryRef userInfo)',
 ]
 BATTERY_READER_METHODS = [
     '- (NSString *)batteryInfoPathForCurrentProfile',
@@ -485,7 +490,7 @@ def source_contracts():
     assert '@finally { gPXBatterySnapshotDepth--; }' in battery_snapshot
     assert 'shared = nil; lowPowerObj = nil; levelObj = nil;' in battery_snapshot
     assert 'if ([lowPowerObj isKindOfClass:NSString.class] || [lowPowerObj isKindOfClass:NSNumber.class])' in battery_snapshot
-    assert 'gBatterySnapshotGeneration++;' in battery_invalidate and 'gBatterySnap = empty;' in battery_invalidate
+    assert 'uint64_t generation = ++gBatterySnapshotGeneration;' in battery_invalidate and 'return generation;' in battery_invalidate and 'gBatterySnap = empty;' in battery_invalidate
     battery_publish = identifier.method(battery_hooks, 'static BOOL PXPublishBatterySnapshot(PXBatterySnapshot snapshot, uint64_t generation)')
     assert 'generation == gBatterySnapshotGeneration' in battery_publish and 'isfinite(snapshot.loadedAt)' in battery_publish
     assert 'else { PXBatterySnapshot empty = {0}; gBatterySnap = empty; }' in battery_publish
@@ -493,6 +498,27 @@ def source_contracts():
     check_macro_arity(snapshot_fixture, 'PXBatterySnapshotTests.m')
     assert 'invalidated battery loader cannot return or overwrite a newer snapshot from another thread' in snapshot_fixture
     assert 'RootHide battery keeps captured artifact precedence without live cache clock files or manager' in snapshot_fixture
+    observe_lpm, seed_lpm, battery_callback = [identifier.method(battery_hooks, sig) for sig in BATTERY_NOTIFICATION_METHODS]
+    assert observe_lpm.index('os_unfair_lock_lock(&gBatterySnapshotLock)') < observe_lpm.index('generation == gBatterySnapshotGeneration') < observe_lpm.index('gHavePostedLPM = YES;')
+    assert '(!seedOnly || !gHavePostedLPM)' in observe_lpm and 'if (!seedOnly && changed)' in observe_lpm
+    assert observe_lpm.index('gLastPostedLPM = enabled;') < observe_lpm.index('dispatch_async(dispatch_get_main_queue(), ^{') < observe_lpm.index('os_unfair_lock_unlock(&gBatterySnapshotLock)')
+    assert 'postNotificationName:NSProcessInfoPowerStateDidChangeNotification' in observe_lpm and 'object:[NSProcessInfo processInfo]' in observe_lpm
+    assert 'dispatch_sync' not in observe_lpm and 'PXGetBatterySnapshot' not in observe_lpm
+    assert seed_lpm.index('PXReadBatterySnapshot(&generation)') < seed_lpm.index('isBatterySpoofingEnabled()') and 'PX_RUNTIME_READ_OPERATION;' not in seed_lpm
+    assert 'if (snap.hasLPM) PXObserveBatteryLowPowerMode(snap.lowPowerMode, generation, YES);' in seed_lpm
+    assert battery_callback.index('uint64_t generation = PXInvalidateBatterySnapshot();') < battery_callback.index('PX_RUNTIME_READ_OPERATION;') < battery_callback.index('PXInvalidateScopeDecisionCache();') < battery_callback.index('isBatterySpoofingEnabled()')
+    assert 'if (snap.hasLPM) PXObserveBatteryLowPowerMode(snap.lowPowerMode, generation, NO);' in battery_callback
+    assert 'PXMaybePostLPMChangeNotification' not in battery_hooks and battery_hooks.count('PXSeedBatteryLPMBaseline();') == 1
+    outside_observation = battery_hooks.replace(observe_lpm, '')
+    for state in ('gHavePostedLPM', 'gLastPostedLPM'):
+        assert outside_observation.count(state) == 1, 'all LPM state access must use the decision lock'
+    for label in ('accepted battery transitions retain three asynchronous events without coalescing',
+                  'older battery callback cannot restore baseline after a newer callback finishes',
+                  'slow constructor seed cannot erase a newer callback or its first event',
+                  'concurrent equal battery observations atomically deduplicate baseline and enqueue',
+                  'battery observer reentry executes after decision lock release and retains follow-up event'):
+        assert label in snapshot_fixture
+    assert '#include "PXBatteryNotification.inc"' in snapshot_fixture
     low_power = identifier.method(battery_source, '- (void)setLowPowerModeEnabled:(BOOL)enabled')
     assert low_power.index('if (![self persistBatteryRecord:record]) return;') < low_power.index('postNotificationName:')
     assert 'if (![self persistBatteryRecord:record]) return batteryInfo;' in battery
@@ -776,6 +802,8 @@ def generate_native_fragments(folder):
     battery_globals = battery_hooks[battery_hooks.index('typedef struct {'):battery_hooks.index('static BOOL gHavePostedLPM')]
     battery_depth = next(line for line in battery_hooks.splitlines() if line.startswith('static __thread int gPXBatterySnapshotDepth ='))
     (folder / 'PXBatterySnapshot.inc').write_text(battery_globals + '\n' + battery_depth + '\n\n' + '\n\n'.join(identifier.method(battery_hooks, sig) for sig in BATTERY_SNAPSHOT_METHODS), encoding='utf-8')
+    observation_globals = [next(line for line in battery_hooks.splitlines() if line.startswith('static BOOL ' + name + ' =')) for name in ('gHavePostedLPM', 'gLastPostedLPM')]
+    (folder / 'PXBatteryNotification.inc').write_text('\n'.join(observation_globals) + '\n\n' + '\n\n'.join(identifier.method(battery_hooks, sig) for sig in BATTERY_NOTIFICATION_METHODS), encoding='utf-8')
     battery_source = read('common/BatteryManager.m')
     (folder / 'PXBatteryReaderDeclarations.inc').write_text('\n'.join(identifier.method(battery_source, sig).split(' {', 1)[0] + ';' for sig in BATTERY_READER_METHODS), encoding='utf-8')
     (folder / 'PXBatteryReaderMethods.inc').write_text('\n\n'.join(identifier.method(battery_source, sig) for sig in BATTERY_READER_METHODS), encoding='utf-8')
