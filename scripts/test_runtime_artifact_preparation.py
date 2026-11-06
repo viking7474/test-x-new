@@ -72,6 +72,10 @@ WIFI_MANAGER_RESOLUTION = [
     '- (NSString *)profileIDFromManager:(id)manager', '- (NSString *)getCurrentProfileID',
     '- (void)loadWiFiInfoFromCurrentProfile', '- (void)handleWiFiProfileNotification:(NSNotification *)note',
 ]
+BATTERY_SNAPSHOT_METHODS = [
+    'static NSString *PXProfileBatteryInfoPath(void)', 'static PXBatterySnapshot PXGetBatterySnapshot(void)',
+    'static void PXInvalidateBatterySnapshot(void)',
+]
 BATTERY_READER_METHODS = [
     '- (NSString *)batteryInfoPathForCurrentProfile',
     '- (void)applyLoadedBatteryInfo:(NSDictionary *)info profileSpecific:(BOOL)profileSpecific',
@@ -469,6 +473,26 @@ def source_contracts():
     check_macro_arity(battery_reader_fixture, 'PXBatteryReaderTests.m')
     assert 'battery float endpoints include exact one-percent without regeneration' in battery_reader_fixture
     assert 'battery real plist reader accepts exact one-percent and numeric levels without repairs or publication' in read('tests/PXRuntimeArtifactPreparationTests.m')
+    battery_hooks = read('TLinkIOSTweak/BatteryHooks.x')
+    battery_path, battery_snapshot, battery_invalidate = [identifier.method(battery_hooks, sig) for sig in BATTERY_SNAPSHOT_METHODS]
+    assert battery_path.count('PXActiveProfileID()') == 1
+    assert 'PXActiveProfileIdentityPath()' not in battery_path and 'PXActiveProfileRootPath()' not in battery_path
+    assert 'identityPath.stringByDeletingLastPathComponent' in battery_path
+    assert 'CLOCK_MONOTONIC' in identifier.method(battery_hooks, 'static NSTimeInterval PXBatterySnapshotTime(void)')
+    assert 'PXReadBatterySnapshot(&generation)' in battery_snapshot and 'now >= current.loadedAt' in battery_snapshot
+    assert 'isfinite(now)' in battery_snapshot and '(now - current.loadedAt) < kBatterySnapTTL' in battery_snapshot
+    assert 'if (!PXPublishBatterySnapshot(snap, generation))' in battery_snapshot
+    assert '@finally { gPXBatterySnapshotDepth--; }' in battery_snapshot
+    assert 'shared = nil; lowPowerObj = nil; levelObj = nil;' in battery_snapshot
+    assert 'if ([lowPowerObj isKindOfClass:NSString.class] || [lowPowerObj isKindOfClass:NSNumber.class])' in battery_snapshot
+    assert 'gBatterySnapshotGeneration++;' in battery_invalidate and 'gBatterySnap = empty;' in battery_invalidate
+    battery_publish = identifier.method(battery_hooks, 'static BOOL PXPublishBatterySnapshot(PXBatterySnapshot snapshot, uint64_t generation)')
+    assert 'generation == gBatterySnapshotGeneration' in battery_publish and 'isfinite(snapshot.loadedAt)' in battery_publish
+    assert 'else { PXBatterySnapshot empty = {0}; gBatterySnap = empty; }' in battery_publish
+    snapshot_fixture = read('tests/PXBatterySnapshotTests.m')
+    check_macro_arity(snapshot_fixture, 'PXBatterySnapshotTests.m')
+    assert 'invalidated battery loader cannot return or overwrite a newer snapshot from another thread' in snapshot_fixture
+    assert 'RootHide battery keeps captured artifact precedence without live cache clock files or manager' in snapshot_fixture
     low_power = identifier.method(battery_source, '- (void)setLowPowerModeEnabled:(BOOL)enabled')
     assert low_power.index('if (![self persistBatteryRecord:record]) return;') < low_power.index('postNotificationName:')
     assert 'if (![self persistBatteryRecord:record]) return batteryInfo;' in battery
@@ -748,6 +772,10 @@ def generate_native_fragments(folder):
     (folder / 'PXWiFiResolverLifetime.inc').write_text(resolver_source[resolver_source.index('static __thread BOOL gWiFiHookResolving'):], encoding='utf-8')
     for name, (source, signatures) in WRAPPERS.items():
         (folder / name).write_text('\n\n'.join(identifier.method(read(source), signature) for signature in signatures), encoding='utf-8')
+    battery_hooks = read('TLinkIOSTweak/BatteryHooks.x')
+    battery_globals = battery_hooks[battery_hooks.index('typedef struct {'):battery_hooks.index('static BOOL gHavePostedLPM')]
+    battery_depth = next(line for line in battery_hooks.splitlines() if line.startswith('static __thread int gPXBatterySnapshotDepth ='))
+    (folder / 'PXBatterySnapshot.inc').write_text(battery_globals + '\n' + battery_depth + '\n\n' + '\n\n'.join(identifier.method(battery_hooks, sig) for sig in BATTERY_SNAPSHOT_METHODS), encoding='utf-8')
     battery_source = read('common/BatteryManager.m')
     (folder / 'PXBatteryReaderDeclarations.inc').write_text('\n'.join(identifier.method(battery_source, sig).split(' {', 1)[0] + ';' for sig in BATTERY_READER_METHODS), encoding='utf-8')
     (folder / 'PXBatteryReaderMethods.inc').write_text('\n\n'.join(identifier.method(battery_source, sig) for sig in BATTERY_READER_METHODS), encoding='utf-8')
@@ -857,6 +885,12 @@ def native_tests():
                             '-framework', 'Foundation', '-o', str(swizzle_binary)], check=True, cwd=ROOT, timeout=60)
             subprocess.run([str(swizzle_binary)], check=True, cwd=ROOT, timeout=60)
             for arc_mode, arc_flag in CF_EXCEPTION_MODES:
+                battery_snapshot_binary = folder / ('battery-snapshot-' + scheme + '-' + arc_mode)
+                print('Battery snapshot native matrix:', scheme, arc_mode, flush=True)
+                subprocess.run(['xcrun', 'clang', '-O0', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions', arc_flag,
+                                '-Wall', '-Wextra', '-Werror=implicit-function-declaration', '-I', str(folder), *defines,
+                                str(ROOT / 'tests/PXBatterySnapshotTests.m'), '-framework', 'Foundation', '-o', str(battery_snapshot_binary)], check=True, cwd=ROOT, timeout=60)
+                subprocess.run([str(battery_snapshot_binary)], check=True, cwd=ROOT, timeout=60)
                 battery_reader_binary = folder / ('battery-reader-' + scheme + '-' + arc_mode)
                 print('Battery reader native matrix:', scheme, arc_mode, flush=True)
                 subprocess.run(['xcrun', 'clang', '-O0', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions', arc_flag,

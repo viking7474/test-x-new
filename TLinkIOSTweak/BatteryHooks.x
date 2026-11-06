@@ -8,6 +8,9 @@
 #import "PXRuntimeSnapshot.h"
 #import "PXFileDebug.h"
 #import <os/lock.h>
+#include <math.h>
+#include <stdint.h>
+#include <time.h>
 
 
 
@@ -22,19 +25,37 @@ typedef struct {
 
 static os_unfair_lock gBatterySnapshotLock = OS_UNFAIR_LOCK_INIT;
 static PXBatterySnapshot gBatterySnap = {0};
+static uint64_t gBatterySnapshotGeneration = 0;
 static const NSTimeInterval kBatterySnapTTL = 2.0;
 
-static PXBatterySnapshot PXReadBatterySnapshot(void) {
+static NSTimeInterval PXBatterySnapshotTime(void) {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    return 0; // Captured reads do not use the live cache clock.
+#else
+    struct timespec instant = {0};
+    if (clock_gettime(CLOCK_MONOTONIC, &instant) != 0) return NAN;
+    return (NSTimeInterval)instant.tv_sec + (NSTimeInterval)instant.tv_nsec / 1e9;
+#endif
+}
+
+static PXBatterySnapshot PXReadBatterySnapshot(uint64_t *generation) {
     os_unfair_lock_lock(&gBatterySnapshotLock);
+    if (generation) *generation = gBatterySnapshotGeneration;
     PXBatterySnapshot snapshot = gBatterySnap;
     os_unfair_lock_unlock(&gBatterySnapshotLock);
     return snapshot;
 }
 
-static void PXPublishBatterySnapshot(PXBatterySnapshot snapshot) {
+static BOOL PXPublishBatterySnapshot(PXBatterySnapshot snapshot, uint64_t generation) {
     os_unfair_lock_lock(&gBatterySnapshotLock);
-    gBatterySnap = snapshot;
+    BOOL accepted = generation == gBatterySnapshotGeneration;
+    // Clock failure may serve a current one-shot read, but cannot retain it.
+    if (accepted) {
+        if (isfinite(snapshot.loadedAt) && snapshot.loadedAt > 0) gBatterySnap = snapshot;
+        else { PXBatterySnapshot empty = {0}; gBatterySnap = empty; }
+    }
     os_unfair_lock_unlock(&gBatterySnapshotLock);
+    return accepted;
 }
 
 static BOOL gHavePostedLPM = NO;
@@ -135,15 +156,21 @@ static BOOL isBatterySpoofingEnabled(void) {
 }
 
 static NSString *PXProfileBatteryInfoPath(void) {
-    NSString *identityPath = PXActiveProfileIdentityPath();
-    NSString *profileRoot = PXActiveProfileRootPath();
-    if (!identityPath.length || !profileRoot.length) return nil;
-
-    NSString *canonical = [identityPath stringByAppendingPathComponent:@"battery_info.plist"];
-    if ([[NSFileManager defaultManager] fileExistsAtPath:canonical]) return canonical;
-    NSString *legacy = [profileRoot stringByAppendingPathComponent:@"battery_info.plist"];
-    if ([[NSFileManager defaultManager] fileExistsAtPath:legacy]) return legacy;
-    return canonical;
+    NSString *profileID = nil, *identityPath = nil, *canonical = nil, *legacy = nil;
+    NSFileManager *manager = nil;
+    @try {
+        // Resolve selection once; both candidate paths belong to that ID.
+        profileID = [PXActiveProfileID() copy];
+        if (![profileID isKindOfClass:NSString.class] || !profileID.length) return nil;
+        identityPath = PXProfileIdentityPath(profileID);
+        if (!identityPath.length) return nil;
+        manager = NSFileManager.defaultManager;
+        canonical = [identityPath stringByAppendingPathComponent:@"battery_info.plist"];
+        if ([manager fileExistsAtPath:canonical]) return canonical;
+        legacy = [identityPath.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"battery_info.plist"];
+        if ([manager fileExistsAtPath:legacy]) return legacy;
+        return canonical;
+    } @finally { manager = nil; legacy = nil; canonical = nil; identityPath = nil; profileID = nil; }
 }
 
 // Load level + LPM from the same profile snapshot (TTL cache).
@@ -166,81 +193,77 @@ static PXBatterySnapshot PXGetBatterySnapshot(void) {
     if (runtimeLPM != nil) { snap.lowPowerMode = PXRuntimeReadBool(runtimeLPM); snap.hasLPM = YES; }
     return snap;
 #else
-    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
-    PXBatterySnapshot current = PXReadBatterySnapshot();
-    if (current.loadedAt > 0 && (now - current.loadedAt) < kBatterySnapTTL) {
+    NSTimeInterval now = PXBatterySnapshotTime();
+    uint64_t generation = 0;
+    PXBatterySnapshot current = PXReadBatterySnapshot(&generation);
+    if (isfinite(now) && isfinite(current.loadedAt) && current.loadedAt > 0 && now >= current.loadedAt &&
+        (now - current.loadedAt) < kBatterySnapTTL) {
         return current;
     }
-
-    // Re-entrant call (e.g. UIDevice.batteryLevel during BatteryManager init): 
-    // return last snapshot or empty — never touch sharedManager again.
-    if (gPXBatterySnapshotDepth > 0) {
-        return current;
-    }
-
+    // Reentry must never touch the singleton again; hook-level guards still
+    // forward to originals while this thread prepares a snapshot.
+    if (gPXBatterySnapshotDepth > 0) return current;
     gPXBatterySnapshotDepth++;
-
     PXBatterySnapshot snap = {0};
-    snap.loadedAt = now;
-
-
+    snap.loadedAt = isfinite(now) && now > 0 ? now : 0;
+    NSString *path = nil, *level = nil;
+    NSDictionary *batteryInfo = nil;
+    id levelObj = nil, lowPowerObj = nil;
+    BatteryManager *shared = nil;
     @try {
-        // 1) Profile battery_info.plist (no ObjC singleton / no UIDevice)
-        NSString *path = PXProfileBatteryInfoPath();
-        NSDictionary *batteryInfo = path ? [NSDictionary dictionaryWithContentsOfFile:path] : nil;
-        if ([batteryInfo isKindOfClass:[NSDictionary class]]) {
-            id levelObj = batteryInfo[@"BatteryLevel"];
-            if ([levelObj isKindOfClass:[NSString class]] || [levelObj isKindOfClass:[NSNumber class]]) {
-                float v = [levelObj floatValue];
-                if (v >= 0.01f && v <= 1.0f) {
-                    snap.level = v;
-                    snap.hasLevel = YES;
+        @try {
+            // Disk first, retaining the existing optional-manager fallback.
+            path = PXProfileBatteryInfoPath();
+            batteryInfo = path ? [NSDictionary dictionaryWithContentsOfFile:path] : nil;
+            if ([batteryInfo isKindOfClass:NSDictionary.class]) {
+                levelObj = batteryInfo[@"BatteryLevel"];
+                if ([levelObj isKindOfClass:NSString.class] || [levelObj isKindOfClass:NSNumber.class]) {
+                    float v = [levelObj floatValue];
+                    if (v >= 0.01f && v <= 1.0f) { snap.level = v; snap.hasLevel = YES; }
+                }
+                lowPowerObj = batteryInfo[@"LowPowerMode"];
+                if ([lowPowerObj isKindOfClass:NSString.class] || [lowPowerObj isKindOfClass:NSNumber.class]) {
+                    snap.lowPowerMode = [lowPowerObj boolValue]; snap.hasLPM = YES;
                 }
             }
-            if (batteryInfo[@"LowPowerMode"] != nil) {
-                snap.lowPowerMode = [batteryInfo[@"LowPowerMode"] boolValue];
-                snap.hasLPM = YES;
-            }
-        }
-
-        // 2) Optional BatteryManager fill — only if not already complete.
-        // Skip if sharedManager is mid-init (dispatch_once not finished).
-        if (!snap.hasLevel || !snap.hasLPM) {
-            BatteryManager *shared = [BatteryManager sharedManager];
-            if (shared) {
-                if (!snap.hasLevel) {
-                    NSString *level = [shared batteryLevel];
-                    if ([level isKindOfClass:[NSString class]]) {
-                        float v = [level floatValue];
-                        if (v >= 0.01f && v <= 1.0f) {
-                            snap.level = v;
-                            snap.hasLevel = YES;
+            if (!snap.hasLevel || !snap.hasLPM) {
+                shared = [BatteryManager sharedManager];
+                if (shared) {
+                    if (!snap.hasLevel) {
+                        level = [shared batteryLevel];
+                        if ([level isKindOfClass:NSString.class]) {
+                            float v = [level floatValue];
+                            if (v >= 0.01f && v <= 1.0f) { snap.level = v; snap.hasLevel = YES; }
                         }
                     }
-                }
-                if (!snap.hasLPM) {
-                    snap.lowPowerMode = [shared lowPowerModeEnabled] ? YES : NO;
-                    snap.hasLPM = YES;
+                    if (!snap.hasLPM) {
+                        snap.lowPowerMode = [shared lowPowerModeEnabled] ? YES : NO; snap.hasLPM = YES;
+                    }
                 }
             }
+            if (!snap.hasLPM) { snap.lowPowerMode = NO; snap.hasLPM = YES; }
+        } @catch (__unused NSException *exception) {
         }
-
-        if (!snap.hasLPM) {
-            snap.lowPowerMode = NO;
-            snap.hasLPM = YES;
+        if (!PXPublishBatterySnapshot(snap, generation)) {
+            // A notification revoked this read. Do not repopulate or return it,
+            // and do not substitute a winner that may belong to another profile.
+            PXBatterySnapshot unavailable = {0}; return unavailable;
         }
-    } @catch (__unused NSException *e) {
+        return snap;
+    } @finally {
+        @try {
+            shared = nil; lowPowerObj = nil; levelObj = nil;
+            batteryInfo = nil; level = nil; path = nil;
+        } @finally { gPXBatterySnapshotDepth--; }
     }
-
-    PXPublishBatterySnapshot(snap);
-    gPXBatterySnapshotDepth--;
-    return snap;
 #endif
 }
 
 static void PXInvalidateBatterySnapshot(void) {
-    PXBatterySnapshot empty = {0};
-    PXPublishBatterySnapshot(empty);
+    os_unfair_lock_lock(&gBatterySnapshotLock);
+    gBatterySnapshotGeneration++;
+    PXBatterySnapshot empty = {0}; gBatterySnap = empty;
+    os_unfair_lock_unlock(&gBatterySnapshotLock);
 }
 
 static void PXMaybePostLPMChangeNotification(void) {
