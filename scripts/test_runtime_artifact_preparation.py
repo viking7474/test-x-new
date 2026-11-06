@@ -156,6 +156,20 @@ def source_contracts():
     for signature in (WIFI_MANAGER_GENERATE, '- (void)setCurrentWiFiInfo:(NSDictionary *)wifiInfo'):
         candidate = identifier.method(wifi_source, signature)
         assert 'readable:NO' in candidate and 'saveWiFiInfoToCurrentProfileAtRevision:revision' in candidate
+    setter = identifier.method(wifi_source, '- (void)setCurrentWiFiInfo:(NSDictionary *)wifiInfo')
+    assert setter.index('revision = _wifiCacheRevision') < setter.index('[wifiInfo isKindOfClass:NSDictionary.class]')
+    assert setter.index('candidate = [wifiInfo mutableCopy]') < setter.index('rawSSID = candidate[@"ssid"]')
+    assert '[wifiInfo[@' not in setter and 'wifiInfo[@' not in setter
+    assert 'isKindOfClass:NSMutableDictionary.class' in setter
+    assert '[rawSSID copy]' in setter and '[rawBSSID copy]' in setter
+    assert setter.index('[rawSSID copy]') < setter.index('PXValidateIdentityValue(ssid, PXIdentityValueKindSSID, NO)')
+    assert setter.index('[rawBSSID copy]') < setter.index('PXValidateIdentityValue(bssid, PXIdentityValueKindMACAddress, NO)')
+    assert setter.index('candidate[@"ssid"] = ssid; candidate[@"bssid"] = bssid;') < setter.index('beginWiFiCacheUpdateIfRevision:revision')
+    assert setter.index('beginWiFiCacheUpdateIfRevision:revision') < setter.index('publishWiFiCache:candidate') < setter.index('saveWiFiInfoToCurrentProfileAtRevision:revision')
+    assert '[self setWiFiCacheError:failure revision:revision]' in setter and 'self.error =' not in setter
+    assert '[self isValidSSID:' not in setter and '[self isValidBSSID:' not in setter
+    assert 'beginWiFiCacheUpdate]' not in setter
+    assert '@finally' in setter and 'rawSSID = nil; rawBSSID = nil;' in setter
     value_reader = identifier.method(wifi_source, WIFI_MANAGER_READERS[0])
     assert value_reader.index('isKindOfClass:NSDictionary.class') < value_reader.index('value = info[key]')
     assert 'isKindOfClass:valueClass' in value_reader and '@finally' in value_reader
@@ -579,6 +593,12 @@ def source_contracts():
                  'WiFi persistence rejects missing replaced and symlink identity without recreating it',
                  'WiFi custom setter retains MAC validation and rejects all-zero address',
                  'WiFi custom setter persists candidate through owned paired commit',
+                 'WiFi invalid custom inputs retain error precedence and readable cache without providers ownership or writes',
+                 'WiFi nil custom input remains a complete no-op',
+                 'WiFi setter validates its copied candidate rather than earlier external subscript values',
+                 'WiFi custom copy exceptions propagate without invalidating the readable cache',
+                 'WiFi custom candidate freezes required strings before provider callbacks while preserving spelling and metadata',
+                 'WiFi superseded custom preparation cannot reclaim cache or publish a stale validation error',
                  'WiFi persistence preserves optional manager-first profile authority',
                  'WiFi fallback retains numeric profile ID normalization',
                  'WiFi default fallback keeps ephemeral cache without repeated generation or directory writes',

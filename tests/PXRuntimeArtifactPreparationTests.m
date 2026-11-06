@@ -317,6 +317,28 @@ static int PXPreparationFixtureSysctl(int *name, u_int namelen, void *oldp, size
     return snapshot;
 }
 @end
+// Controlled input stand-in implements only the selectors this boundary calls;
+// its copied roots and field values are ordinary Foundation objects.
+@interface PXWiFiSetterInputFixture : NSObject <NSMutableCopying>
+@property (nonatomic, copy) NSDictionary *record;
+@property (nonatomic, copy) NSDictionary *copiedRecord;
+@property (nonatomic, copy) void (^duringTypeCheck)(void);
+@property (nonatomic) BOOL throwsOnCopy;
+@end
+@implementation PXWiFiSetterInputFixture
+- (BOOL)isKindOfClass:(Class)type {
+    if (type != NSDictionary.class) return [super isKindOfClass:type];
+    void (^callback)(void) = self.duringTypeCheck; self.duringTypeCheck = nil;
+    @try { if (callback) callback(); return YES; }
+    @finally { callback = nil; }
+}
+- (id)objectForKeyedSubscript:(id)key { return self.record[key]; }
+- (id)mutableCopyWithZone:(NSZone *)zone {
+    (void)zone;
+    if (self.throwsOnCopy) [NSException raise:@"fixture.setter-copy" format:@"input copy failed"];
+    return [(self.copiedRecord ?: self.record) mutableCopy];
+}
+@end
 @interface PXOwnedWiFiFixture : NSObject
 @property (atomic, strong) NSMutableDictionary *wifiInfo;
 @property (atomic, strong) NSString *currentProfileId;
@@ -1164,6 +1186,77 @@ static BOOL SetWiFiFixture(NSString *profileID, NSDictionary *record) {
 static void WiFiSpy(PXOwnedWiFiFixture *manager, NSDictionary *record) {
     PXWiFiSnapshotFixture *spy = [PXWiFiSnapshotFixture new]; spy.record = record; manager.wifiInfo = (id)spy;
 }
+static void TestWiFiCustomInputs(PXOwnedWiFiFixture *wifi, NSDictionary *restore) {
+    NSDictionary *before = AllArtifactFiles(), *cache = [wifi cachedWiFiInfoForProfileID:@"a"];
+    NSUInteger selections = gWiFiSelections, copies = gWiFiCopies, writes = gWrites;
+    uint64_t revision = wifi.wifiCacheRevision;
+    NSArray *inputs = @[@42, @[], NSNull.null, @{}, @{ @"ssid": @"missing" },
+        @{ @"ssid": NSNull.null, @"bssid": @"02:11:22:33:44:55" },
+        @{ @"ssid": @[], @"bssid": NSNull.null },
+        @{ @"ssid": @"", @"bssid": @"02:11:22:33:44:55" },
+        @{ @"ssid": @"valid", @"bssid": @7 }];
+    NSArray *codes = @[@3001, @3001, @3001, @3001, @3001, @3003, @3003, @3003, @3005];
+    for (NSUInteger i = 0; i < inputs.count; i++) {
+        [wifi setCurrentWiFiInfo:inputs[i]];
+        NSString *domain = [codes[i] integerValue] == 3001 ? @"com.hydra.tlinkios" : PXIdentityValidationErrorDomain;
+        CHECK(wifi.error.code == [codes[i] integerValue] && [wifi.error.domain isEqual:domain] &&
+              wifi.wifiCacheRevision == revision && [[wifi cachedWiFiInfoForProfileID:@"a"] isEqual:cache] &&
+              [before isEqual:AllArtifactFiles()] && copies == gWiFiCopies && selections == gWiFiSelections && writes == gWrites,
+              "WiFi invalid custom inputs retain error precedence and readable cache without providers ownership or writes");
+    }
+    NSError *oldError = wifi.error;
+    [wifi setCurrentWiFiInfo:nil];
+    CHECK(wifi.error == oldError && wifi.wifiCacheRevision == revision && [before isEqual:AllArtifactFiles()],
+          "WiFi nil custom input remains a complete no-op");
+    PXWiFiSetterInputFixture *input = [PXWiFiSetterInputFixture new]; input.record = restore;
+    input.copiedRecord = @{ @"ssid": NSNull.null, @"bssid": @"02:11:22:33:44:55" };
+    [wifi setCurrentWiFiInfo:(id)input];
+    CHECK(wifi.error.code == 3003 && wifi.wifiCacheRevision == revision &&
+          [[wifi cachedWiFiInfoForProfileID:@"a"] isEqual:cache] && [before isEqual:AllArtifactFiles()],
+          "WiFi setter validates its copied candidate rather than earlier external subscript values");
+    input.copiedRecord = nil; input.throwsOnCopy = YES; oldError = wifi.error;
+    BOOL threw = NO;
+    @try { [wifi setCurrentWiFiInfo:(id)input]; }
+    @catch (NSException *exception) { (void)exception; threw = YES; }
+    CHECK(threw && wifi.error == oldError && wifi.wifiCacheRevision == revision &&
+          [[wifi cachedWiFiInfoForProfileID:@"a"] isEqual:cache] && [before isEqual:AllArtifactFiles()],
+          "WiFi custom copy exceptions propagate without invalidating the readable cache");
+    CheckArtifactLeaseFree();
+
+    NSMutableString *ssid = [@"  Mixed SSID  " mutableCopy];
+    NSMutableString *bssid = [@"aa-bb-cc-dd-ee-01" mutableCopy];
+    NSMutableDictionary *mutableInput = [@{ @"ssid": ssid, @"bssid": bssid, @"customMetadata": @"kept" } mutableCopy];
+    NSDictionary *expected = @{ @"ssid": @"  Mixed SSID  ", @"bssid": @"aa-bb-cc-dd-ee-01", @"customMetadata": @"kept" };
+    __block BOOL mutated = NO;
+    gDuringWiFiWarmup = ^{
+        mutated = YES; [ssid setString:@"caller changed"]; [bssid setString:@"00:00:00:00:00:00"];
+        mutableInput[@"ssid"] = @"replaced root"; mutableInput[@"customMetadata"] = @"changed root";
+    };
+    @try { [wifi setCurrentWiFiInfo:mutableInput]; }
+    @finally { gDuringWiFiWarmup = nil; }
+    NSDictionary *saved = [NSDictionary dictionaryWithContentsOfFile:Path(PXProfileIdentityPath(@"a"), @"wifi_info.plist")];
+    NSDictionary *ids = [NSDictionary dictionaryWithContentsOfFile:Path(PXProfileIdentityPath(@"a"), @"device_ids.plist")];
+    CHECK(mutated && !wifi.error && [wifi.wifiInfo isEqual:expected] && [saved isEqual:expected] &&
+          [ids[@"SSID"] isEqual:expected[@"ssid"]] && [ids[@"BSSID"] isEqual:expected[@"bssid"]],
+          "WiFi custom candidate freezes required strings before provider callbacks while preserving spelling and metadata");
+    CheckArtifactLeaseFree();
+    [wifi setCurrentWiFiInfo:restore];
+    CHECK(!wifi.error && [wifi.wifiInfo isEqual:restore], "WiFi custom mutation fixture restores the selected record");
+    before = AllArtifactFiles(); selections = gWiFiSelections; copies = gWiFiCopies;
+    NSDictionary *newer = @{ @"ssid": @"newer B", @"bssid": @"02:22:33:44:55:66" };
+    for (NSUInteger invalid = 0; invalid < 2; invalid++) {
+        input = [PXWiFiSetterInputFixture new];
+        input.record = invalid ? @{ @"ssid": NSNull.null, @"bssid": @"02:11:22:33:44:55" } : restore;
+        input.duringTypeCheck = ^{ [wifi adoptCommittedWiFiInfo:newer profileID:@"b"]; };
+        [wifi setCurrentWiFiInfo:(id)input];
+        CHECK(!wifi.error && [[wifi cachedWiFiInfoForProfileID:@"b"] isEqual:newer] &&
+              [before isEqual:AllArtifactFiles()] && copies == gWiFiCopies && selections == gWiFiSelections,
+              "WiFi superseded custom preparation cannot reclaim cache or publish a stale validation error");
+    }
+    [wifi setCurrentWiFiInfo:restore];
+    CHECK(!wifi.error && [wifi.currentProfileId isEqual:@"a"] && [wifi.wifiInfo isEqual:restore],
+          "WiFi custom supersession fixture restores source and cache authority");
+}
 static BOOL PumpWiFiReload(NSUInteger count) {
     NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:3];
     while (gWiFiReloads < count && deadline.timeIntervalSinceNow > 0)
@@ -1262,6 +1355,7 @@ static void TestWiFiLifecycle(void) {
     [wifi setCurrentWiFiInfo:next];
     CHECK(!wifi.error && [wifi.wifiInfo isEqual:next] && [[NSDictionary dictionaryWithContentsOfFile:Path(PXProfileIdentityPath(@"a"), @"wifi_info.plist")] isEqual:next],
           "WiFi custom setter persists candidate through owned paired commit");
+    TestWiFiCustomInputs(wifi, next);
     // A completed source write must not relabel a newer cache adopted while
     // its source transaction was in flight.
     NSDictionary *saveCandidate = @{ @"ssid": @"captured source A", @"bssid": @"02:11:22:33:44:55" };

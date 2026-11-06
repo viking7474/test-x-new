@@ -367,35 +367,65 @@
 }
 
 - (void)setCurrentWiFiInfo:(NSDictionary *)wifiInfo {
-    NSString *profileID = nil;
+    if (!wifiInfo) return;
+    uint64_t revision = 0;
+    @synchronized (self) { revision = _wifiCacheRevision; }
+    NSString *profileID = nil, *ssid = nil, *bssid = nil;
+    id rawSSID = nil, rawBSSID = nil;
     NSMutableDictionary *candidate = nil;
+    NSError *failure = nil;
     @try {
-        if (!wifiInfo) return;
-        if (![wifiInfo isKindOfClass:NSDictionary.class]) {
-            self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:3001
-                userInfo:@{NSLocalizedDescriptionKey: @"WiFi info must be a dictionary"}];
+        do {
+            if (![wifiInfo isKindOfClass:NSDictionary.class]) {
+                failure = [NSError errorWithDomain:@"com.hydra.tlinkios" code:3001
+                    userInfo:@{NSLocalizedDescriptionKey: @"WiFi info must be a dictionary"}];
+                break;
+            }
+            // Read and validate the same root that will be published. Copy and
+            // foreign accessors stay outside the cache monitor and writer lease.
+            candidate = [wifiInfo mutableCopy];
+            if (![candidate isKindOfClass:NSMutableDictionary.class]) {
+                failure = [NSError errorWithDomain:@"com.hydra.tlinkios" code:3001
+                    userInfo:@{NSLocalizedDescriptionKey: @"WiFi info must be a dictionary"}];
+                break;
+            }
+            rawSSID = candidate[@"ssid"]; rawBSSID = candidate[@"bssid"];
+            if (!rawSSID || !rawBSSID) {
+                failure = [NSError errorWithDomain:@"com.hydra.tlinkios" code:3001
+                    userInfo:@{NSLocalizedDescriptionKey: @"WiFi info must contain SSID and BSSID"}];
+                break;
+            }
+            ssid = [rawSSID isKindOfClass:NSString.class] ? [rawSSID copy] : nil;
+            // Use the existing grammar, but retain the caller's spelling. Pure
+            // validation avoids a public validator publishing a stale lastError.
+            if (!PXValidateIdentityValue(ssid, PXIdentityValueKindSSID, NO)) {
+                failure = [NSError errorWithDomain:PXIdentityValidationErrorDomain code:3003
+                    userInfo:@{NSLocalizedDescriptionKey: @"SSID must be valid UTF-8 and 1-32 bytes"}];
+                break;
+            }
+            bssid = [rawBSSID isKindOfClass:NSString.class] ? [rawBSSID copy] : nil;
+            if (!PXValidateIdentityValue(bssid, PXIdentityValueKindMACAddress, NO)) {
+                failure = [NSError errorWithDomain:PXIdentityValidationErrorDomain code:3005
+                    userInfo:@{NSLocalizedDescriptionKey: @"BSSID must be a nonzero MAC address"}];
+                break;
+            }
+            candidate[@"ssid"] = ssid; candidate[@"bssid"] = bssid;
+        } while (NO);
+        if (failure) {
+            [self setWiFiCacheError:failure revision:revision];
             return;
         }
-
-        // Validate required fields
-        if (!wifiInfo[@"ssid"] || !wifiInfo[@"bssid"]) {
-            self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
-                                             code:3001
-                                         userInfo:@{NSLocalizedDescriptionKey: @"WiFi info must contain SSID and BSSID"}];
-            return;
-        }
-
-        // Validate SSID and BSSID
-        if (![self isValidSSID:wifiInfo[@"ssid"]] || ![self isValidBSSID:wifiInfo[@"bssid"]]) {
-            return; // Error will be set by validation methods
-        }
-
-        uint64_t revision = [self beginWiFiCacheUpdate];
+        // Preparation may reenter an adoption/reload. Do not admit old work as a
+        // new owner, and do not invalidate a readable cache on invalid input.
+        revision = [self beginWiFiCacheUpdateIfRevision:revision];
+        if (!revision) return;
         profileID = [self.currentProfileId copy];
-        candidate = [wifiInfo mutableCopy];
         revision = [self publishWiFiCache:candidate profileID:profileID revision:revision readable:NO];
         if (revision) [self saveWiFiInfoToCurrentProfileAtRevision:revision];
-    } @finally { candidate = nil; profileID = nil; wifiInfo = nil; }
+    } @finally {
+        failure = nil; candidate = nil; rawSSID = nil; rawBSSID = nil;
+        ssid = nil; bssid = nil; profileID = nil; wifiInfo = nil;
+    }
 }
 
 #pragma mark - Accessors

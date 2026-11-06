@@ -19,6 +19,9 @@
 // nil also means superseded or an unacknowledged standalone candidate.
 // Only load, committed adoption and successful save expose a readable entry.
 - (NSDictionary *)cachedWiFiInfoForProfileID:(NSString *)profileID;
+// Snapshot the root and copy required strings before validation/publication.
+// Invalid input leaves cache eligibility intact; superseded preparation is dropped.
+// Other metadata retains the legacy shallow-copy policy.
 - (void)setCurrentWiFiInfo:(NSDictionary *)wifiInfo;
 // Cache adoption after an explicit-target source commit; never saves.
 - (void)adoptCommittedWiFiInfo:(NSDictionary *)wifiInfo profileID:(NSString *)profileID;
