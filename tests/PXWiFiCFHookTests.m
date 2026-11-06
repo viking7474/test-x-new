@@ -11,6 +11,8 @@ static id gWiFi, gScanOriginal;
 static CFTypeRef gLastOriginal;
 static CFDictionaryRef *gWatchedOutput, *gSeenOutput;
 static CFDictionaryRef gSeenInitial;
+static NSUInteger gScanCopyMode, gScanWrites, gScanWriteFailure, gScanCopyDeaths, gScanStandardDeaths;
+static __weak id gScanWorkingCopy;
 #define CHECK(value, label) do { gChecks++; if (!(value)) { gFailures++; fprintf(stderr, "FAIL: %s\n", label); } } while (0)
 #define PX_RUNTIME_READ_OPERATION do { gOperations++; } while (0)
 static BOOL shouldSpoofForBundle(NSString *bundle) {
@@ -60,7 +62,7 @@ static int OriginalApple(void *handle, CFDictionaryRef *info) {
     if (gThrowOriginal) [NSException raise:@"fixture.original" format:@"original failed after output"];
     return gStatus;
 }
-static id OriginalScan(id self, SEL command, id input) {
+static id OriginalScan(id __unsafe_unretained self, SEL command, id __unsafe_unretained input) {
     (void)self; (void)command; (void)input; gOriginalCalls++;
     if (gThrowOriginal) [NSException raise:@"fixture.original" format:@"original failed"];
     return gScanOriginal;
@@ -85,6 +87,30 @@ static void PXFixtureRelease(CFTypeRef value) {
     CFRelease(value);
     if (gThrowRelease) { gThrowRelease = NO; [NSException raise:@"fixture.release" format:@"release callback failed"]; }
 }
+// These stand-ins expose only the scan preparation selectors. Throwing
+// collaborators borrow parameters so they do not invent a callee-owned ARC leak.
+@interface PXWiFiScanCopy : NSObject
+@property (nonatomic, strong) NSMutableDictionary *record;
+@end
+@implementation PXWiFiScanCopy
+- (BOOL)isKindOfClass:(Class)type {
+    return type == NSMutableDictionary.class || type == NSDictionary.class || [super isKindOfClass:type];
+}
+- (void)setObject:(id __unsafe_unretained)value forKeyedSubscript:(id __unsafe_unretained)key {
+    self.record[key] = value;
+    if (++gScanWrites == gScanWriteFailure) [NSException raise:@"fixture.scan-write" format:@"scan mutation failed"];
+}
+- (void)dealloc { gScanCopyDeaths++; }
+@end
+@interface PXWiFiScanStandard : NSObject
+@end
+@implementation PXWiFiScanStandard
+- (BOOL)isKindOfClass:(Class)type { return type == NSString.class || [super isKindOfClass:type]; }
+- (BOOL)containsString:(NSString * __unsafe_unretained)value {
+    (void)value; [NSException raise:@"fixture.scan-standard" format:@"standard classification failed"]; return NO;
+}
+- (void)dealloc { gScanStandardDeaths++; }
+@end
 @interface NSObject (PXWiFiCFCopyFixture)
 - (id)px_cfMutableCopy NS_RETURNS_RETAINED;
 @end
@@ -92,6 +118,12 @@ static void PXFixtureRelease(CFTypeRef value) {
 - (id)px_cfMutableCopy {
     gCopies++;
     if (gThrowCopy) [NSException raise:@"fixture.copy" format:@"copy failed"];
+    if (gScanCopyMode == 1) {
+        PXWiFiScanCopy *copy = [PXWiFiScanCopy new]; copy.record = [self mutableCopy];
+        gScanWorkingCopy = copy; return copy;
+    }
+    if (gScanCopyMode == 2) return @[];
+    if (gScanCopyMode == 3) return nil;
     return [self mutableCopy];
 }
 @end
@@ -116,6 +148,8 @@ static void Reset(void) {
     orig_CNCopySupportedInterfaces = OriginalInterfaces;
     orig_Apple80211GetInfoCopy = OriginalApple;
     orig_dictionaryWithScanResult = OriginalScan;
+    gScanCopyMode = gScanWrites = gScanWriteFailure = gScanCopyDeaths = gScanStandardDeaths = 0;
+    gScanWorkingCopy = nil;
 }
 static void TestLifetimeOracle(void) {
     Reset();
@@ -256,6 +290,45 @@ static void TestAppleOutput(void) {
     }
     CHECK(gDeaths == 1, "published Apple replacement ownership survives release exception");
 }
+static void TestScanLifetime(void) {
+    for (NSUInteger fault = 1; fault <= 3; fault++) {
+        Reset(); gScanCopyMode = 1; gScanWriteFailure = fault;
+        __weak id weakOriginal = nil, weakWiFi = nil;
+        @autoreleasepool {
+            gScanOriginal = [@{ @"SSID": @"real", @"BSSID": @"real-mac", @"WifiStandard": @99 } mutableCopy];
+            gWiFi = [@{ @"ssid": @"Fake WiFi", @"bssid": @"02:11:22:33:44:55", @"wifiStandard": @"802.11ax" } mutableCopy];
+            weakOriginal = gScanOriginal; weakWiFi = gWiFi;
+            id result = replaced_dictionaryWithScanResult(nil, NULL, nil);
+            CHECK(result == gScanOriginal && [result[@"SSID"] isEqual:@"real"] && [result[@"WifiStandard"] isEqual:@99] &&
+                  gOriginalCalls == 1 && gScopeCalls == 1 && gWiFiReads == 1 && gCopies == 1 && gScanWrites == fault,
+                  "scan failure after each mutation returns untouched original without retry or partial output");
+            result = nil; gScanOriginal = nil; gWiFi = nil;
+        }
+        CHECK(!gScanWorkingCopy && !weakOriginal && !weakWiFi && gScanCopyDeaths == 1,
+              "scan exceptional preparation releases its partial copy and retained roots after pool drain");
+    }
+    Reset(); __weak id weakStandard = nil, weakWiFi = nil, weakOriginal = nil;
+    @autoreleasepool {
+        id standard = [PXWiFiScanStandard new]; weakStandard = standard;
+        gWiFi = @{ @"ssid": @"fake", @"bssid": @"mac", @"wifiStandard": standard };
+        gScanOriginal = [@{ @"SSID": @"real" } mutableCopy]; weakWiFi = gWiFi; weakOriginal = gScanOriginal;
+        id result = replaced_dictionaryWithScanResult(nil, NULL, nil);
+        CHECK(result == gScanOriginal && gOriginalCalls == 1 && !gCopies,
+              "scan standard accessor failure preserves original before any copy");
+        result = nil; standard = nil; gWiFi = nil; gScanOriginal = nil;
+    }
+    CHECK(!weakStandard && !weakWiFi && !weakOriginal && gScanStandardDeaths == 1,
+          "scan classification exception releases retained standard and WiFi graph");
+    Reset(); gThrowOriginal = YES; __weak id weakReceiver = nil, weakInput = nil; BOOL threw = NO;
+    @autoreleasepool {
+        id receiver = [PXWiFiCFProbe new], input = [PXWiFiCFProbe new]; weakReceiver = receiver; weakInput = input;
+        @try { (void)replaced_dictionaryWithScanResult(receiver, NULL, input); }
+        @catch (NSException *exception) { threw = [exception.name isEqual:@"fixture.original"]; }
+        receiver = nil; input = nil;
+    }
+    CHECK(threw && !weakReceiver && !weakInput && gDeaths == 2 && gOriginalCalls == 1 && !gScopeCalls && !gWiFiReads && !gCopies,
+          "scan original exception propagates once and releases adapter-owned receiver and argument");
+}
 static void TestScan(void) {
     Reset(); id result = replaced_dictionaryWithScanResult(nil, NULL, nil);
     CHECK([result[@"SSID"] isEqual:@"Fake WiFi"] && [result[@"WifiStandard"] isEqual:@6] && [result[@"keep"] boolValue] &&
@@ -275,12 +348,25 @@ static void TestScan(void) {
     }
     Reset(); gThrowCopy = YES;
     CHECK(replaced_dictionaryWithScanResult(nil, NULL, nil) == gScanOriginal && gCopies == 1, "scan copy failure preserves untouched original");
+    for (NSUInteger mode = 2; mode <= 3; mode++) {
+        Reset(); gScanCopyMode = mode;
+        CHECK(replaced_dictionaryWithScanResult(nil, NULL, nil) == gScanOriginal && gCopies == 1 && gOriginalCalls == 1,
+              "scan unusable mutable-copy result preserves original instead of returning nil or mutating another type");
+    }
+    for (id original in @[@42, NSNull.null]) {
+        Reset(); gScanOriginal = original;
+        CHECK(replaced_dictionaryWithScanResult(nil, NULL, nil) == original && !gWiFiReads && !gCopies && gOriginalCalls == 1,
+              "scan non-dictionary original bypasses WiFi preparation and copying");
+    }
+    Reset(); orig_dictionaryWithScanResult = NULL;
+    CHECK(!replaced_dictionaryWithScanResult(nil, NULL, nil) && !gOriginalCalls && !gWiFiReads && !gCopies,
+          "scan missing original preserves nil without a null call or synthesis");
     Reset(); gWiFi = @{ @"ssid": @"Fake WiFi", @"bssid": @"02:11:22:33:44:55", @"wifiStandard": @"unknown" };
     CHECK([replaced_dictionaryWithScanResult(nil, NULL, nil)[@"WifiStandard"] isEqual:@99], "unknown scan standard preserves the original standard field");
 }
 int main(void) {
     @autoreleasepool {
-        @try { TestLifetimeOracle(); TestNetworkCopy(); TestInterfaces(); TestAppleOutput(); TestScan(); }
+        @try { TestLifetimeOracle(); TestNetworkCopy(); TestInterfaces(); TestAppleOutput(); TestScan(); TestScanLifetime(); }
         @catch (NSException *exception) { gFailures++; fprintf(stderr, "FAIL: unexpected WiFi CF exception: %s\n", exception.description.UTF8String); }
         printf("WiFi CF boundaries: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);
         return gFailures ? 1 : 0;

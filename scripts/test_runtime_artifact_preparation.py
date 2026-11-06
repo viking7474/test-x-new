@@ -324,12 +324,28 @@ def source_contracts():
     assert scan.index('(!kind || [original[@"WifiStandard"] isEqual:kind])') < scan.index('[original mutableCopy]')
     assert all(token in scan for token in ('containsString:@"802.11ax"', 'containsString:@"802.11ac"', 'containsString:@"802.11n"'))
     assert 'containsString:@"n"' not in scan
+    first_try = scan.index('@try')
+    original_call = scan.index('original = orig_dictionaryWithScanResult')
+    assert first_try < original_call < scan.index('@try', first_try + 4) < scan.index('@catch')
+    assert scan.count('orig_dictionaryWithScanResult(self, _cmd, arg1)') == 1
+    assert scan.index('[original mutableCopy]') < scan.index('isKindOfClass:NSMutableDictionary.class') < scan.index('modified[@"SSID"] =')
+    assert '@finally' in scan and 'modified = nil; kind = nil; standard = nil; wifi = nil; bundleID = nil;' in scan
+    assert 'original = nil; arg1 = nil; self = nil;' in scan
+    for removed in ('loadScopedApps', 'isInScopedAppsList', 'URLSessionTaskTransactionMetrics', 'URLSessionTaskMetrics'):
+        assert removed not in wifi_hooks, removed
     check_macro_arity(read('tests/PXWiFiCFHookTests.m'), 'PXWiFiCFHookTests.m')
     cf_fixture = read('tests/PXWiFiCFHookTests.m')
     bridge = identifier.method(cf_fixture, 'static CFTypeRef PXFixtureBridge(CFTypeRef value)')
     assert 'CFRetain(value)' in bridge and 'PXFixtureBridge(id value)' not in cf_fixture
     assert '#define CFBridgingRetain(value) PXFixtureBridge((__bridge CFTypeRef)(value))' in cf_fixture
     assert cf_fixture.count('TestLifetimeOracle();') == 1
+    assert cf_fixture.count('TestScanLifetime();') == 1
+    assert 'OriginalScan(id __unsafe_unretained self, SEL command, id __unsafe_unretained input)' in cf_fixture
+    for case in ('scan exceptional preparation releases its partial copy and retained roots after pool drain',
+                 'scan classification exception releases retained standard and WiFi graph',
+                 'scan original exception propagates once and releases adapter-owned receiver and argument',
+                 'scan unusable mutable-copy result preserves original instead of returning nil or mutating another type'):
+        assert case in cf_fixture, case
     assert 'gDeaths == 0, "lifetime oracle detects a deliberately surviving CF owner"' in cf_fixture
     assert 'gDeaths == 1, "preserved Apple output has no ownership leak after caller release"' in cf_fixture
     assert 'faultNames[fault]' in cf_fixture

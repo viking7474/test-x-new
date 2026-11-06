@@ -31,29 +31,6 @@
 - (id)_getBSSID;
 @end
 
-@interface URLSessionTaskTransactionMetrics : NSObject
-@property (nonatomic, readonly) NSURLRequest *request;
-@property (nonatomic, readonly) NSURLResponse *response;
-@property (nonatomic, readonly) NSDate *fetchStartDate;
-@property (nonatomic, readonly) NSDate *domainLookupStartDate;
-@property (nonatomic, readonly) NSDate *domainLookupEndDate;
-@property (nonatomic, readonly) NSDate *connectStartDate;
-@property (nonatomic, readonly) NSDate *connectEndDate;
-@property (nonatomic, readonly) NSDate *secureConnectionStartDate;
-@property (nonatomic, readonly) NSDate *secureConnectionEndDate;
-@property (nonatomic, readonly) NSDate *requestStartDate;
-@property (nonatomic, readonly) NSDate *requestEndDate;
-@property (nonatomic, readonly) NSDate *responseStartDate;
-@property (nonatomic, readonly) NSDate *responseEndDate;
-@end
-
-@interface URLSessionTaskMetrics : NSObject
-@property (nonatomic, readonly) NSArray<URLSessionTaskTransactionMetrics *> *transactionMetrics;
-@property (nonatomic, readonly) NSDate *taskInterval;
-@property (nonatomic, readonly) int64_t countOfBytesReceived;
-@property (nonatomic, readonly) int64_t countOfBytesSent;
-@end
-
 // MobileWiFi framework typedefs and functions (private API)
 typedef struct __WiFiNetwork *WiFiNetworkRef;
 
@@ -168,8 +145,6 @@ static void PXWiFiInvalidateCache(void) {
 
 // Forward declarations
 static NSString *getCurrentBundleID(void);
-static NSDictionary *loadScopedApps(void);
-static BOOL isInScopedAppsList(void);
 
 #pragma mark - Profile Detection Helpers
 
@@ -435,20 +410,35 @@ static void replaced_NEHotspotNetwork_fetchCurrent(id self, SEL _cmd, void (^com
 // Implementation of NEHotspotHelper dictionaryWithScanResult: hook
 static id replaced_dictionaryWithScanResult(id self, SEL _cmd, id arg1) {
     PX_RUNTIME_READ_OPERATION;
-    id original = orig_dictionaryWithScanResult ? orig_dictionaryWithScanResult(self, _cmd, arg1) : nil;
+    id original = nil;
+    NSDictionary *wifi = nil;
+    NSString *bundleID = nil, *standard = nil;
+    NSNumber *kind = nil;
+    NSMutableDictionary *modified = nil;
     @try {
-        if (!shouldSpoofForBundle(NSBundle.mainBundle.bundleIdentifier) || ![original isKindOfClass:NSDictionary.class]) return original;
-        NSDictionary *wifi = PXResolvedWiFiInfo();
-        if (!PXWiFiInfoHasIdentity(wifi)) return original;
-        NSString *standard = [wifi[@"wifiStandard"] isKindOfClass:NSString.class] ? wifi[@"wifiStandard"] : nil;
-        NSNumber *kind = [standard containsString:@"802.11ax"] ? @6 : ([standard containsString:@"802.11ac"] ? @5 : ([standard containsString:@"802.11n"] ? @4 : nil));
-        if ([original[@"SSID"] isEqual:wifi[@"ssid"]] && [original[@"BSSID"] isEqual:wifi[@"bssid"]] &&
-            (!kind || [original[@"WifiStandard"] isEqual:kind])) return original;
-        NSMutableDictionary *modified = [original mutableCopy];
-        modified[@"SSID"] = wifi[@"ssid"]; modified[@"BSSID"] = wifi[@"bssid"];
-        if (kind) modified[@"WifiStandard"] = kind;
-        return modified;
-    } @catch (NSException *exception) { (void)exception; return original; }
+        // Original exceptions propagate; only spoof preparation falls back.
+        original = orig_dictionaryWithScanResult ? orig_dictionaryWithScanResult(self, _cmd, arg1) : nil;
+        @try {
+            bundleID = NSBundle.mainBundle.bundleIdentifier;
+            if (!shouldSpoofForBundle(bundleID) || ![original isKindOfClass:NSDictionary.class]) return original;
+            wifi = PXResolvedWiFiInfo();
+            if (!PXWiFiInfoHasIdentity(wifi)) return original;
+            standard = [wifi[@"wifiStandard"] isKindOfClass:NSString.class] ? wifi[@"wifiStandard"] : nil;
+            kind = [standard containsString:@"802.11ax"] ? @6 : ([standard containsString:@"802.11ac"] ? @5 : ([standard containsString:@"802.11n"] ? @4 : nil));
+            if ([original[@"SSID"] isEqual:wifi[@"ssid"]] && [original[@"BSSID"] isEqual:wifi[@"bssid"]] &&
+                (!kind || [original[@"WifiStandard"] isEqual:kind])) return original;
+            modified = [original mutableCopy];
+            if (![modified isKindOfClass:NSMutableDictionary.class]) return original;
+            modified[@"SSID"] = wifi[@"ssid"]; modified[@"BSSID"] = wifi[@"bssid"];
+            if (kind) modified[@"WifiStandard"] = kind;
+            return modified;
+        } @catch (__unused NSException *exception) { return original; }
+    } @finally {
+        // Explicit cleanup also covers partial mutations and original exceptions
+        // without relying on -fobjc-arc-exceptions. Return values retain ownership.
+        modified = nil; kind = nil; standard = nil; wifi = nil; bundleID = nil;
+        original = nil; arg1 = nil; self = nil;
+    }
 }
 
 // Getter preparation only. Originals stay outside these catches so a system
@@ -857,38 +847,3 @@ static NSString *getCurrentBundleID(void) {
         return nil;
     }
 }
-
-// Load scoped apps from the plist file
-static NSDictionary *loadScopedApps(void) {
-    PX_RUNTIME_READ_OPERATION;
-    return PXScopedAppsSnapshot();
-}
-
-// Check if the current app is in the scoped apps list
-static BOOL isInScopedAppsList(void) {
-    PX_RUNTIME_READ_OPERATION;
-    @try {
-        NSString *bundleID = getCurrentBundleID();
-        if (!bundleID || [bundleID length] == 0) {
-            return NO;
-        }
-        
-        NSDictionary *scopedApps = loadScopedApps();
-        if (!scopedApps || scopedApps.count == 0) {
-            return NO;
-        }
-        
-        // Check if this bundle ID is in the scoped apps dictionary
-        id appEntry = scopedApps[bundleID];
-        if (!appEntry || ![appEntry isKindOfClass:[NSDictionary class]]) {
-            return NO;
-        }
-        
-        // Check if the app is enabled
-        BOOL isEnabled = [appEntry[@"enabled"] boolValue];
-        return isEnabled;
-        
-    } @catch (NSException *e) {
-        return NO;
-    }
-} 
