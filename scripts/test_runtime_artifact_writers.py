@@ -158,7 +158,7 @@ def source_contracts():
         assert 'writeToFile:deviceIdsPath' not in body
     assert 'saveWiFiInfoToCurrentProfileAtRevision:[self beginWiFiCacheUpdate]' in objc_method(wifi, '- (void)saveWiFiInfoToCurrentProfile')
     assert 'writeToFile:BATTERY_PLIST_PATH' in battery, 'legacy global battery compatibility remains separate'
-    storage_save = objc_method(storage, '- (BOOL)persistStorageToProfile:(NSString *)profileID current:(BOOL)current error:(NSError **)error')
+    storage_save = objc_method(storage, '- (BOOL)persistStorageRecord:(NSDictionary *)record revision:(uint64_t)revision profileID:(NSString *)profileID current:(BOOL)current error:(NSError **)error')
     assert 'mutation.profileDirectory' in storage_save and 'acquireWithProfileIDResolver:' in storage_save and '[tx setDictionary:prepared atPath:storagePath' in storage_save
     assert 'writeToFile:' not in storage_save
     assert 'initWithSuiteName:@"com.hydra.tlinkios.settings"' in storage, 'defaults authority rollout remains pending'

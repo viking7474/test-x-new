@@ -16,12 +16,16 @@
  */
 - (NSDictionary *)generateStorageForCapacity:(NSString *)capacity;
 - (void)adoptCommittedStorageInfo:(NSDictionary *)storageInfo;
-/// Snapshot only; callers freeze the candidate before a source commit.
+/// Cache-only immutable snapshot; total/free/filesystem share one observation.
+/// Owned scalar strings are detached; other metadata is shallow. Separate property
+/// calls are separate observations. No disk reads, generation or saves here.
 - (NSDictionary *)currentStorageInfo;
 /// One owned commit for IdentifierManager's legacy display fallback. Values are
 /// strings for TotalStorage/FreeStorage and optional FilesystemType. Other cache
 /// keys survive. updateFilesystem=YES with no filesystem removes that field;
-/// NO preserves it. On failure source/cache are unchanged. No notifications.
+/// NO preserves it. On failure no candidate cache is adopted. A newer cache intent
+/// may supersede preparation; after acknowledged commit, source success is retained
+/// even when newer cache work prevents adoption. No notifications.
 - (BOOL)commitDisplayStorageInfo:(NSDictionary *)values updateFilesystem:(BOOL)updateFilesystem error:(NSError * _Nullable * _Nullable)error;
 
 /**
@@ -111,7 +115,11 @@
 
 // Saves use nonblocking lifecycle ownership of an existing profile directory;
 // they never create a missing target. Current saves keep canonical selection-file
-// authority. Setter cache changes still precede their individual autosaves.
+// authority. Setter cache changes still precede their individual autosaves, using
+// the frozen entry record. Nil removes a field and saves; unsupported scalar roots
+// are ignored. Older preparation/load/save may be superseded without retry. Cache
+// root replacement is synchronized; copying/providers/I/O remain outside the monitor.
+// This per-instance protocol does not globally serialize selection/source/mirrors.
 
 /**
  * Save storage settings to a specific profile
@@ -122,7 +130,7 @@
 /**
  * Load storage settings from a specific profile
  * @param profileId The profile ID to load from
- * @return YES if settings were loaded, NO if defaults were used
+ * @return YES if settings were loaded and adopted, NO for defaults/invalid/superseded work
  */
 - (BOOL)loadFromProfile:(NSString *)profileId;
 

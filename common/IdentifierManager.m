@@ -361,6 +361,24 @@ static NSString *PXIdentifierDisplayString(id value) {
     return nil;
 }
 
+static NSString *PXIdentifierStorageDisplay(id manager) {
+    NSDictionary *info = nil;
+    NSString *total = nil, *free = nil;
+    @try {
+        if ([manager respondsToSelector:@selector(currentStorageInfo)]) {
+            info = [manager currentStorageInfo];
+            if (![info isKindOfClass:NSDictionary.class]) return nil;
+            total = PXIdentifierDisplayString(info[@"TotalStorage"]);
+            free = PXIdentifierDisplayString(info[@"FreeStorage"]);
+        } else {
+            if ([manager respondsToSelector:@selector(totalStorageCapacity)]) total = PXIdentifierDisplayString([manager totalStorageCapacity]);
+            if ([manager respondsToSelector:@selector(freeStorageSpace)]) free = PXIdentifierDisplayString([manager freeStorageSpace]);
+        }
+        return total && free ? [NSString stringWithFormat:@"Total: %@ GB, Free: %@ GB", total, free] : nil;
+    } @catch (__unused NSException *exception) { return nil; }
+    @finally { info = nil; total = nil; free = nil; manager = nil; }
+}
+
 static NSString *PXIdentifierWiFiDisplay(id manager) {
     NSDictionary *info = nil;
     NSString *ssid = nil, *bssid = nil;
@@ -2874,23 +2892,9 @@ return @"Not Set";
         if (storageManager && [storageManager respondsToSelector:@selector(sharedManager)]) {
             id sharedManager = [storageManager sharedManager];
             if (sharedManager) {
-                NSString *totalStorage = nil;
-                NSString *freeStorage = nil;
-                
-                if ([sharedManager respondsToSelector:@selector(totalStorageCapacity)]) {
-                    totalStorage = PXIdentifierDisplayString([sharedManager totalStorageCapacity]);
-                }
-                
-                if ([sharedManager respondsToSelector:@selector(freeStorageSpace)]) {
-                    freeStorage = PXIdentifierDisplayString([sharedManager freeStorageSpace]);
-                }
-                
-                if (totalStorage && freeStorage) {
-                    NSString *formattedStorage = [NSString stringWithFormat:@"Total: %@ GB, Free: %@ GB", 
-                                               totalStorage, freeStorage];
-                    return formattedStorage;
-                }
-                
+                NSString *formattedStorage = PXIdentifierStorageDisplay(sharedManager);
+                if (formattedStorage) return formattedStorage;
+
                 // Try to generate new values if we couldn't get existing ones
                 if ([sharedManager respondsToSelector:@selector(generateStorageForCapacity:)]) {
                     // Randomly choose between 64GB and 128GB

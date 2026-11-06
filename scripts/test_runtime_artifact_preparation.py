@@ -14,6 +14,18 @@ read = lambda p: (ROOT / p).read_text(encoding='utf-8')
 spec = importlib.util.spec_from_file_location('identifier_writers', ROOT / 'scripts/test_runtime_identifier_writers.py')
 identifier = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(identifier)
+STORAGE_CACHE_METHODS = [
+    '- (uint64_t)storageCacheRevision',
+    '- (uint64_t)beginStorageCacheWorkIfRevision:(uint64_t)revision',
+    '- (uint64_t)beginStorageCacheWork',
+    '- (BOOL)storageCacheRevisionIsCurrent:(uint64_t)revision',
+    '- (NSDictionary *)captureStorageCache:(uint64_t *)revision',
+    '- (BOOL)publishStorageCache:(NSDictionary *)candidate revision:(uint64_t)revision',
+    '- (void)setStorageScalar:(id)value key:(NSString *)key',
+    '- (void)setDefaultStorageForProfile:(NSString *)profileID revision:(uint64_t)revision',
+    '- (BOOL)loadFromProfile:(NSString *)profileId revision:(uint64_t)revision',
+    '- (BOOL)persistStorageRecord:(NSDictionary *)record revision:(uint64_t)revision profileID:(NSString *)profileID current:(BOOL)current error:(NSError **)error',
+]
 STORAGE_READ_SIGNATURES = [
     '- (NSString *)totalStorageCapacity', '- (NSString *)freeStorageSpace', '- (NSString *)filesystemType',
     '- (uint64_t)convertGBStringToBytes:(id)gbString', '- (uint64_t)normalizeStorageBytes:(uint64_t)bytes',
@@ -140,7 +152,7 @@ WRAPPERS = {
         '- (NSString *)batteryInfoPathForCurrentProfile', '- (void)loadBatteryInfoFromDisk', '- (void)saveBatteryInfoToDisk',
         '- (NSDictionary *)batteryRecordForLevel:(NSString *)level lowPowerMode:(BOOL)enabled',
         '- (BOOL)persistBatteryRecord:(NSDictionary *)record', '- (BOOL)persistBatteryRecord:(NSDictionary *)record mutation:(uint64_t)receipt', '- (BOOL)mirrorBatteryRecord:(NSDictionary *)record error:(NSError **)error']),
-    'PXPreparedStorageMethod.inc': ('common/StorageManager.m', ['- (NSDictionary *)generateStorageForCapacity:(NSString *)capacity', '- (void)adoptCommittedStorageInfo:(NSDictionary *)storageInfo', '- (NSDictionary *)currentStorageInfo',
+    'PXPreparedStorageMethod.inc': ('common/StorageManager.m', [*STORAGE_CACHE_METHODS, '- (NSDictionary *)generateStorageForCapacity:(NSString *)capacity', '- (void)adoptCommittedStorageInfo:(NSDictionary *)storageInfo', '- (NSDictionary *)currentStorageInfo',
         *STORAGE_READ_SIGNATURES,
         '- (BOOL)commitDisplayStorageInfo:(NSDictionary *)values updateFilesystem:(BOOL)updateFilesystem error:(NSError **)error',
         '- (void)saveToCurrentProfile', '- (void)saveToProfile:(NSString *)profileId',
@@ -677,16 +689,60 @@ def source_contracts():
     assert normalization.index('inputBytes >= 0x1p64) return bytes') < normalization.index('inputBytes / BYTES_PER_GB')
     assert normalization.index('normalized >= 0x1p64) return bytes') < normalization.index('(uint64_t)normalized')
     for name, key in (('totalStorageCapacity', 'TotalStorage'), ('freeStorageSpace', 'FreeStorage'), ('filesystemType', 'FilesystemType')):
-        assert f'PXStorageScalarField(_storageSettings, @"{key}")' in identifier.method(storage, '- (NSString *)' + name)
+        assert f'PXStorageScalarField([self currentStorageInfo], @"{key}")' in identifier.method(storage, '- (NSString *)' + name)
     chooser = identifier.method(storage, '- (NSString *)randomizeStorageCapacityForDeviceModel:(NSString *)deviceModel')
     assert chooser.index('deviceModel && ![deviceModel isKindOfClass:NSString.class]') < chooser.index('[IPhoneModelDB sharedManager]')
     assert 'candidates = capacities;' in chooser and 'if (capacities.count > 1 && previous.length)' in chooser
-    loader = identifier.method(storage, '- (BOOL)loadFromProfile:(NSString *)profileId')
+    loader = identifier.method(storage, '- (BOOL)loadFromProfile:(NSString *)profileId revision:(uint64_t)revision')
     assert loader.index('PXValidatedProfileID(profileId)') < loader.index('PXProfileRootPath(profileId)')
-    assert 'if (!profileId) return NO;' in loader
-    assert '[self setDefaultStorageForProfile:profileId]' in loader and '[self setDefaultStorage]' not in loader
+    assert 'if (!profileId || ![self storageCacheRevisionIsCurrent:revision]) return NO;' in loader
+    assert '[self setDefaultStorageForProfile:profileId revision:revision]' in loader and '[self setDefaultStorage]' not in loader
     targeted = identifier.method(storage, '- (NSString *)randomizeStorageCapacityForProfile:(NSString *)profileID')
     assert 'PXProfileIdentityPath(target)' in targeted and 'PXActiveProfileID' not in targeted
+    assert 'deviceIDs = nil; path = nil; target = nil; profileID = nil;' in targeted
+    assert chooser.index('deviceModel = [deviceModel copy]') < chooser.index('[IPhoneModelDB sharedManager]')
+    assert 'canonical = nil; row = nil; modelDB = nil; deviceModel = nil;' in chooser
+    assert '@finally { capacity = nil; }' in identifier.method(storage, '- (NSDictionary *)generateStorageForCapacity:(NSString *)capacity')
+    capture = identifier.method(storage, '- (NSDictionary *)captureStorageCache:(uint64_t *)revision')
+    publish = identifier.method(storage, '- (BOOL)publishStorageCache:(NSDictionary *)candidate revision:(uint64_t)revision')
+    assert '@synchronized (self)' in capture and 'root = _storageSettings;' in capture and 'root = nil;' in capture
+    assert 'objc_precise_lifetime' in publish and 'old = _storageSettings;' in publish
+    assert 'revision != _storageCacheRevision' in publish and '@finally { old = nil; candidate = nil; }' in publish
+    for body in (capture, publish, identifier.method(storage, '- (uint64_t)beginStorageCacheWork'),
+                 identifier.method(storage, '- (uint64_t)beginStorageCacheWorkIfRevision:(uint64_t)revision')):
+        for forbidden in (' copy]', 'mutableCopy', 'dictionaryWithContentsOfFile', 'performSourceWrite', 'PXPrepare', 'PXLog', 'dispatch_'):
+            assert forbidden not in body, forbidden
+    raw_lines = [line.strip() for line in storage.splitlines() if '_storageSettings' in line]
+    assert raw_lines == ['NSDictionary *_storageSettings;', '_storageSettings = @{};', 'root = _storageSettings;', 'old = _storageSettings;', '_storageSettings = candidate;']
+    scalar_set = identifier.method(storage, '- (void)setStorageScalar:(id)value key:(NSString *)key')
+    assert scalar_set.index('[self storageCacheRevision]') < scalar_set.index('[value copy]') < scalar_set.index('beginStorageCacheWorkIfRevision:observed')
+    assert scalar_set.index('PXStorageFrozenRecord(candidate)') < scalar_set.index('publishStorageCache:record revision:revision') < scalar_set.index('persistStorageRecord:record revision:revision')
+    adoption = identifier.method(storage, '- (void)adoptCommittedStorageInfo:(NSDictionary *)storageInfo')
+    assert adoption.index('[self storageCacheRevision]') < adoption.index('PXStorageFrozenRecord(storageInfo)') < adoption.index('beginStorageCacheWorkIfRevision:observed')
+    assert 'if (revision) [self publishStorageCache:record revision:revision];' in adoption
+    current_load = identifier.method(storage, '- (void)loadFromCurrentProfile')
+    assert current_load.index('beginStorageCacheWork') < current_load.index('dictionaryWithContentsOfFile')
+    assert 'revision:revision' in current_load and 'removeAllObjects' not in storage and 'addEntriesFromDictionary' not in storage
+    assert 'PXStorageFrozenRecord(savedSettings)' in loader and 'publishStorageCache:record revision:revision' in loader
+    assert loader.index('storageCacheRevisionIsCurrent:revision') < loader.index('PXProfileRootPath(profileId)')
+    defaults = identifier.method(storage, '- (void)setDefaultStorageForProfile:(NSString *)profileID revision:(uint64_t)revision')
+    assert defaults.index('storageCacheRevisionIsCurrent:revision') < defaults.index('randomizeStorageCapacityForProfile:')
+    assert defaults.count('storageCacheRevisionIsCurrent:revision') == 3
+    assert 'superseded current storage load skips target file reads and default generation' in read('tests/PXStorageManagerCacheTests.m')
+    frozen = identifier.method(storage, 'static NSDictionary *PXStorageFrozenRecord(id record)')
+    assert 'candidate[key] = [value copy];' in frozen and 'return [candidate copy];' in frozen and '@finally' in frozen
+    fixture = read('tests/PXStorageManagerCacheTests.m')
+    check_macro_arity(fixture, 'PXStorageManagerCacheTests.m')
+    assert '#include "PXPreparedStorageMethod.inc"' in fixture and '#include "PXStorageReadDeclarations.inc"' in fixture
+    for name in ('TestSnapshotsAndInputs', 'TestLoadOrdering', 'TestSourceAndPublicationOrdering', 'TestCopyAndLifetime', 'TestMonitorBoundariesAndStress'):
+        assert fixture.count(name + '();') == 1
+    for case in ('older storage loader cannot replace newer profile load',
+                 'storage save rejects newer cache after acquisition without relabeling its record',
+                 'storage acknowledged display commit preserves newer cache adoption without negating source success',
+                 'storage exceptional exit drops owner records and method argument block captures after pool drain',
+                 'concurrent storage root replacements never expose mixed or partially mutated records',
+                 'discarded storage cache root deallocates outside monitor allowing another-thread reader'):
+        assert case in fixture
     hooks = read('TLinkIOSTweak/StorageHooks.x')
     import re
     for group, selector in (('PXStorageImportantCapacity', 'volumeAvailableCapacityForImportantUsageForURL:error:'),
@@ -754,18 +810,27 @@ def source_contracts():
     assert 'if (!isfinite(scaled) || scaled >= 0x1p64) { PXStorageSetSafeByteDefaults(totalBytes, freeBytes); return; }' in hooks
     check_macro_arity(read('tests/PXStorageNativeSnapshotTests.m'), 'PXStorageNativeSnapshotTests.m')
     display = identifier.method(storage, '- (BOOL)commitDisplayStorageInfo:(NSDictionary *)values updateFilesystem:(BOOL)updateFilesystem error:(NSError **)error')
-    assert display.index('[rawTotal copy]') < display.index('acquireWithProfileIDResolver:') < display.index('dictionaryWithContentsOfFile:PXCurrentProfileInfoPath()') < display.index('[_storageSettings copy]')
+    assert display.index('[rawTotal copy]') < display.index('dictionaryWithContentsOfFile:PXCurrentProfileInfoPath()') < display.index('acquireWithProfileIDResolver:') < display.index('[self currentStorageInfo]')
     assert 'PXActiveProfileID()' not in display and 'mutation.identityDirectory' not in display
     assert display.count('[mutation performSourceWrite:') == 1 and display.count('[tx setDictionary:') == 1
     assert display.index('PXPerformStandaloneRuntimeSourceWrite') < display.index('acquireWithProfileIDResolver:')
     assert 'mutation.profileDirectory' in display and 'if (updateFilesystem) candidate[@"FilesystemType"] = filesystem;' in display
-    assert display.index('adoptable = [staged mutableCopy]') < display.index('if (!committed) return NO;') < display.index('_storageSettings = adoptable;') < display.index('@finally { [mutation invalidate]; }')
+    assert display.index('adoptable = PXStorageFrozenRecord(staged)') < display.index('if (!committed) return NO;') < display.index('[self publishStorageCache:adoptable revision:revision]') < display.index('@finally { [mutation invalidate]; }')
     assert 'saveToCurrentProfile' not in display and 'adoptCommittedStorageInfo:' not in display and 'PostNotification' not in display
+    assert display.index('[self storageCacheRevision]') < display.index('[values copy]') < display.index('beginStorageCacheWorkIfRevision:observed')
+    assert display.index('storageCacheRevisionIsCurrent:revision') < display.index('[tx setDictionary:')
+    assert 'writeBody = nil; resolver = nil; mutation = nil; adoptable = nil; candidate = nil;' in display
+    assert 'performSourceWrite:^' not in display and 'acquireWithProfileIDResolver:^' not in display
+    assert 'acknowledged display storage source commit never replaces a newer cache adoption' in read('tests/PXRuntimeArtifactPreparationTests.m')
     check_macro_arity(read('tests/PXRuntimeArtifactPreparationTests.m'), 'PXRuntimeArtifactPreparationTests.m')
-    persist = identifier.method(storage, '- (BOOL)persistStorageToProfile:(NSString *)profileID current:(BOOL)current error:(NSError **)error')
-    assert persist.index('acquireWithProfileIDResolver:') < persist.index('dictionaryWithContentsOfFile:PXCurrentProfileInfoPath()') < persist.index('[_storageSettings copy]')
+    persist = identifier.method(storage, '- (BOOL)persistStorageRecord:(NSDictionary *)record revision:(uint64_t)revision profileID:(NSString *)profileID current:(BOOL)current error:(NSError **)error')
+    assert persist.index('dictionaryWithContentsOfFile:PXCurrentProfileInfoPath()') < persist.index('acquireWithProfileIDResolver:') < persist.index('[record copy]')
     assert 'mutation.profileDirectory' in persist and 'mutation.identityDirectory' not in persist
     assert '[mutation performSourceWrite:' in persist and '@finally { [mutation invalidate]; }' in persist
+    assert persist.count('storageCacheRevisionIsCurrent:revision') == 4
+    assert 'writeBody = nil; resolver = nil; prepared = nil; mutation = nil;' in persist
+    wrapper = identifier.method(storage, '- (BOOL)persistStorageToProfile:(NSString *)profileID current:(BOOL)current error:(NSError **)error')
+    assert wrapper.index('captureStorageCache:&revision') < wrapper.index('persistStorageRecord:record revision:revision')
     assert 'PXActiveProfileID()' not in persist and 'PXLegacyActiveProfileInfoPath()' not in persist
     assert 'current:YES' in identifier.method(storage, '- (void)saveToCurrentProfile')
     assert 'current:NO' in identifier.method(storage, '- (void)saveToProfile:(NSString *)profileId')
@@ -970,11 +1035,13 @@ def generate_native_fragments(folder):
     (folder / 'PXWiFiGetterPath.inc').write_text('\n\n'.join(identifier.method(wifi, sig).replace('%orig', original) for sig, original in WIFI_GETTER_PATH), encoding='utf-8')
     (folder / 'PXWiFiHookReader.inc').write_text('\n\n'.join(identifier.method(wifi, sig) for sig in
         ('static NSString *getCurrentProfileID(void)', 'static NSDictionary *getProfileWiFiInfo(void)')), encoding='utf-8')
-    declarations = [identifier.method(storage, sig).split(' {', 1)[0] + ';' for sig in STORAGE_READ_SIGNATURES]
+    declarations = [identifier.method(storage, sig).split(' {', 1)[0] + ';' for sig in STORAGE_READ_SIGNATURES + STORAGE_CACHE_METHODS]
     (folder / 'PXStorageReadDeclarations.inc').write_text('\n'.join(declarations), encoding='utf-8')
     definitions = [next(line for line in storage.splitlines() if line.startswith('#define BYTES_PER_GB ')),
                    next(line for line in hooks.splitlines() if line.startswith('#define DEFAULT_BLOCK_SIZE ')),
                    identifier.method(storage, 'static NSString *PXStorageScalarField(id settings, NSString *key)'),
+                   identifier.method(storage, 'static NSDictionary *PXStorageFrozenRecord(id record)'),
+                   identifier.method(storage, 'static BOOL PXStorageSuperseded(NSError **error)'),
                    identifier.method(hooks, 'static uint64_t calculateBlockCount(uint64_t bytes, uint32_t blockSize)')]
     (folder / 'PXStorageReadHelpers.inc').write_text('\n\n'.join(definitions), encoding='utf-8')
     globals_and_publishers = [line for line in hooks.splitlines() if line.startswith('static _Atomic(')]
@@ -1078,6 +1145,12 @@ def native_tests():
                                 '-Wall', '-Wextra', '-Werror=implicit-function-declaration', '-I', str(folder), '-I', str(ROOT / 'common'), *defines,
                                 str(ROOT / 'tests/PXWiFiHookCacheTests.m'), '-framework', 'Foundation', '-o', str(wifi_binary)], check=True, cwd=ROOT, timeout=60)
                 subprocess.run([str(wifi_binary)], check=True, cwd=ROOT, timeout=60)
+                storage_cache_binary = folder / ('storage-manager-cache-' + scheme + '-' + arc_mode)
+                print('Storage manager cache native matrix:', scheme, arc_mode, flush=True)
+                subprocess.run(['xcrun', 'clang', '-O0', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions', arc_flag,
+                                '-Wall', '-Wextra', '-Werror=implicit-function-declaration', '-I', str(folder), *defines,
+                                str(ROOT / 'tests/PXStorageManagerCacheTests.m'), '-framework', 'Foundation', '-o', str(storage_cache_binary)], check=True, cwd=ROOT, timeout=60)
+                subprocess.run([str(storage_cache_binary)], check=True, cwd=ROOT, timeout=60)
                 resolver_binary = folder / ('wifi-resolver-lifetime-' + scheme + '-' + arc_mode)
                 print('WiFi resolver lifetime native matrix:', scheme, arc_mode, flush=True)
                 subprocess.run(['xcrun', 'clang', '-O0', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions', arc_flag,

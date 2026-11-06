@@ -22,20 +22,55 @@
 // A storage record can contain legacy numeric scalars. Keep NSString APIs
 // stable while rejecting container/date fields and malformed cache roots.
 static NSString *PXStorageScalarField(id settings, NSString *key) {
-    if (![settings isKindOfClass:NSDictionary.class]) return nil;
-    id value = settings[key];
-    if ([value isKindOfClass:NSString.class]) return value;
-    return [value isKindOfClass:NSNumber.class] ? [value stringValue] : nil;
+    id value = nil;
+    @try {
+        if (![settings isKindOfClass:NSDictionary.class]) return nil;
+        value = settings[key];
+        if ([value isKindOfClass:NSString.class]) return value;
+        return [value isKindOfClass:NSNumber.class] ? [value stringValue] : nil;
+    } @finally { value = nil; settings = nil; key = nil; }
+}
+// Freeze owned scalar strings while keeping legacy numeric types and shallow
+// metadata. All foreign copy/access work stays outside the cache monitor.
+static NSDictionary *PXStorageFrozenRecord(id record) {
+    NSMutableDictionary *candidate = nil;
+    id value = nil;
+    @try {
+        if (![record isKindOfClass:NSDictionary.class]) return nil;
+        candidate = [record mutableCopy];
+        for (NSString *key in @[@"TotalStorage", @"FreeStorage", @"FilesystemType"]) {
+            value = candidate[key];
+            if ([value isKindOfClass:NSString.class]) candidate[key] = [value copy];
+            value = nil;
+        }
+        return [candidate copy];
+    } @finally { value = nil; candidate = nil; record = nil; }
+}
+static BOOL PXStorageSuperseded(NSError **error) {
+    if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios.storage-display" code:3
+        userInfo:@{NSLocalizedDescriptionKey: @"Storage cache operation was superseded"}];
+    return NO;
 }
 
 @interface StorageManager ()
 - (NSString *)randomizeStorageCapacityForProfile:(NSString *)profileID;
 - (void)setDefaultStorageForProfile:(NSString *)profileID;
 - (BOOL)persistStorageToProfile:(NSString *)profileID current:(BOOL)current error:(NSError **)error;
+- (uint64_t)storageCacheRevision;
+- (uint64_t)beginStorageCacheWorkIfRevision:(uint64_t)revision;
+- (uint64_t)beginStorageCacheWork;
+- (BOOL)storageCacheRevisionIsCurrent:(uint64_t)revision;
+- (NSDictionary *)captureStorageCache:(uint64_t *)revision;
+- (BOOL)publishStorageCache:(NSDictionary *)candidate revision:(uint64_t)revision;
+- (void)setStorageScalar:(id)value key:(NSString *)key;
+- (void)setDefaultStorageForProfile:(NSString *)profileID revision:(uint64_t)revision;
+- (BOOL)loadFromProfile:(NSString *)profileId revision:(uint64_t)revision;
+- (BOOL)persistStorageRecord:(NSDictionary *)record revision:(uint64_t)revision profileID:(NSString *)profileID current:(BOOL)current error:(NSError **)error;
 @end
 
 @implementation StorageManager {
-    NSMutableDictionary *_storageSettings;
+    NSDictionary *_storageSettings;
+    uint64_t _storageCacheRevision;
     BOOL _isEnabled;
     BOOL _storagePreferenceWriteInFlight;
 }
@@ -52,7 +87,7 @@ static NSString *PXStorageScalarField(id settings, NSString *key) {
 - (instancetype)init {
     self = [super init];
     if (self) {
-        _storageSettings = [NSMutableDictionary dictionary];
+        _storageSettings = @{};
         
         // Load from settings
         NSUserDefaults *defaults = [[NSUserDefaults alloc] 
@@ -65,107 +100,282 @@ static NSString *PXStorageScalarField(id settings, NSString *key) {
     return self;
 }
 
-- (void)loadFromCurrentProfile {
-    // Get active profile ID
-    NSString *profilesPath = PXCurrentProfileInfoPath();
-    NSDictionary *currentProfileInfo = [NSDictionary dictionaryWithContentsOfFile:profilesPath];
-    
-    NSString *profileId = PXValidatedProfileID(currentProfileInfo[@"ProfileId"]);
-    if (profileId) {
-        [self loadFromProfile:profileId];
-    } else {
-        // Default values if no profile
-        [self setDefaultStorage];
+- (uint64_t)storageCacheRevision {
+    @synchronized (self) { return _storageCacheRevision; }
+}
+
+- (uint64_t)beginStorageCacheWorkIfRevision:(uint64_t)revision {
+    @synchronized (self) {
+        if (revision != _storageCacheRevision) return 0;
+        if (++_storageCacheRevision == 0) ++_storageCacheRevision;
+        return _storageCacheRevision;
     }
+}
+
+- (uint64_t)beginStorageCacheWork {
+    @synchronized (self) {
+        if (++_storageCacheRevision == 0) ++_storageCacheRevision;
+        return _storageCacheRevision;
+    }
+}
+
+- (BOOL)storageCacheRevisionIsCurrent:(uint64_t)revision {
+    @synchronized (self) { return revision == _storageCacheRevision; }
+}
+
+- (NSDictionary *)captureStorageCache:(uint64_t *)revision {
+    NSDictionary *root = nil;
+    @try {
+        @synchronized (self) {
+            root = _storageSettings;
+            if (revision) *revision = _storageCacheRevision;
+        }
+        return root;
+    } @finally { root = nil; }
+}
+
+- (BOOL)publishStorageCache:(NSDictionary *)candidate revision:(uint64_t)revision {
+    __attribute__((objc_precise_lifetime)) NSDictionary *old = nil;
+    @try {
+        @synchronized (self) {
+            if (revision != _storageCacheRevision) return NO;
+            old = _storageSettings;
+            _storageSettings = candidate;
+        }
+        return YES;
+    } @finally { old = nil; candidate = nil; }
+}
+
+- (void)setStorageScalar:(id)value key:(NSString *)key {
+    uint64_t observed = [self storageCacheRevision];
+    NSDictionary *base = nil, *record = nil;
+    NSMutableDictionary *candidate = nil;
+    id frozen = nil;
+    NSError *error = nil;
+    @try {
+        if (value && ![value isKindOfClass:NSString.class] && ![value isKindOfClass:NSNumber.class]) return;
+        frozen = [value copy];
+        uint64_t revision = [self beginStorageCacheWorkIfRevision:observed];
+        if (!revision) return;
+        base = [self currentStorageInfo];
+        if (![self storageCacheRevisionIsCurrent:revision]) return;
+        candidate = [base mutableCopy];
+        candidate[key] = frozen; // Nil retains the legacy remove-and-autosave policy.
+        record = PXStorageFrozenRecord(candidate);
+        if (![self publishStorageCache:record revision:revision]) return;
+        if (![self persistStorageRecord:record revision:revision profileID:nil current:YES error:&error])
+            PXLog(@"[StorageManager] Failed to commit current storage: %@", error);
+    } @finally { error = nil; frozen = nil; record = nil; candidate = nil; base = nil; value = nil; key = nil; }
+}
+
+- (void)setDefaultStorageForProfile:(NSString *)profileID revision:(uint64_t)revision {
+    NSString *capacity = nil;
+    id prepared = nil;
+    NSDictionary *storageInfo = nil, *base = nil, *record = nil;
+    NSMutableDictionary *candidate = nil;
+    @try {
+        if (![self storageCacheRevisionIsCurrent:revision]) return;
+        capacity = [self randomizeStorageCapacityForProfile:profileID];
+        if (![self storageCacheRevisionIsCurrent:revision]) return;
+        prepared = [self generateStorageForCapacity:capacity];
+        if (![self storageCacheRevisionIsCurrent:revision]) return;
+        storageInfo = [prepared isKindOfClass:NSDictionary.class] ? prepared : nil;
+        base = [self currentStorageInfo];
+        candidate = [base mutableCopy];
+        // Missing preparation clears these fields, preserving unrelated metadata.
+        candidate[@"TotalStorage"] = storageInfo[@"TotalStorage"];
+        candidate[@"FreeStorage"] = storageInfo[@"FreeStorage"];
+        candidate[@"FilesystemType"] = storageInfo[@"FilesystemType"];
+        record = PXStorageFrozenRecord(candidate);
+        [self publishStorageCache:record revision:revision];
+    } @finally { record = nil; candidate = nil; base = nil; storageInfo = nil; prepared = nil; capacity = nil; profileID = nil; }
+}
+
+- (BOOL)loadFromProfile:(NSString *)profileId revision:(uint64_t)revision {
+    NSString *profileDir = nil, *storagePath = nil;
+    NSDictionary *savedSettings = nil, *record = nil;
+    @try {
+        profileId = [PXValidatedProfileID(profileId) copy];
+        if (!profileId || ![self storageCacheRevisionIsCurrent:revision]) return NO;
+        profileDir = PXProfileRootPath(profileId);
+        storagePath = [profileDir stringByAppendingPathComponent:@"storage.plist"];
+        savedSettings = [NSDictionary dictionaryWithContentsOfFile:storagePath];
+        if (![self storageCacheRevisionIsCurrent:revision]) return NO;
+        if (savedSettings) {
+            record = PXStorageFrozenRecord(savedSettings);
+            return record && [self publishStorageCache:record revision:revision];
+        }
+        [self setDefaultStorageForProfile:profileId revision:revision];
+        return NO;
+    } @finally { record = nil; savedSettings = nil; storagePath = nil; profileDir = nil; profileId = nil; }
+}
+
+- (BOOL)persistStorageRecord:(NSDictionary *)record revision:(uint64_t)revision profileID:(NSString *)profileID current:(BOOL)current error:(NSError **)error {
+    NSString *explicitID = nil, *storagePath = nil;
+    NSString *(^resolver)(void) = nil;
+    BOOL (^writeBody)(PXRuntimeSourceTransaction *, NSError **) = nil;
+    PXProfileArtifactMutation *mutation = nil;
+    NSDictionary *prepared = nil;
+    @try {
+        if (![self storageCacheRevisionIsCurrent:revision]) return PXStorageSuperseded(error);
+        explicitID = [PXValidatedProfileID(profileID) copy];
+        resolver = ^NSString *{
+            NSDictionary *selection = nil;
+            @try {
+                if (!current) return explicitID;
+                selection = [NSDictionary dictionaryWithContentsOfFile:PXCurrentProfileInfoPath()];
+                return PXValidatedProfileID(selection[@"ProfileId"]);
+            } @finally { selection = nil; }
+        };
+        mutation = [PXProfileArtifactMutation acquireWithProfileIDResolver:resolver error:error];
+        resolver = nil;
+        @try {
+            if (!mutation) return NO;
+            if (![self storageCacheRevisionIsCurrent:revision]) return PXStorageSuperseded(error);
+            storagePath = [mutation.profileDirectory stringByAppendingPathComponent:@"storage.plist"];
+            // Copy the retained entry record, never a newer cache root after lookup.
+            prepared = [record copy];
+            if (![self storageCacheRevisionIsCurrent:revision]) return PXStorageSuperseded(error);
+            writeBody = ^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+                @try {
+                    if (![self storageCacheRevisionIsCurrent:revision]) return PXStorageSuperseded(writeError);
+                    return [tx setDictionary:prepared atPath:storagePath error:writeError];
+                } @finally { tx = nil; }
+            };
+            return [mutation performSourceWrite:writeBody error:error];
+        } @finally { [mutation invalidate]; }
+    } @finally { writeBody = nil; resolver = nil; prepared = nil; mutation = nil; storagePath = nil; explicitID = nil; record = nil; profileID = nil; }
+}
+
+- (void)loadFromCurrentProfile {
+    uint64_t revision = [self beginStorageCacheWork];
+    NSDictionary *currentProfileInfo = nil;
+    NSString *profileId = nil;
+    @try {
+        currentProfileInfo = [NSDictionary dictionaryWithContentsOfFile:PXCurrentProfileInfoPath()];
+        profileId = [PXValidatedProfileID(currentProfileInfo[@"ProfileId"]) copy];
+        if (profileId) [self loadFromProfile:profileId revision:revision];
+        else { profileId = PXActiveProfileID(); [self setDefaultStorageForProfile:profileId revision:revision]; }
+    } @finally { profileId = nil; currentProfileInfo = nil; }
 }
 
 - (void)setDefaultStorage {
-    [self setDefaultStorageForProfile:PXActiveProfileID()];
+    uint64_t revision = [self beginStorageCacheWork];
+    NSString *target = nil;
+    @try { target = PXActiveProfileID(); [self setDefaultStorageForProfile:target revision:revision]; }
+    @finally { target = nil; }
 }
 
 - (void)setDefaultStorageForProfile:(NSString *)profileID {
-    NSString *capacity = [self randomizeStorageCapacityForProfile:profileID];
-    id prepared = [self generateStorageForCapacity:capacity];
-    NSDictionary *storageInfo = [prepared isKindOfClass:NSDictionary.class] ? prepared : nil;
-    // Preserve missing/default-generation failure policy: these owned fields
-    // are cleared when no candidate exists; unrelated cache fields remain.
-    _storageSettings[@"TotalStorage"] = storageInfo[@"TotalStorage"];
-    _storageSettings[@"FreeStorage"] = storageInfo[@"FreeStorage"];
-    _storageSettings[@"FilesystemType"] = storageInfo[@"FilesystemType"];
+    uint64_t revision = [self beginStorageCacheWork];
+    @try { [self setDefaultStorageForProfile:profileID revision:revision]; }
+    @finally { profileID = nil; }
 }
 
 - (NSString *)randomizeStorageCapacity {
-    return [self randomizeStorageCapacityForProfile:PXActiveProfileID()];
+    NSString *target = nil;
+    @try { target = PXActiveProfileID(); return [self randomizeStorageCapacityForProfile:target]; }
+    @finally { target = nil; }
 }
 
 - (NSString *)randomizeStorageCapacityForProfile:(NSString *)profileID {
-    NSString *target = [PXValidatedProfileID(profileID) copy];
-    if (profileID && !target) return nil;
-    NSDictionary *deviceIDs = target.length ?
-        [NSDictionary dictionaryWithContentsOfFile:[PXProfileIdentityPath(target) stringByAppendingPathComponent:@"device_ids.plist"]] : nil;
-    return [self randomizeStorageCapacityForDeviceModel:deviceIDs[@"DeviceModel"]];
+    NSString *target = nil, *path = nil;
+    NSDictionary *deviceIDs = nil;
+    @try {
+        target = [PXValidatedProfileID(profileID) copy];
+        if (profileID && !target) return nil;
+        path = target.length ? [PXProfileIdentityPath(target) stringByAppendingPathComponent:@"device_ids.plist"] : nil;
+        deviceIDs = path ? [NSDictionary dictionaryWithContentsOfFile:path] : nil;
+        return [self randomizeStorageCapacityForDeviceModel:deviceIDs[@"DeviceModel"]];
+    } @finally { deviceIDs = nil; path = nil; target = nil; profileID = nil; }
 }
 
 - (NSString *)randomizeStorageCapacityForDeviceModel:(NSString *)deviceModel {
-    if (deviceModel && ![deviceModel isKindOfClass:NSString.class]) return nil;
-    IPhoneModelDB *modelDB = [IPhoneModelDB sharedManager];
-    id row = [modelDB specForProductType:deviceModel];
-    NSDictionary *modelSpec = [row isKindOfClass:NSDictionary.class] ? row : nil;
-    id canonical = modelSpec ? [modelDB canonicalHardwareSpecForProductType:deviceModel] : nil;
-    NSDictionary *specs = [canonical isKindOfClass:NSDictionary.class] ? canonical : nil;
+    IPhoneModelDB *modelDB = nil;
+    id row = nil, canonical = nil, fallback = nil;
+    NSDictionary *modelSpec = nil, *specs = nil, *cache = nil;
+    NSArray *rawCapacities = nil;
+    NSMutableArray<NSString *> *capacities = nil, *candidates = nil;
+    NSString *previous = nil;
+    @try {
+        if (deviceModel && ![deviceModel isKindOfClass:NSString.class]) return nil;
+        deviceModel = [deviceModel copy];
+        modelDB = [IPhoneModelDB sharedManager];
+        row = [modelDB specForProductType:deviceModel];
+        modelSpec = [row isKindOfClass:NSDictionary.class] ? row : nil;
+        canonical = modelSpec ? [modelDB canonicalHardwareSpecForProductType:deviceModel] : nil;
+        specs = [canonical isKindOfClass:NSDictionary.class] ? canonical : nil;
 
-    // Every iPhone is owned by the canonical model DB. Unknown/missing iPhone
-    // records fail closed instead of falling back to ProductType-prefix heuristics.
-    BOOL isIPhone = [deviceModel isKindOfClass:[NSString class]] && [deviceModel hasPrefix:@"iPhone"];
-    if (isIPhone && (!modelSpec || !specs.count)) return nil;
-    if (!specs.count) {
-        id fallback = [[DeviceModelManager sharedManager] deviceSpecificationsForModel:deviceModel];
-        specs = [fallback isKindOfClass:NSDictionary.class] ? fallback : nil;
-    }
+        // Every iPhone is owned by the canonical model DB. Unknown/missing iPhone
+        // records fail closed instead of falling back to ProductType-prefix heuristics.
+        BOOL isIPhone = [deviceModel isKindOfClass:[NSString class]] && [deviceModel hasPrefix:@"iPhone"];
+        if (isIPhone && (!modelSpec || !specs.count)) return nil;
+        if (!specs.count) {
+            fallback = [[DeviceModelManager sharedManager] deviceSpecificationsForModel:deviceModel];
+            specs = [fallback isKindOfClass:NSDictionary.class] ? fallback : nil;
+        }
 
-    NSArray *rawCapacities = [specs[@"storageCapacitiesGB"] isKindOfClass:[NSArray class]]
-        ? specs[@"storageCapacitiesGB"] : @[@64, @128, @256, @512];
-    NSMutableArray<NSString *> *capacities = [NSMutableArray array];
-    for (id raw in rawCapacities) {
-        NSInteger value = [raw respondsToSelector:@selector(integerValue)] ? [raw integerValue] : 0;
-        if (value > 0) [capacities addObject:[NSString stringWithFormat:@"%ld", (long)value]];
-    }
-    if (!capacities.count) [capacities addObjectsFromArray:@[@"64", @"128", @"256", @"512"]];
+        rawCapacities = [specs[@"storageCapacitiesGB"] isKindOfClass:[NSArray class]]
+            ? specs[@"storageCapacitiesGB"] : @[@64, @128, @256, @512];
+        capacities = [NSMutableArray array];
+        for (id raw in rawCapacities) {
+            NSInteger value = [raw respondsToSelector:@selector(integerValue)] ? [raw integerValue] : 0;
+            if (value > 0) [capacities addObject:[NSString stringWithFormat:@"%ld", (long)value]];
+        }
+        if (!capacities.count) [capacities addObjectsFromArray:@[@"64", @"128", @"256", @"512"]];
 
-    NSString *previous = PXStorageScalarField(_storageSettings, @"TotalStorage");
-    NSMutableArray<NSString *> *candidates = capacities;
-    if (capacities.count > 1 && previous.length) {
-        candidates = [capacities mutableCopy];
-        [candidates removeObject:previous];
-        if (!candidates.count) candidates = capacities;
+        cache = [self currentStorageInfo];
+        previous = PXStorageScalarField(cache, @"TotalStorage");
+        candidates = capacities;
+        if (capacities.count > 1 && previous.length) {
+            candidates = [capacities mutableCopy];
+            [candidates removeObject:previous];
+            if (!candidates.count) candidates = capacities;
+        }
+        return candidates[arc4random_uniform((uint32_t)candidates.count)];
+    } @finally {
+        previous = nil; candidates = nil; capacities = nil; rawCapacities = nil; cache = nil;
+        specs = nil; modelSpec = nil; fallback = nil; canonical = nil; row = nil; modelDB = nil; deviceModel = nil;
     }
-    return candidates[arc4random_uniform((uint32_t)candidates.count)];
 }
 
 - (NSDictionary *)generateStorageForCapacity:(NSString *)capacity {
-    return PXPrepareRuntimeStorage(capacity);
+    @try { return PXPrepareRuntimeStorage(capacity); }
+    @finally { capacity = nil; }
 }
 
 - (NSDictionary *)currentStorageInfo {
-    return [_storageSettings copy] ?: @{};
+    NSDictionary *root = nil, *snapshot = nil;
+    @try {
+        root = [self captureStorageCache:NULL];
+        snapshot = [root copy];
+        return [snapshot isKindOfClass:NSDictionary.class] ? snapshot : @{};
+    } @finally { snapshot = nil; root = nil; }
 }
 
 - (void)adoptCommittedStorageInfo:(NSDictionary *)storageInfo {
-    _storageSettings = [storageInfo mutableCopy];
+    uint64_t observed = [self storageCacheRevision];
+    NSDictionary *record = nil;
+    @try {
+        if (storageInfo && ![storageInfo isKindOfClass:NSDictionary.class]) return;
+        record = PXStorageFrozenRecord(storageInfo);
+        uint64_t revision = [self beginStorageCacheWorkIfRevision:observed];
+        if (revision) [self publishStorageCache:record revision:revision];
+    } @finally { record = nil; storageInfo = nil; }
 }
 
 #pragma mark - Basic Storage Values
 
 - (NSString *)totalStorageCapacity {
-    return PXStorageScalarField(_storageSettings, @"TotalStorage");
+    return PXStorageScalarField([self currentStorageInfo], @"TotalStorage");
 }
 
 - (NSString *)freeStorageSpace {
-    return PXStorageScalarField(_storageSettings, @"FreeStorage");
+    return PXStorageScalarField([self currentStorageInfo], @"FreeStorage");
 }
 
 - (NSString *)filesystemType {
-    return PXStorageScalarField(_storageSettings, @"FilesystemType");
+    return PXStorageScalarField([self currentStorageInfo], @"FilesystemType");
 }
 
 #pragma mark - Advanced Storage Values
@@ -270,125 +480,128 @@ static NSString *PXStorageScalarField(id settings, NSString *key) {
 #pragma mark - Storage Settings
 
 - (void)setTotalStorageCapacity:(NSString *)capacity {
-    _storageSettings[@"TotalStorage"] = capacity;
-    [self saveToCurrentProfile];
+    @try { [self setStorageScalar:capacity key:@"TotalStorage"]; }
+    @finally { capacity = nil; }
 }
 
 - (void)setFreeStorageSpace:(NSString *)freeSpace {
-    _storageSettings[@"FreeStorage"] = freeSpace;
-    [self saveToCurrentProfile];
+    @try { [self setStorageScalar:freeSpace key:@"FreeStorage"]; }
+    @finally { freeSpace = nil; }
 }
 
 - (void)setFilesystemType:(NSString *)fsType {
-    _storageSettings[@"FilesystemType"] = fsType;
-    [self saveToCurrentProfile];
+    @try { [self setStorageScalar:fsType key:@"FilesystemType"]; }
+    @finally { fsType = nil; }
 }
 
 #pragma mark - Profile Management
 
 - (void)saveToCurrentProfile {
     NSError *error = nil;
-    if (![self persistStorageToProfile:nil current:YES error:&error])
-        PXLog(@"[StorageManager] Failed to commit current storage: %@", error);
+    @try {
+        if (![self persistStorageToProfile:nil current:YES error:&error])
+            PXLog(@"[StorageManager] Failed to commit current storage: %@", error);
+    } @finally { error = nil; }
 }
 
 - (void)saveToProfile:(NSString *)profileId {
-    if (!profileId) return;
     NSError *error = nil;
-    if (![self persistStorageToProfile:profileId current:NO error:&error])
-        PXLog(@"[StorageManager] Failed to commit storage for %@: %@", profileId, error);
+    @try {
+        if (!profileId) return;
+        if (![self persistStorageToProfile:profileId current:NO error:&error])
+            PXLog(@"[StorageManager] Failed to commit storage for %@: %@", profileId, error);
+    } @finally { error = nil; profileId = nil; }
 }
 
 - (BOOL)commitDisplayStorageInfo:(NSDictionary *)values updateFilesystem:(BOOL)updateFilesystem error:(NSError **)error {
     if (error) *error = nil;
-    if (![values isKindOfClass:NSDictionary.class]) {
-        if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios.storage-display" code:1 userInfo:@{NSLocalizedDescriptionKey: @"Invalid storage display values"}];
-        return NO;
-    }
-    id rawTotal = values[@"TotalStorage"], rawFree = values[@"FreeStorage"], rawFilesystem = values[@"FilesystemType"];
-    if (![rawTotal isKindOfClass:NSString.class] || ![rawFree isKindOfClass:NSString.class] ||
-        (updateFilesystem && rawFilesystem && ![rawFilesystem isKindOfClass:NSString.class])) {
-        if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios.storage-display" code:1 userInfo:@{NSLocalizedDescriptionKey: @"Invalid storage display scalar"}];
-        return NO;
-    }
-    // Freeze caller-owned strings before target resolution. Generation and
-    // display formatting stay outside this API; no setter can autosave a prefix.
-    NSString *total = [rawTotal copy], *free = [rawFree copy];
-    NSString *filesystem = updateFilesystem ? [rawFilesystem copy] : nil;
-    // A nested SourceStore body can only promise staged success. Reject it
-    // before lifecycle/target/cache work, so YES below always acknowledges commit.
-    if (!PXPerformStandaloneRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **admissionError) {
-        (void)tx; (void)admissionError; return YES;
-    }, error)) return NO;
-    PXProfileArtifactMutation *mutation = [PXProfileArtifactMutation acquireWithProfileIDResolver:^NSString *{
-        NSDictionary *selection = [NSDictionary dictionaryWithContentsOfFile:PXCurrentProfileInfoPath()];
-        return PXValidatedProfileID(selection[@"ProfileId"]);
-    } error:error];
+    uint64_t observed = [self storageCacheRevision];
+    NSDictionary *input = nil, *base = nil;
+    id rawTotal = nil, rawFree = nil, rawFilesystem = nil;
+    NSString *total = nil, *free = nil, *filesystem = nil, *path = nil;
+    NSMutableDictionary *candidate = nil;
+    __block NSDictionary *adoptable = nil;
+    PXProfileArtifactMutation *mutation = nil;
+    NSString *(^resolver)(void) = nil;
+    BOOL (^writeBody)(PXRuntimeSourceTransaction *, NSError **) = nil;
     @try {
-        if (!mutation) return NO;
-        id base = [_storageSettings copy] ?: @{};
-        if (![base isKindOfClass:NSDictionary.class]) {
-            if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios.storage-display" code:2 userInfo:@{NSLocalizedDescriptionKey: @"Invalid storage cache root"}];
+        if (![values isKindOfClass:NSDictionary.class]) {
+            if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios.storage-display" code:1 userInfo:@{NSLocalizedDescriptionKey: @"Invalid storage display values"}];
             return NO;
         }
-        NSMutableDictionary *candidate = [base mutableCopy];
-        candidate[@"TotalStorage"] = total; candidate[@"FreeStorage"] = free;
-        if (updateFilesystem) candidate[@"FilesystemType"] = filesystem;
-        NSString *path = [mutation.profileDirectory stringByAppendingPathComponent:@"storage.plist"];
-        __block NSMutableDictionary *adoptable = nil;
-        BOOL committed = [mutation performSourceWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
-            if (![tx setDictionary:candidate atPath:path error:writeError]) return NO;
-            NSDictionary *staged = [tx dictionaryAtPath:path error:writeError];
-            if (!staged) return NO;
-            // Allocate the detached cache before acknowledgement; failure here
-            // still aborts staging. After commit only the private pointer changes.
-            adoptable = [staged mutableCopy];
-            return adoptable != nil;
-        } error:error];
-        if (!committed) return NO;
-        // Keep lifecycle ownership through this direct cache adoption. No
-        // overridable provider/setter/notification callback runs in this step.
-        _storageSettings = adoptable;
-        return YES;
-    } @finally { [mutation invalidate]; }
+        input = [values copy];
+        rawTotal = input[@"TotalStorage"]; rawFree = input[@"FreeStorage"]; rawFilesystem = input[@"FilesystemType"];
+        if (![rawTotal isKindOfClass:NSString.class] || ![rawFree isKindOfClass:NSString.class] ||
+            (updateFilesystem && rawFilesystem && ![rawFilesystem isKindOfClass:NSString.class])) {
+            if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios.storage-display" code:1 userInfo:@{NSLocalizedDescriptionKey: @"Invalid storage display scalar"}];
+            return NO;
+        }
+        total = [rawTotal copy]; free = [rawFree copy];
+        filesystem = updateFilesystem ? [rawFilesystem copy] : nil;
+        if (!PXPerformStandaloneRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **admissionError) {
+            @try { (void)admissionError; return YES; } @finally { tx = nil; }
+        }, error)) return NO;
+        if (![self storageCacheRevisionIsCurrent:observed]) return PXStorageSuperseded(error);
+        resolver = ^NSString *{
+            NSDictionary *selection = nil;
+            @try {
+                selection = [NSDictionary dictionaryWithContentsOfFile:PXCurrentProfileInfoPath()];
+                return PXValidatedProfileID(selection[@"ProfileId"]);
+            } @finally { selection = nil; }
+        };
+        mutation = [PXProfileArtifactMutation acquireWithProfileIDResolver:resolver error:error];
+        resolver = nil;
+        @try {
+            if (!mutation) return NO;
+            uint64_t revision = [self beginStorageCacheWorkIfRevision:observed];
+            if (!revision) return PXStorageSuperseded(error);
+            base = [self currentStorageInfo];
+            if (![self storageCacheRevisionIsCurrent:revision]) return PXStorageSuperseded(error);
+            if (![base isKindOfClass:NSDictionary.class]) {
+                if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios.storage-display" code:2 userInfo:@{NSLocalizedDescriptionKey: @"Invalid storage cache root"}];
+                return NO;
+            }
+            candidate = [base mutableCopy];
+            candidate[@"TotalStorage"] = total; candidate[@"FreeStorage"] = free;
+            if (updateFilesystem) candidate[@"FilesystemType"] = filesystem;
+            path = [mutation.profileDirectory stringByAppendingPathComponent:@"storage.plist"];
+            writeBody = ^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+                NSDictionary *staged = nil;
+                @try {
+                    if (![self storageCacheRevisionIsCurrent:revision]) return PXStorageSuperseded(writeError);
+                    if (![tx setDictionary:candidate atPath:path error:writeError]) return NO;
+                    staged = [tx dictionaryAtPath:path error:writeError];
+                    if (!staged) return NO;
+                    adoptable = PXStorageFrozenRecord(staged);
+                    return adoptable != nil;
+                } @finally { staged = nil; tx = nil; }
+            };
+            BOOL committed = [mutation performSourceWrite:writeBody error:error];
+            if (!committed) return NO;
+            // A newer cache intent cannot be undone by this acknowledged commit.
+            [self publishStorageCache:adoptable revision:revision];
+            return YES;
+        } @finally { [mutation invalidate]; }
+    } @finally {
+        writeBody = nil; resolver = nil; mutation = nil; adoptable = nil; candidate = nil;
+        path = nil; filesystem = nil; free = nil; total = nil;
+        rawFilesystem = nil; rawFree = nil; rawTotal = nil; base = nil; input = nil; values = nil;
+    }
 }
 
 - (BOOL)persistStorageToProfile:(NSString *)profileID current:(BOOL)current error:(NSError **)error {
-    NSString *explicitID = PXValidatedProfileID(profileID);
-    PXProfileArtifactMutation *mutation = [PXProfileArtifactMutation acquireWithProfileIDResolver:^NSString *{
-        // Preserve the canonical selection-file authority of the old current
-        // writer. Resolve once, only after lifecycle ownership is acquired.
-        if (!current) return explicitID;
-        NSDictionary *selection = [NSDictionary dictionaryWithContentsOfFile:PXCurrentProfileInfoPath()];
-        return PXValidatedProfileID(selection[@"ProfileId"]);
-    } error:error];
+    uint64_t revision = 0;
+    NSDictionary *record = nil;
     @try {
-        if (!mutation) return NO;
-        NSString *storagePath = [mutation.profileDirectory stringByAppendingPathComponent:@"storage.plist"];
-        NSDictionary *prepared = [_storageSettings copy];
-        return [mutation performSourceWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
-            return [tx setDictionary:prepared atPath:storagePath error:writeError];
-        } error:error];
-    } @finally { [mutation invalidate]; }
+        record = [self captureStorageCache:&revision];
+        return [self persistStorageRecord:record revision:revision profileID:profileID current:current error:error];
+    } @finally { record = nil; profileID = nil; }
 }
 
 - (BOOL)loadFromProfile:(NSString *)profileId {
-    profileId = [PXValidatedProfileID(profileId) copy];
-    if (!profileId) return NO;
-    
-    NSString *profileDir = PXProfileRootPath(profileId);
-    NSString *storagePath = [profileDir stringByAppendingPathComponent:@"storage.plist"];
-    
-    NSDictionary *savedSettings = [NSDictionary dictionaryWithContentsOfFile:storagePath];
-    if (savedSettings) {
-        [_storageSettings removeAllObjects];
-        [_storageSettings addEntriesFromDictionary:savedSettings];
-        return YES;
-    }
-    
-    // If no saved settings, use defaults
-    [self setDefaultStorageForProfile:profileId];
-    return NO;
+    uint64_t revision = [self beginStorageCacheWork];
+    @try { return [self loadFromProfile:profileId revision:revision]; }
+    @finally { profileId = nil; }
 }
 
 #pragma mark - Status Control

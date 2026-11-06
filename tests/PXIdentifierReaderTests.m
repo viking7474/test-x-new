@@ -14,6 +14,9 @@ static NSString *gDirectory;
 static PXRuntimeReadSnapshot *gView;
 static NSDictionary *gProviderValues;
 static id gStorageOverride;
+static NSUInteger gStorageSnapshots, gStorageLegacyReads;
+static BOOL gThrowStorageSnapshot;
+static void (^gDuringStorageSnapshot)(void);
 static id gWiFiOverride;
 static NSUInteger gWiFiSnapshots, gWiFiLegacyReads;
 static BOOL gThrowWiFiSnapshot;
@@ -119,8 +122,8 @@ static PXIdentitySnapshot *PXFixtureCurrentIdentitySnapshot(void) { gCaptures++;
 @end
 @implementation StorageManager
 + (instancetype)sharedManager { return gStorageOverride ?: [self new]; }
-- (NSString *)totalStorageCapacity { return PXReaderProviderValue(@"total", nil); }
-- (NSString *)freeStorageSpace { return PXReaderProviderValue(@"free", nil); }
+- (NSString *)totalStorageCapacity { gStorageLegacyReads++; return PXReaderProviderValue(@"total", nil); }
+- (NSString *)freeStorageSpace { gStorageLegacyReads++; return PXReaderProviderValue(@"free", nil); }
 - (NSString *)randomizeStorageCapacity { return PXReaderProviderValue(@"capacity", @"64"); }
 - (NSDictionary *)generateStorageForCapacity:(NSString *)capacity {
     CHECK([capacity isKindOfClass:NSString.class], "storage generation receives only scalar capacity strings");
@@ -129,6 +132,23 @@ static PXIdentitySnapshot *PXFixtureCurrentIdentitySnapshot(void) { gCaptures++;
 - (void)setTotalStorageCapacity:(NSString *)value { [gStorageWrites addObject:@[@"total", value ?: NSNull.null]]; }
 - (void)setFreeStorageSpace:(NSString *)value { [gStorageWrites addObject:@[@"free", value ?: NSNull.null]]; }
 - (void)setFilesystemType:(NSString *)value { [gStorageWrites addObject:@[@"filesystem", value ?: NSNull.null]]; }
+@end
+@interface PXReaderSnapshotStorage : StorageManager
+- (NSDictionary *)currentStorageInfo;
+@end
+@implementation PXReaderSnapshotStorage
+- (NSDictionary *)currentStorageInfo {
+    id result = nil;
+    void (^callback)(void) = nil;
+    @try {
+        gStorageSnapshots++;
+        if (gThrowStorageSnapshot) [NSException raise:@"fixture.storage-snapshot" format:@"snapshot failed"];
+        result = PXReaderProviderValue(@"storageSnapshot", nil);
+        callback = gDuringStorageSnapshot; gDuringStorageSnapshot = nil;
+        if (callback) callback();
+        return result;
+    } @finally { callback = nil; result = nil; }
+}
 @end
 // Deliberately lacks all setters. Its generated values must still be displayable.
 @interface PXReaderAtomicStorage : StorageManager
@@ -279,6 +299,42 @@ static void TestManagerReaders(PXReaderFixture *reader) {
     CHECK(![reader setCustomSerialNumber:(id)@12345678] && ![reader setCustomSerialNumber:@"short"] && saves == gSaves,
           "invalid serial rejected before invoking custom persistence");
     CHECK([reader setCustomSerialNumber:@"12345678"] && [reader setCustomDeviceName:@""], "serial minimum and device name empty-input delegation preserved");
+}
+
+static void TestStorageDisplaySnapshot(PXReaderFixture *reader) {
+    Put(@"device_ids.plist", @{});
+    [NSFileManager.defaultManager removeItemAtPath:File(@"storage.plist") error:NULL];
+    gStorageOverride = [PXReaderSnapshotStorage new];
+    @try {
+        gStorageSnapshots = gStorageLegacyReads = 0;
+        gProviderValues = @{ @"storageSnapshot": @{ @"TotalStorage": @"128", @"FreeStorage": @"32" } };
+        gDuringStorageSnapshot = ^{ gProviderValues = @{ @"total": @"512", @"free": @"123" }; };
+        CHECK([[reader currentValueForIdentifier:@"StorageSystem"] isEqual:@"Total: 128 GB, Free: 32 GB"] && gStorageSnapshots == 1 && !gStorageLegacyReads,
+              "modern storage display formats one snapshot even when provider changes before return");
+        for (id invalid in @[NSNull.null, @42, @[], @"bad root", @{}, @{ @"TotalStorage": @"128", @"FreeStorage": @[] }]) {
+            gProviderValues = @{ @"storageSnapshot": invalid, @"total": @"512", @"free": @"123" };
+            CHECK(!PXIdentifierStorageDisplay(gStorageOverride) && !gStorageLegacyReads,
+                  "malformed modern storage snapshot never mixes with separate legacy getters");
+        }
+        gProviderValues = @{ @"total": @"512", @"free": @"123" };
+        CHECK(!PXIdentifierStorageDisplay(gStorageOverride) && !gStorageLegacyReads, "nil modern storage snapshot never retries legacy getters");
+        gProviderValues = @{ @"storageSnapshot": @{ @"TotalStorage": @128, @"FreeStorage": @32 } };
+        CHECK([PXIdentifierStorageDisplay(gStorageOverride) isEqual:@"Total: 128 GB, Free: 32 GB"], "storage snapshot display preserves legacy numeric formatting");
+        gProviderValues = @{ @"storageSnapshot": @{ @"TotalStorage": @"", @"FreeStorage": @"" } };
+        CHECK([PXIdentifierStorageDisplay(gStorageOverride) isEqual:@"Total:  GB, Free:  GB"], "storage snapshot display preserves empty string formatting");
+        gThrowStorageSnapshot = YES;
+        CHECK(!PXIdentifierStorageDisplay(gStorageOverride) && !gStorageLegacyReads, "storage snapshot exception stays unavailable without getter retry");
+        gThrowStorageSnapshot = NO;
+        NSUInteger reads = gStorageSnapshots;
+        Put(@"device_ids.plist", @{ @"StorageSystem": @"canonical storage" });
+        CHECK([[reader currentValueForIdentifier:@"StorageSystem"] isEqual:@"canonical storage"] && gStorageSnapshots == reads, "canonical storage retains precedence over modern cache snapshot");
+        gProviderValues = @{ @"total": @"512", @"free": @"123" };
+        CHECK([PXIdentifierStorageDisplay([StorageManager new]) isEqual:@"Total: 512 GB, Free: 123 GB"] && gStorageLegacyReads == 2,
+              "legacy storage provider without snapshot retains individual getter compatibility");
+    } @finally {
+        gStorageOverride = nil; gDuringStorageSnapshot = nil; gThrowStorageSnapshot = NO; gProviderValues = nil;
+        Put(@"device_ids.plist", @{});
+    }
 }
 
 static void TestWiFiDisplaySnapshot(PXReaderFixture *reader) {
@@ -516,7 +572,7 @@ int main(void) {
         gDirectory = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
         CHECK([NSFileManager.defaultManager createDirectoryAtPath:gDirectory withIntermediateDirectories:YES attributes:nil error:NULL], "reader directory created");
         PXReaderFixture *reader = [PXReaderFixture new];
-        @try { TestManagerReaders(reader); TestProviderFallbacks(reader); TestWiFiDisplaySnapshot(reader); TestInjectedReaders(reader); }
+        @try { TestManagerReaders(reader); TestProviderFallbacks(reader); TestWiFiDisplaySnapshot(reader); TestStorageDisplaySnapshot(reader); TestInjectedReaders(reader); }
         @catch (NSException *exception) { gFailures++; fprintf(stderr, "FAIL: unexpected reader exception: %s\n", exception.description.UTF8String); }
         [NSFileManager.defaultManager removeItemAtPath:gDirectory error:NULL];
         fprintf(stdout, "Identifier reader safety: %lu/%lu checks passed\n", (unsigned long)(gChecks - gFailures), (unsigned long)gChecks);

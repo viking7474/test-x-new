@@ -144,7 +144,15 @@ def source_contracts():
         for key in keys:
             assert f'PXIdentifierDisplayString({receiver}[@"{key}"])' in display
     for selector in ('totalStorageCapacity', 'freeStorageSpace'):
-        assert f'PXIdentifierDisplayString([sharedManager {selector}])' in display
+        assert f'PXIdentifierDisplayString([manager {selector}])' in method(manager, 'static NSString *PXIdentifierStorageDisplay(id manager)')
+    storage_display = method(manager, 'static NSString *PXIdentifierStorageDisplay(id manager)')
+    assert 'PXIdentifierStorageDisplay(sharedManager)' in display
+    assert storage_display.count('[manager currentStorageInfo]') == 1
+    assert 'respondsToSelector:@selector(currentStorageInfo)' in storage_display
+    assert '@catch' in storage_display and 'info = nil; total = nil; free = nil; manager = nil;' in storage_display
+    assert 'generateStorageForCapacity:' not in storage_display and 'saveTo' not in storage_display
+    assert read('tests/PXIdentifierReaderTests.m').count('TestStorageDisplaySnapshot(reader);') == 1
+    assert 'malformed modern storage snapshot never mixes with separate legacy getters' in read('tests/PXIdentifierReaderTests.m')
     wifi_display = method(manager, 'static NSString *PXIdentifierWiFiDisplay(id manager)')
     assert 'PXIdentifierWiFiDisplay(sharedManager)' in display
     assert manager.index('static NSString *PXIdentifierWiFiDisplay(id manager) {') < manager.index(READER_SIGNATURES[1] + ' {')
@@ -342,6 +350,7 @@ def generate_native_fragments(folder):
     (folder / 'PXReaderDeclarations.inc').write_text('\n'.join(m.split(' {', 1)[0] + ';' for m in reader_methods), encoding='utf-8')
     (folder / 'PXReaderMethods.inc').write_text('\n\n'.join(reader_methods), encoding='utf-8')
     reader_statics = [method(manager, 'static NSString *PXIdentifierDisplayString(id value)'),
+                      method(manager, 'static NSString *PXIdentifierStorageDisplay(id manager)'),
                       method(manager, 'static NSString *PXIdentifierWiFiDisplay(id manager)'),
                       method(manager, 'static NSString *PXIdentifierBatteryPercentage(id value)'),
                       method(manager, 'static BOOL PXRuntimeSnapshotImpliesIdentifierEnabled(NSString *type, PXRuntimeReadSnapshot *runtimeView)'),

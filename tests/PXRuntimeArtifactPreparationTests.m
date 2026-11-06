@@ -228,7 +228,8 @@ static void (^gDuringStoragePreferenceMirror)(void);
 @end
 #include "PXStorageReadHelpers.inc"
 @interface PXPreparedStorageFixture : NSObject {
-    NSMutableDictionary *_storageSettings;
+    NSDictionary *_storageSettings;
+    uint64_t _storageCacheRevision;
     BOOL _isEnabled;
     BOOL _storagePreferenceWriteInFlight;
 }
@@ -966,6 +967,20 @@ static void TestStorageDisplayCommit(void) {
           ![manager currentStorageInfo][@"FilesystemType"] && ![NSDictionary dictionaryWithContentsOfFile:path][@"FilesystemType"],
           "display storage absent owned filesystem retains removal semantics");
 
+    NSDictionary *newerCache = @{ @"TotalStorage": @"1024", @"FreeStorage": @"333", @"FilesystemType": @"0x1A" };
+    __block BOOL adoptedNewer = NO;
+    gStore.testCheckpoint = ^(NSString *phase) {
+        if ([phase isEqual:@"commit-written"] && !adoptedNewer) {
+            adoptedNewer = YES; [manager adoptCommittedStorageInfo:newerCache];
+        }
+    };
+    CHECK([manager commitDisplayStorageInfo:values updateFilesystem:YES error:&error] && !error && adoptedNewer &&
+          [[manager currentStorageInfo] isEqual:newerCache] &&
+          [[NSDictionary dictionaryWithContentsOfFile:path][@"TotalStorage"] isEqual:values[@"TotalStorage"]],
+          "acknowledged display storage source commit never replaces a newer cache adoption");
+    gStore.testCheckpoint = nil;
+    CHECK([manager commitDisplayStorageInfo:values updateFilesystem:YES error:&error] && !error,
+          "display storage publication race restores settled baseline");
     NSDictionary *before = AllArtifactFiles(), *cache = [manager currentStorageInfo];
     NSData *marker = [NSData dataWithContentsOfFile:Path(Path(gRoot, @"control"), @"commit.plist")];
     __block BOOL interrupted = NO;
