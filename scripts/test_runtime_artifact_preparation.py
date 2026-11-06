@@ -220,7 +220,28 @@ def source_contracts():
     assert 'return committed ? prepared : nil;' in owner and '@finally { [mutation invalidate]; }' in owner
     assert owner.index('PXPerformStandaloneRuntimeSourceWrite(') < owner.index('if (gWiFiHookResolving)') < owner.index('cacheReader(target, &cacheError)')
     assert '@finally { gWiFiHookResolving = NO; }' in owner
-    assert 'merged[@"WiFi"]' in owner and 'PXWiFiHookFreeze(PXPrepareRuntimeWiFiInfo())' in owner
+    assert 'merged[@"WiFi"] = display;' in owner and 'preparedInput = PXPrepareRuntimeWiFiInfo();' in owner
+    assert 'prepared = PXWiFiHookFreeze(preparedInput);' in owner
+    assert '@finally { candidate = nil; cacheError = nil; }' in owner
+    assert '@finally { target = nil; cacheReader = nil; profileID = nil; }' in owner
+    assert 'mutation = nil; resolved = nil; ids = nil; wifi = nil; selection = nil;' in owner
+    assert 'prepared = nil; preparedInput = nil; idsPath = nil; wifiPath = nil; cached = nil;' in owner
+    assert '@finally { display = nil; merged = nil; currentIDs = nil; currentWifi = nil; tx = nil; }' in owner
+    assert owner.index('[mutation invalidate]') < owner.index('mutation = nil; resolved = nil;') < owner.index('gWiFiHookResolving = NO;')
+    freeze = identifier.method(hook_resolver, 'static NSDictionary *PXWiFiHookFreeze(id info)')
+    assert freeze.index('PXWiFiHookHasPair(info)') < freeze.index('data = [NSPropertyListSerialization')
+    assert freeze.index('PXWiFiHookHasPair(info)') < freeze.index('@try', freeze.index('@try') + 4)
+    assert '@finally { frozen = nil; data = nil; info = nil; }' in freeze
+    pair = identifier.method(hook_resolver, 'static BOOL PXWiFiHookHasPair(id info)')
+    assert '@finally { info = nil; }' in pair
+    source_info = identifier.method(hook_resolver, 'static NSDictionary *PXWiFiHookSourceInfo(NSDictionary *wifi, NSDictionary *ids)')
+    assert '@finally { bssid = nil; ssid = nil; value = nil; ids = nil; wifi = nil; }' in source_info
+    selection_helper = identifier.method(hook_resolver, 'static NSDictionary *PXWiFiHookSelection(PXRuntimeSourceTransaction *tx, NSString *target, NSError **error)')
+    assert '@finally { legacy = nil; selected = nil; selection = nil; target = nil; tx = nil; }' in selection_helper
+    resolver_fixture = read('tests/PXWiFiResolverLifetimeTests.m')
+    check_macro_arity(resolver_fixture, 'PXWiFiResolverLifetimeTests.m')
+    assert '#include "PXWiFiResolverLifetime.inc"' in resolver_fixture
+    assert resolver_fixture.count('TestSuccessAndNestedGuard();') == 1
     for forbidden in ('createDirectoryAtPath:', 'writeToFile:', 'sharedManager', 'currentWiFiInfo', 'postNotification', 'dispatch_'):
         assert forbidden not in hook_resolver
     for field in ('SSID', 'BSSID'): assert f'[deviceIds[@"{field}"] isKindOfClass:NSString.class]' in wifi_reader
@@ -670,6 +691,8 @@ def source_contracts():
 
 
 def generate_native_fragments(folder):
+    resolver_source = read('common/PXWiFiHookResolver.m')
+    (folder / 'PXWiFiResolverLifetime.inc').write_text(resolver_source[resolver_source.index('static __thread BOOL gWiFiHookResolving'):], encoding='utf-8')
     for name, (source, signatures) in WRAPPERS.items():
         (folder / name).write_text('\n\n'.join(identifier.method(read(source), signature) for signature in signatures), encoding='utf-8')
     wifi_manager = read('common/WiFiManager.m')
@@ -784,6 +807,12 @@ def native_tests():
                             '-framework', 'Foundation', '-o', str(swizzle_binary)], check=True, cwd=ROOT, timeout=60)
             subprocess.run([str(swizzle_binary)], check=True, cwd=ROOT, timeout=60)
             for arc_mode, arc_flag in CF_EXCEPTION_MODES:
+                resolver_binary = folder / ('wifi-resolver-lifetime-' + scheme + '-' + arc_mode)
+                print('WiFi resolver lifetime native matrix:', scheme, arc_mode, flush=True)
+                subprocess.run(['xcrun', 'clang', '-O0', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions', arc_flag,
+                                '-Wall', '-Wextra', '-Werror=implicit-function-declaration', '-I', str(folder), '-I', str(ROOT / 'common'), *defines,
+                                str(ROOT / 'tests/PXWiFiResolverLifetimeTests.m'), '-framework', 'Foundation', '-o', str(resolver_binary)], check=True, cwd=ROOT, timeout=60)
+                subprocess.run([str(resolver_binary)], check=True, cwd=ROOT, timeout=60)
                 cf_binary = folder / ('wifi-cf-hooks-' + scheme + '-' + arc_mode)
                 print('WiFi CF native matrix:', scheme, arc_mode, flush=True)
                 subprocess.run(['xcrun', 'clang', '-O0', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions', arc_flag,

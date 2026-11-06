@@ -12,105 +12,142 @@ static BOOL PXWiFiHookError(NSError **error, NSInteger code, NSString *message) 
     return NO;
 }
 static BOOL PXWiFiHookHasPair(id info) {
-    return [info isKindOfClass:NSDictionary.class] && [info[@"ssid"] isKindOfClass:NSString.class] && [info[@"bssid"] isKindOfClass:NSString.class];
+    @try {
+        return [info isKindOfClass:NSDictionary.class] && [info[@"ssid"] isKindOfClass:NSString.class] && [info[@"bssid"] isKindOfClass:NSString.class];
+    } @finally { info = nil; }
 }
 static NSDictionary *PXWiFiHookFreeze(id info) {
-    if (!PXWiFiHookHasPair(info)) return nil;
+    NSData *data = nil;
+    id frozen = nil;
     @try {
-        NSData *data = [NSPropertyListSerialization dataWithPropertyList:info format:NSPropertyListBinaryFormat_v1_0 options:0 error:NULL];
-        id frozen = data ? [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:NULL] : nil;
-        return PXWiFiHookHasPair(frozen) ? frozen : nil;
-    } @catch (NSException *exception) { (void)exception; return nil; }
+        // Preserve predicate exceptions for the caller's provider/preparation catch.
+        if (!PXWiFiHookHasPair(info)) return nil;
+        @try {
+            data = [NSPropertyListSerialization dataWithPropertyList:info format:NSPropertyListBinaryFormat_v1_0 options:0 error:NULL];
+            frozen = data ? [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:NULL] : nil;
+            return PXWiFiHookHasPair(frozen) ? frozen : nil;
+        } @catch (__unused NSException *exception) { return nil; }
+    } @finally { frozen = nil; data = nil; info = nil; }
 }
 static NSDictionary *PXWiFiHookSourceInfo(NSDictionary *wifi, NSDictionary *ids) {
-    if (PXWiFiHookHasPair(wifi)) return wifi;
-    if ([ids[@"SSID"] isKindOfClass:NSString.class] && [ids[@"BSSID"] isKindOfClass:NSString.class])
-        return @{ @"ssid": ids[@"SSID"], @"bssid": ids[@"BSSID"], @"networkType": @"Infrastructure" };
-    NSString *value = [ids[@"WiFi"] isKindOfClass:NSString.class] ? ids[@"WiFi"] : nil;
-    NSRange open = value.length ? [value rangeOfString:@"("] : NSMakeRange(NSNotFound, 0);
-    NSRange close = value.length ? [value rangeOfString:@")" options:NSBackwardsSearch] : NSMakeRange(NSNotFound, 0);
-    if (open.location != NSNotFound && close.location != NSNotFound && close.location > open.location + 1) {
-        NSString *ssid = [[value substringToIndex:open.location] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-        NSString *bssid = [value substringWithRange:NSMakeRange(open.location + 1, close.location - open.location - 1)];
-        if (ssid.length && bssid.length) return @{ @"ssid": ssid, @"bssid": bssid, @"networkType": @"Infrastructure" };
-    }
-    return nil;
+    NSString *value = nil, *ssid = nil, *bssid = nil;
+    @try {
+        if (PXWiFiHookHasPair(wifi)) return wifi;
+        if ([ids[@"SSID"] isKindOfClass:NSString.class] && [ids[@"BSSID"] isKindOfClass:NSString.class])
+            return @{ @"ssid": ids[@"SSID"], @"bssid": ids[@"BSSID"], @"networkType": @"Infrastructure" };
+        value = [ids[@"WiFi"] isKindOfClass:NSString.class] ? ids[@"WiFi"] : nil;
+        NSRange open = value.length ? [value rangeOfString:@"("] : NSMakeRange(NSNotFound, 0);
+        NSRange close = value.length ? [value rangeOfString:@")" options:NSBackwardsSearch] : NSMakeRange(NSNotFound, 0);
+        if (open.location != NSNotFound && close.location != NSNotFound && close.location > open.location + 1) {
+            ssid = [[value substringToIndex:open.location] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            bssid = [value substringWithRange:NSMakeRange(open.location + 1, close.location - open.location - 1)];
+            if (ssid.length && bssid.length) return @{ @"ssid": ssid, @"bssid": bssid, @"networkType": @"Infrastructure" };
+        }
+        return nil;
+    } @finally { bssid = nil; ssid = nil; value = nil; ids = nil; wifi = nil; }
 }
 static NSDictionary *PXWiFiHookSelection(PXRuntimeSourceTransaction *tx, NSString *target, NSError **error) {
-    NSDictionary *selection = PXReadRuntimeProfileSelection(tx, PXCurrentProfileInfoPath(), PXLegacyActiveProfileInfoPath(), error);
-    if (!selection) return nil;
-    NSString *selected = PXValidatedProfileID(selection[PXCurrentProfileInfoPath()][@"info"][@"ProfileId"]);
-    NSDictionary *legacy = selection[PXLegacyActiveProfileInfoPath()][@"info"];
-    if (!selected) selected = PXValidatedProfileID(legacy[@"ProfileId"]) ?: PXValidatedProfileID(legacy[@"currentProfileId"]);
-    if (![selected isEqualToString:target]) { PXWiFiHookError(error, 3021, @"WiFi requested profile is no longer active"); return nil; }
-    return selection;
+    NSDictionary *selection = nil, *legacy = nil;
+    NSString *selected = nil;
+    @try {
+        selection = PXReadRuntimeProfileSelection(tx, PXCurrentProfileInfoPath(), PXLegacyActiveProfileInfoPath(), error);
+        if (!selection) return nil;
+        selected = PXValidatedProfileID(selection[PXCurrentProfileInfoPath()][@"info"][@"ProfileId"]);
+        legacy = selection[PXLegacyActiveProfileInfoPath()][@"info"];
+        if (!selected) selected = PXValidatedProfileID(legacy[@"ProfileId"]) ?: PXValidatedProfileID(legacy[@"currentProfileId"]);
+        if (![selected isEqualToString:target]) { PXWiFiHookError(error, 3021, @"WiFi requested profile is no longer active"); return nil; }
+        return selection;
+    } @finally { legacy = nil; selected = nil; selection = nil; target = nil; tx = nil; }
 }
 
 NSDictionary *PXResolveHookWiFiInfo(NSString *profileID, PXWiFiHookCacheReader cacheReader, NSError **error) {
     if (error) *error = nil;
-    NSString *target = [PXValidatedProfileID(profileID) copy];
-    if (!target) { PXWiFiHookError(error, 3020, @"Invalid WiFi hook profile"); return nil; }
-    // Reject nested staging before optional singleton/provider work. This also
-    // rejects an already-stale request before warming any provider.
-    if (!PXPerformStandaloneRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **failure) {
-        return PXWiFiHookSelection(tx, target, failure) != nil;
-    }, error)) return nil;
-    // A singleton initializer can reenter a hook before it owns lifecycle.
-    // Keep standalone admission first so nested source staging still poisons.
-    if (gWiFiHookResolving) { PXWiFiHookError(error, 3025, @"WiFi hook resolution is already in progress"); return nil; }
-    gWiFiHookResolving = YES;
+    NSString *target = nil;
     @try {
-        NSDictionary *cached = nil;
+        target = [PXValidatedProfileID(profileID) copy];
+        if (!target) { PXWiFiHookError(error, 3020, @"Invalid WiFi hook profile"); return nil; }
+        // Standalone admission remains before the TLS check/provider so ignored
+        // nested source staging still poisons its outer transaction.
+        if (!PXPerformStandaloneRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **failure) {
+            @try { return PXWiFiHookSelection(tx, target, failure) != nil; }
+            @finally { tx = nil; }
+        }, error)) return nil;
+        if (gWiFiHookResolving) { PXWiFiHookError(error, 3025, @"WiFi hook resolution is already in progress"); return nil; }
+        gWiFiHookResolving = YES;
+        NSDictionary *cached = nil, *prepared = nil, *preparedInput = nil;
+        id candidate = nil;
+        NSError *cacheError = nil;
+        PXProfileArtifactMutation *mutation = nil;
+        NSString *wifiPath = nil, *idsPath = nil;
+        __block NSDictionary *selection = nil, *wifi = nil, *ids = nil, *resolved = nil;
+        __block BOOL wifiExists = NO, idsExist = NO;
         @try {
-            NSError *cacheError = nil;
-            id candidate = cacheReader ? cacheReader(target, &cacheError) : nil;
-            if (cacheError) { if (error) *error = cacheError; return nil; }
-            cached = PXWiFiHookFreeze(candidate);
-        } @catch (NSException *exception) {
-            (void)exception; PXWiFiHookError(error, 3023, @"WiFi cache provider failed"); return nil;
-        }
-        PXProfileArtifactMutation *mutation = [PXProfileArtifactMutation acquireWithIdentityResolver:^NSString *{
-            return PXProfileIdentityPath(target);
-        } error:error];
-        @try {
-            if (!mutation) return nil;
-            NSString *wifiPath = [mutation.identityDirectory stringByAppendingPathComponent:@"wifi_info.plist"];
-            NSString *idsPath = [mutation.identityDirectory stringByAppendingPathComponent:@"device_ids.plist"];
-            __block NSDictionary *selection = nil, *wifi = nil, *ids = nil, *resolved = nil;
-            __block BOOL wifiExists = NO, idsExist = NO;
-            if (![mutation performSourceWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **failure) {
-                selection = PXWiFiHookSelection(tx, target, failure);
-                if (!selection) return NO;
-                wifi = [tx dictionaryAtPath:wifiPath exists:&wifiExists error:failure];
-                ids = wifi ? [tx dictionaryAtPath:idsPath exists:&idsExist error:failure] : nil;
-                if (!ids) return NO;
-                resolved = PXWiFiHookSourceInfo(wifi, ids);
-                return YES;
-            } error:error]) return nil;
-            if (resolved) return resolved;
-            // Preserve the old same-profile, read-only cache fallback. A candidate
-            // is not a persistence acknowledgement and is never staged as a seed.
-            if (cached) return cached;
-            NSDictionary *prepared = PXWiFiHookFreeze(PXPrepareRuntimeWiFiInfo());
-            if (!prepared) { PXWiFiHookError(error, 3023, @"Invalid prepared WiFi hook record"); return nil; }
-            BOOL committed = [mutation performSourceWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **failure) {
-                if (!PXRuntimeProfileSelectionMatches(tx, selection, PXCurrentProfileInfoPath(), PXLegacyActiveProfileInfoPath(), failure)) return NO;
-                BOOL nowWifi = NO, nowIDs = NO;
-                NSDictionary *currentWifi = [tx dictionaryAtPath:wifiPath exists:&nowWifi error:failure];
-                NSDictionary *currentIDs = currentWifi ? [tx dictionaryAtPath:idsPath exists:&nowIDs error:failure] : nil;
-                if (!currentIDs) return NO;
-                if (nowWifi != wifiExists || nowIDs != idsExist || ![currentWifi isEqual:wifi] || ![currentIDs isEqual:ids])
-                    return PXWiFiHookError(failure, 3022, @"WiFi sources changed during preparation");
-                if (!PXStageRuntimeWiFi(tx, mutation.identityDirectory, prepared, failure)) return NO;
-                NSMutableDictionary *merged = [[tx dictionaryAtPath:idsPath error:failure] mutableCopy];
-                if (!merged) return NO;
-                // Retain the display scalar written by the former hook fallback.
-                merged[@"WiFi"] = [NSString stringWithFormat:@"%@ (%@)", prepared[@"ssid"], prepared[@"bssid"]];
-                return [tx setDictionary:merged atPath:idsPath error:failure];
+            @try {
+                candidate = cacheReader ? cacheReader(target, &cacheError) : nil;
+                if (cacheError) { if (error) *error = cacheError; return nil; }
+                cached = PXWiFiHookFreeze(candidate);
+            } @catch (__unused NSException *exception) {
+                PXWiFiHookError(error, 3023, @"WiFi cache provider failed"); return nil;
+            } @finally { candidate = nil; cacheError = nil; }
+            // Keep acquisition exceptions outside the preparation catch, as before.
+            mutation = [PXProfileArtifactMutation acquireWithIdentityResolver:^NSString *{
+                return PXProfileIdentityPath(target);
             } error:error];
-            return committed ? prepared : nil;
-        } @catch (NSException *exception) {
-            (void)exception; PXWiFiHookError(error, 3023, @"WiFi hook preparation failed"); return nil;
-        } @finally { [mutation invalidate]; }
-    } @finally { gWiFiHookResolving = NO; }
+            @try {
+                if (!mutation) return nil;
+                wifiPath = [mutation.identityDirectory stringByAppendingPathComponent:@"wifi_info.plist"];
+                idsPath = [mutation.identityDirectory stringByAppendingPathComponent:@"device_ids.plist"];
+                if (![mutation performSourceWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **failure) {
+                    @try {
+                        selection = PXWiFiHookSelection(tx, target, failure);
+                        if (!selection) return NO;
+                        wifi = [tx dictionaryAtPath:wifiPath exists:&wifiExists error:failure];
+                        ids = wifi ? [tx dictionaryAtPath:idsPath exists:&idsExist error:failure] : nil;
+                        if (!ids) return NO;
+                        resolved = PXWiFiHookSourceInfo(wifi, ids);
+                        return YES;
+                    } @finally { tx = nil; }
+                } error:error]) return nil;
+                if (resolved) return resolved;
+                // Matching cache remains read-only and never seeds a source write.
+                if (cached) return cached;
+                preparedInput = PXPrepareRuntimeWiFiInfo();
+                prepared = PXWiFiHookFreeze(preparedInput);
+                preparedInput = nil; // The frozen packet is sufficient for commit.
+                if (!prepared) { PXWiFiHookError(error, 3023, @"Invalid prepared WiFi hook record"); return nil; }
+                BOOL committed = [mutation performSourceWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **failure) {
+                    NSDictionary *currentWifi = nil, *currentIDs = nil;
+                    NSMutableDictionary *merged = nil;
+                    NSString *display = nil;
+                    @try {
+                        if (!PXRuntimeProfileSelectionMatches(tx, selection, PXCurrentProfileInfoPath(), PXLegacyActiveProfileInfoPath(), failure)) return NO;
+                        BOOL nowWifi = NO, nowIDs = NO;
+                        currentWifi = [tx dictionaryAtPath:wifiPath exists:&nowWifi error:failure];
+                        currentIDs = currentWifi ? [tx dictionaryAtPath:idsPath exists:&nowIDs error:failure] : nil;
+                        if (!currentIDs) return NO;
+                        if (nowWifi != wifiExists || nowIDs != idsExist || ![currentWifi isEqual:wifi] || ![currentIDs isEqual:ids])
+                            return PXWiFiHookError(failure, 3022, @"WiFi sources changed during preparation");
+                        if (!PXStageRuntimeWiFi(tx, mutation.identityDirectory, prepared, failure)) return NO;
+                        merged = [[tx dictionaryAtPath:idsPath error:failure] mutableCopy];
+                        if (!merged) return NO;
+                        // Preserve the formatted display scalar in the paired commit.
+                        display = [NSString stringWithFormat:@"%@ (%@)", prepared[@"ssid"], prepared[@"bssid"]];
+                        merged[@"WiFi"] = display;
+                        return [tx setDictionary:merged atPath:idsPath error:failure];
+                    } @finally { display = nil; merged = nil; currentIDs = nil; currentWifi = nil; tx = nil; }
+                } error:error];
+                return committed ? prepared : nil;
+            } @catch (__unused NSException *exception) {
+                PXWiFiHookError(error, 3023, @"WiFi hook preparation failed"); return nil;
+            } @finally { [mutation invalidate]; }
+        } @finally {
+            // Release namespace ownership before dropping snapshots/callback roots.
+            // Keep this thread's guard until cleanup finishes; nested calls must
+            // never clear the outer resolver's guard.
+            @try {
+                mutation = nil; resolved = nil; ids = nil; wifi = nil; selection = nil;
+                prepared = nil; preparedInput = nil; idsPath = nil; wifiPath = nil; cached = nil;
+            } @finally { gWiFiHookResolving = NO; }
+        }
+    } @finally { target = nil; cacheReader = nil; profileID = nil; }
 }
