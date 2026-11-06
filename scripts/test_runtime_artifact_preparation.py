@@ -206,6 +206,25 @@ def source_contracts():
     assert 'respondsToSelector:@selector(sharedManager)' in wifi_reader
     assert 'PXWiFiInfoHasIdentity(wifiInfo)' in wifi_reader
     assert 'PXResolveHookWiFiInfo(profileId,' in wifi_reader and '[manager cachedWiFiInfoForProfileID:target]' in wifi_reader
+    assert wifi_reader.count('profileId = getCurrentProfileID();') == 1
+    assert wifi_reader.index('profileId = getCurrentProfileID();') < wifi_reader.index('PXWiFiCachedInfo(profileId, now, &generation)')
+    assert wifi_reader.index('if (cached) return cached;') < wifi_reader.index('identityDir = PXProfileIdentityPath(profileId);')
+    assert wifi_reader.count('PXProfileIdentityPath(profileId)') == 1 and 'PXProfileDeviceIDsPath(profileId)' not in wifi_reader
+    assert 'deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];' in wifi_reader
+    assert '@finally { manager = nil; target = nil; }' in wifi_reader
+    assert 'deviceIds = nil; wifiInfo = nil; resolved = nil; cached = nil;' in wifi_reader
+    assert 'wifiInfoPath = nil; deviceIdsPath = nil; identityDir = nil; profileId = nil;' in wifi_reader
+    assert '@finally { detached = nil; data = nil; }' in wifi_cache_publish
+    assert 'immutable = nil; frozenProfile = nil; profileId = nil; info = nil;' in wifi_cache_publish
+    assert 'discardedProfile = nil; discardedInfo = nil; profileId = nil;' in wifi_cache_read
+    assert '@finally { info = nil; }' in wifi_identity
+    reader_fixture = read('tests/PXWiFiHookCacheTests.m')
+    assert reader_fixture.count('TestCacheExceptionalLifetime();') == 1
+    for case in ('warm WiFi reader keeps active-selection checks but constructs no artifact identity paths',
+                 'WiFi failed freeze releases encoded data and decoded graph after pool drain',
+                 'WiFi reader unwinding releases its retained artifact root after pool drain',
+                 'WiFi cache-reader callback releases its manager on exceptional exit'):
+        assert case in reader_fixture, case
     for forbidden in ('currentWiFiInfo]', 'generateWiFiInfo]', 'writeToFile:', 'createDirectoryAtPath:'):
         assert forbidden not in wifi_reader
     cached_wifi = identifier.method(wifi_source, '- (NSDictionary *)cachedWiFiInfoForProfileID:(NSString *)profileID')
@@ -794,12 +813,6 @@ def native_tests():
                             str(ROOT / 'tests/PXStorageObjCHookTests.m'), '-framework', 'Foundation',
                             '-o', str(objc_binary)], check=True, cwd=ROOT, timeout=60)
             subprocess.run([str(objc_binary)], check=True, cwd=ROOT, timeout=60)
-            wifi_binary = folder / ('wifi-hook-cache-' + scheme)
-            subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions',
-                            '-Wall', '-Wextra', '-Werror=implicit-function-declaration', '-I', str(folder), '-I', str(ROOT / 'common'), *defines,
-                            str(ROOT / 'tests/PXWiFiHookCacheTests.m'), '-framework', 'Foundation',
-                            '-o', str(wifi_binary)], check=True, cwd=ROOT, timeout=60)
-            subprocess.run([str(wifi_binary)], check=True, cwd=ROOT, timeout=60)
             swizzle_binary = folder / ('method-swizzler-' + scheme)
             subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions',
                             '-Wall', '-Wextra', '-Werror=implicit-function-declaration', '-I', str(ROOT / 'TLinkIOSTweak'), *defines,
@@ -807,6 +820,12 @@ def native_tests():
                             '-framework', 'Foundation', '-o', str(swizzle_binary)], check=True, cwd=ROOT, timeout=60)
             subprocess.run([str(swizzle_binary)], check=True, cwd=ROOT, timeout=60)
             for arc_mode, arc_flag in CF_EXCEPTION_MODES:
+                wifi_binary = folder / ('wifi-hook-cache-' + scheme + '-' + arc_mode)
+                print('WiFi cache/reader native matrix:', scheme, arc_mode, flush=True)
+                subprocess.run(['xcrun', 'clang', '-O0', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions', arc_flag,
+                                '-Wall', '-Wextra', '-Werror=implicit-function-declaration', '-I', str(folder), '-I', str(ROOT / 'common'), *defines,
+                                str(ROOT / 'tests/PXWiFiHookCacheTests.m'), '-framework', 'Foundation', '-o', str(wifi_binary)], check=True, cwd=ROOT, timeout=60)
+                subprocess.run([str(wifi_binary)], check=True, cwd=ROOT, timeout=60)
                 resolver_binary = folder / ('wifi-resolver-lifetime-' + scheme + '-' + arc_mode)
                 print('WiFi resolver lifetime native matrix:', scheme, arc_mode, flush=True)
                 subprocess.run(['xcrun', 'clang', '-O0', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions', arc_flag,
