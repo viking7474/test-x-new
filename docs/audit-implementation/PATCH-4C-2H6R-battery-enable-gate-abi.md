@@ -161,3 +161,48 @@ assertions, builds and device behavior require macOS CI/device verification. No
 new native/build/device pass, commit, push or deployment is claimed. BatteryManager
 cache concurrency, repeated I/O and cross-component authority remain pending;
 full Patch 4/H5S-partial and later rollout stages are still incomplete.
+
+
+## Build follow-up: annotated runtime encodings
+
+The user reports rootful artifact execution at 842/842 three times and the gate
+at 161/162, failing only the qualified/annotated compatibility case. This does not
+establish completion of the remaining native matrices or a RootHide native pass.
+
+The old validator expected the runtime count/type-copy APIs to understand quoted
+object names before PXBatteryTypeMatches could admit them. Apple's published
+[metadata wrappers](https://raw.githubusercontent.com/apple-oss-distributions/objc4/main/runtime/objc-class.mm)
+use the legacy [encoding traversal](https://raw.githubusercontent.com/apple-oss-distributions/objc4/main/runtime/objc-typeencoding.mm),
+which does not consume quoted object names and omits the byref R qualifier. That
+can reject otherwise compatible metadata before the shape comparison.
+
+Read the complete method encoding first. Encodings containing a quote or R now
+use NSMethodSignature.signatureWithObjCTypes and the existing strict signature
+validator; normal encodings keep the existing runtime count/stack-buffer path.
+Count, hidden arguments, ordinary object shape, exact native BOOL and return width
+remain required before a provider call. Parser exceptions fail closed and the
+owned temporary signature clears in finally. The signature validator itself is
+unchanged; its definition/extraction now precedes the method helper that calls it.
+No new manual encoding parser, permanent cache, provider signature request or
+NSInvocation is introduced for concrete annotated calls. This branch does create
+a temporary Foundation signature, so the original no-explicit-signature statement
+for concrete calls applies only to ordinary encodings after this correction.
+Frequency and cost on actual device binaries are not measured.
+
+Retain the failing case and add independent factory/enable checks and raw-encoding
+failure diagnostics. Native cases additionally specify const scalars, byref object
+returns/arguments, pointer-sized offsets, long annotations, wrong native BOOL,
+wrong annotated return/arity/hidden arguments and block shapes. No assertion is
+removed or changed into a pass; invalid candidates must not reach their IMPs.
+MethodSwizzler already uses Foundation parsing and its user-reported 88/88 includes
+an annotated-object compatibility case; that supports the choice without proving
+these new battery assertions have executed.
+
+Local validation: 62/63 Python + 4/4 Node, with the established Git Bash permission
+failure remaining. Source hardening/RootHide static and metadata 6/6, four exact
+fragment generators, seven negative route/type/width/cleanup controls and recipe
+capture pass. Code outside the ABI helper/order compares exactly with HEAD;
+BatteryManager, snapshot/LPM/hooks, constructor and packaging remain untouched.
+The same source and four native gate configurations cover rootful/RootHide x both
+ARC exception modes. These checks do not execute Foundation/Clang/Theos on Windows;
+new native/build/device verification still requires macOS CI/device execution.

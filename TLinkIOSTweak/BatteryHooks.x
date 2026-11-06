@@ -103,18 +103,6 @@ static BOOL PXBatteryTypeMatches(const char *type, const char *expected) {
     return strcmp(type, expected) == 0;
 }
 
-static BOOL PXBatteryMethodHasABI(Method method, BOOL returnsBool) {
-    if (!method || method_getNumberOfArguments(method) != (returnsBool ? 3u : 2u)) return NO;
-    char result[32] = {0}, receiver[32] = {0}, selector[32] = {0}, argument[32] = {0};
-    method_getReturnType(method, result, sizeof(result) - 1);
-    method_getArgumentType(method, 0, receiver, sizeof(receiver) - 1);
-    method_getArgumentType(method, 1, selector, sizeof(selector) - 1);
-    if (returnsBool) method_getArgumentType(method, 2, argument, sizeof(argument) - 1);
-    return PXBatteryTypeMatches(result, returnsBool ? @encode(BOOL) : "@") &&
-        PXBatteryTypeMatches(receiver, "@") && PXBatteryTypeMatches(selector, ":") &&
-        (!returnsBool || PXBatteryTypeMatches(argument, "@"));
-}
-
 static BOOL PXBatterySignatureHasABI(NSMethodSignature *signature, BOOL returnsBool) {
     @try {
         if (![signature isKindOfClass:NSMethodSignature.class] ||
@@ -125,6 +113,31 @@ static BOOL PXBatterySignatureHasABI(NSMethodSignature *signature, BOOL returnsB
             PXBatteryTypeMatches([signature getArgumentTypeAtIndex:1], ":") &&
             (!returnsBool || PXBatteryTypeMatches([signature getArgumentTypeAtIndex:2], "@"));
     } @finally { signature = nil; }
+}
+
+static BOOL PXBatteryMethodHasABI(Method method, BOOL returnsBool) {
+    const char *encoding = method ? method_getTypeEncoding(method) : NULL;
+    if (!encoding || !*encoding) return NO;
+    // The runtime's legacy type traversal does not consume quoted class names
+    // or byref R. Parse these with Foundation before relying on its arg count.
+    if (strpbrk(encoding, "\"R")) {
+        NSMethodSignature *signature = nil;
+        @try {
+            signature = [NSMethodSignature signatureWithObjCTypes:encoding];
+            return PXBatterySignatureHasABI(signature, returnsBool);
+        } @catch (...) {
+            return NO;
+        } @finally { signature = nil; }
+    }
+    if (method_getNumberOfArguments(method) != (returnsBool ? 3u : 2u)) return NO;
+    char result[32] = {0}, receiver[32] = {0}, selector[32] = {0}, argument[32] = {0};
+    method_getReturnType(method, result, sizeof(result) - 1);
+    method_getArgumentType(method, 0, receiver, sizeof(receiver) - 1);
+    method_getArgumentType(method, 1, selector, sizeof(selector) - 1);
+    if (returnsBool) method_getArgumentType(method, 2, argument, sizeof(argument) - 1);
+    return PXBatteryTypeMatches(result, returnsBool ? @encode(BOOL) : "@") &&
+        PXBatteryTypeMatches(receiver, "@") && PXBatteryTypeMatches(selector, ":") &&
+        (!returnsBool || PXBatteryTypeMatches(argument, "@"));
 }
 
 static BOOL isBatterySpoofingEnabled(void) {

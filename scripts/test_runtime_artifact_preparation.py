@@ -76,8 +76,8 @@ BATTERY_ENABLE_METHODS = [
     'static NSString *getCurrentBundleID(void)', 'static BOOL shouldSpoofBatteryForBundle(NSString *bundleID)',
     'static const char *PXBatterySkipTypeQualifiers(const char *type)',
     'static BOOL PXBatteryTypeMatches(const char *type, const char *expected)',
-    'static BOOL PXBatteryMethodHasABI(Method method, BOOL returnsBool)',
     'static BOOL PXBatterySignatureHasABI(NSMethodSignature *signature, BOOL returnsBool)',
+    'static BOOL PXBatteryMethodHasABI(Method method, BOOL returnsBool)',
     'static BOOL isBatterySpoofingEnabled(void)',
 ]
 BATTERY_SNAPSHOT_METHODS = [
@@ -547,11 +547,17 @@ def source_contracts():
         assert label in cache_fixture
     assert 'accepted battery source keeps captured mirror while newer cache and error survive commit completion' in read('tests/PXRuntimeArtifactPreparationTests.m')
     battery_hooks = read('TLinkIOSTweak/BatteryHooks.x')
-    bundle_reader, battery_scope, skip_types, match_type, method_abi, signature_abi, enable_gate = [identifier.method(battery_hooks, sig) for sig in BATTERY_ENABLE_METHODS]
+    bundle_reader, battery_scope, skip_types, match_type, signature_abi, method_abi, enable_gate = [identifier.method(battery_hooks, sig) for sig in BATTERY_ENABLE_METHODS]
     assert 'loadScopedApps' not in battery_hooks and 'isInScopedAppsList' not in battery_hooks
     assert 'PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionNone)' in battery_scope
     assert 'NSSelectorFromString' not in enable_gate and 'static Class' not in enable_gate and 'dispatch_once' not in enable_gate
     assert 'method_getNumberOfArguments(method) != (returnsBool ? 3u : 2u)' in method_abi
+    assert 'method_getTypeEncoding(method)' in method_abi and 'if (!encoding || !*encoding) return NO;' in method_abi
+    assert method_abi.index('strpbrk(encoding,') < method_abi.index('method_getNumberOfArguments(method)')
+    assert 'strpbrk(encoding, "\\"R")' in method_abi
+    assert 'signatureWithObjCTypes:encoding' in method_abi and 'return PXBatterySignatureHasABI(signature, returnsBool);' in method_abi
+    assert '@finally { signature = nil; }' in method_abi and '@catch (...)' in method_abi
+    assert battery_hooks.index('static BOOL PXBatterySignatureHasABI(') < battery_hooks.index('static BOOL PXBatteryMethodHasABI(')
     assert 'method_getReturnType(method, result, sizeof(result) - 1)' in method_abi
     for slot in ('receiver', 'selector', 'argument'):
         assert f'{slot}[32] = {{0}}' in method_abi
@@ -573,6 +579,11 @@ def source_contracts():
     assert '@finally { mainBundle = nil; }' in bundle_reader and '@finally { proc = nil; bundleID = nil; }' in battery_scope
     gate_fixture = read('tests/PXBatteryEnableGateTests.m')
     check_macro_arity(gate_fixture, 'PXBatteryEnableGateTests.m')
+    assert gate_fixture.count('TestAnnotatedRuntimeABI();') == 1
+    assert 'battery annotated incompatible ABI remains rejected before enable invocation' in gate_fixture
+    assert 'battery annotated incompatible factory remains rejected before object result send' in gate_fixture
+    assert 'battery annotated metadata accepts native frame and argument offsets' in gate_fixture
+    assert 'battery annotated metadata is not truncated to fixed runtime type buffers' in gate_fixture
     for label in ('concrete battery gate avoids provider signature requests and invocation factory calls while preserving one call per read',
                   'battery forwarded ABI mismatch rejects before return-buffer copy or invocation',
                   'battery factory full forwarding preserves object return ownership and invocation',

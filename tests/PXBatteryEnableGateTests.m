@@ -214,8 +214,62 @@ static void TestRuntimeABI(void) {
     Reset(); gFactoryClass = DynamicClass(YES, "@\"NSObject\"@:", (IMP)FactoryIMP);
     NSString *annotated = [NSString stringWithFormat:@"r%s@:@\"NSString\"", @encode(BOOL)];
     cls = DynamicClass(NO, annotated.UTF8String, (IMP)EnabledIMP); gManager = [cls new];
-    CHECK(isBatterySpoofingEnabled() && !gSignatures && !gInvocations && !gWrongArguments,
+    Method annotatedFactory = class_getClassMethod(gFactoryClass, @selector(sharedManager));
+    Method annotatedEnabled = class_getInstanceMethod(cls, @selector(isIdentifierEnabled:));
+    CHECK(PXBatteryMethodHasABI(annotatedFactory, NO), "battery ABI validates annotated factory metadata independently");
+    CHECK(PXBatteryMethodHasABI(annotatedEnabled, YES), "battery ABI validates qualified annotated enable metadata independently");
+    BOOL accepted = isBatterySpoofingEnabled();
+    if (!accepted || gSignatures || gInvocations || gWrongArguments) {
+        fprintf(stderr, "ABI annotation diagnostic: factory=%s enable=%s calls=%lu/%lu signatures=%lu invocations=%lu wrongArguments=%lu\n",
+                method_getTypeEncoding(annotatedFactory), method_getTypeEncoding(annotatedEnabled),
+                (unsigned long)gFactoryCalls, (unsigned long)gEnabledCalls, (unsigned long)gSignatures,
+                (unsigned long)gInvocations, (unsigned long)gWrongArguments);
+    }
+    CHECK(accepted && !gSignatures && !gInvocations && !gWrongArguments,
           "battery ABI preserves qualified bool and annotated object compatibility");
+}
+static void TestAnnotatedRuntimeABI(void) {
+    Reset(); NSString *qualified = [NSString stringWithFormat:@"r%s@:@", @encode(BOOL)];
+    Class qualifiedClass = DynamicClass(NO, qualified.UTF8String, (IMP)EnabledIMP); gManager = [qualifiedClass new];
+    CHECK(isBatterySpoofingEnabled() && !gInvocations && !gSignatures,
+          "battery ABI preserves const scalar qualifiers without provider signature lookup or invocation");
+    Reset(); gFactoryClass = DynamicClass(YES, "R@@:", (IMP)FactoryIMP);
+    CHECK(isBatterySpoofingEnabled() && !gInvocations && !gSignatures,
+          "battery ABI preserves byref object factory qualifier through validated signature");
+    Reset(); qualified = [NSString stringWithFormat:@"%s@:R@", @encode(BOOL)];
+    qualifiedClass = DynamicClass(NO, qualified.UTF8String, (IMP)EnabledIMP); gManager = [qualifiedClass new];
+    CHECK(isBatterySpoofingEnabled() && !gInvocations && !gSignatures,
+          "battery ABI preserves byref object argument qualifier through validated signature");
+    Reset(); size_t pointer = sizeof(id);
+    NSString *factoryEncoding = [NSString stringWithFormat:@"@\"NSObject\"%zu@0:%zu", 2 * pointer, pointer];
+    NSString *enabledEncoding = [NSString stringWithFormat:@"r%s%zu@0:%zu@\"NSString\"%zu", @encode(BOOL), 3 * pointer, pointer, 2 * pointer];
+    gFactoryClass = DynamicClass(YES, factoryEncoding.UTF8String, (IMP)FactoryIMP);
+    Class cls = DynamicClass(NO, enabledEncoding.UTF8String, (IMP)EnabledIMP); gManager = [cls new];
+    CHECK(isBatterySpoofingEnabled() && !gInvocations && !gSignatures && !gWrongArguments,
+          "battery annotated metadata accepts native frame and argument offsets");
+    Reset(); NSString *name = [@"PXBattery" stringByPaddingToLength:160 withString:@"LongName" startingAtIndex:0];
+    factoryEncoding = [NSString stringWithFormat:@"@\"%@\"@:", name];
+    enabledEncoding = [NSString stringWithFormat:@"%s@:@\"%@\"", @encode(BOOL), name];
+    gFactoryClass = DynamicClass(YES, factoryEncoding.UTF8String, (IMP)FactoryIMP);
+    cls = DynamicClass(NO, enabledEncoding.UTF8String, (IMP)EnabledIMP); gManager = [cls new];
+    CHECK(isBatterySpoofingEnabled() && !gInvocations && !gSignatures,
+          "battery annotated metadata is not truncated to fixed runtime type buffers");
+    Reset(); NSString *otherBool = [NSString stringWithFormat:@"%s@:@\"NSString\"", @encode(BOOL)[0] == 'B' ? "c" : "B"];
+    cls = DynamicClass(NO, otherBool.UTF8String, (IMP)WideIMP); gManager = [cls new];
+    CHECK(!isBatterySpoofingEnabled() && !gEnabledCalls && !gInvocations,
+          "battery annotated metadata still requires exact platform BOOL rather than byte width alone");
+    const char *badEnabled[] = {"Q@:@\"NSString\"", "v@:@\"NSString\"", "@\"NSNumber\"@:@", "B@:@@\"NSString\"", "B@Q@\"NSString\"", "B^@:@\"NSString\"", "B@:@?@\"NSString\""};
+    for (NSUInteger index = 0; index < sizeof(badEnabled)/sizeof(*badEnabled); index++) {
+        Reset(); cls = DynamicClass(NO, NativeEncoding(badEnabled[index]).UTF8String, (IMP)WideIMP); gManager = [cls new];
+        CHECK(!isBatterySpoofingEnabled() && !gEnabledCalls && !gInvocations,
+              "battery annotated incompatible ABI remains rejected before enable invocation");
+    }
+    const char *badFactories[] = {"Q@:@\"NSString\"", "@\"NSObject\"Q:", "@@:@\"NSString\"", "@?@:@\"NSString\""};
+    for (NSUInteger index = 0; index < sizeof(badFactories)/sizeof(*badFactories); index++) {
+        Reset(); gFactoryClass = DynamicClass(YES, badFactories[index], (IMP)WideFactoryIMP);
+        CHECK(!isBatterySpoofingEnabled() && !gFactoryCalls && !gEnabledCalls && !gInvocations,
+              "battery annotated incompatible factory remains rejected before object result send");
+    }
 }
 static void TestForwarding(void) {
     Reset(); gManager = [PXForwardManager alloc];
@@ -260,7 +314,7 @@ static void TestForwarding(void) {
 }
 int main(void) {
     @autoreleasepool {
-        @try { TestFastPath(); TestRuntimeABI(); TestForwarding(); }
+        @try { TestFastPath(); TestRuntimeABI(); TestAnnotatedRuntimeABI(); TestForwarding(); }
         @catch (NSException *exception) { gFailures++; fprintf(stderr, "FAIL: unexpected battery enable exception: %s\n", exception.description.UTF8String); }
         printf("Battery enable gate: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);
         return gFailures ? 1 : 0;
