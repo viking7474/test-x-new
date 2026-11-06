@@ -15,6 +15,7 @@
 @property (atomic, strong) NSString *currentProfileId;
 @property (nonatomic, strong) id profileChangeObserver;
 - (id)profileManagerForWiFi;
+- (void)handleWiFiProfileNotification:(NSNotification *)note;
 - (NSString *)profileIDFromManager:(id)manager;
 - (void)loadWiFiInfoForProfileID:(NSString *)profileID;
 @property (nonatomic) uint64_t wifiCacheRevision; // Only under the cache monitor.
@@ -66,15 +67,26 @@
         self.profileChangeObserver = [NSNotificationCenter.defaultCenter addObserverForName:@"WeaponXProfileChanged"
             object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
                 __strong typeof(weakSelf) owner = weakSelf;
-                if (!owner) return;
-                NSString *eventID = PXValidatedProfileID(note.userInfo[@"ProfileId"]);
-                if (eventID && ![eventID isEqualToString:owner.currentProfileId]) {
-                    // Queued notifications can be stale. Resolve current state
-                    // rather than adopting the event's profile ID as authority.
-                    [owner loadWiFiInfoFromCurrentProfile];
-                }
+                @try {
+                    if (!owner) return;
+                    [owner handleWiFiProfileNotification:note];
+                } @finally { owner = nil; note = nil; }
             }];
     }
+}
+
+- (void)handleWiFiProfileNotification:(NSNotification *)note {
+    NSDictionary *payload = nil;
+    NSString *eventID = nil;
+    @try {
+        payload = note.userInfo;
+        if (![payload isKindOfClass:NSDictionary.class]) return;
+        eventID = [PXValidatedProfileID(payload[@"ProfileId"]) copy];
+        if (eventID && ![eventID isEqualToString:self.currentProfileId]) {
+            // Queued events are hints: resolve current authority, not the event ID.
+            [self loadWiFiInfoFromCurrentProfile];
+        }
+    } @finally { eventID = nil; payload = nil; note = nil; }
 }
 
 - (id)profileManagerForWiFi {
@@ -83,40 +95,53 @@
 }
 
 - (NSString *)getCurrentProfileID {
-    return [self profileIDFromManager:[self profileManagerForWiFi]];
+    id manager = nil;
+    @try {
+        manager = [self profileManagerForWiFi];
+        return [self profileIDFromManager:manager];
+    } @catch (__unused NSException *exception) {
+        // An indeterminate lookup must not become permission to use another target.
+        return nil;
+    } @finally { manager = nil; }
 }
 
 - (NSString *)profileIDFromManager:(id)manager {
-    if ([manager respondsToSelector:@selector(currentProfile)]) {
-        id profile = [manager currentProfile];
-        if ([profile respondsToSelector:@selector(profileId)]) {
-            NSString *profileID = [profile profileId];
-            if (profileID) return profileID;
+    id profile = nil, value = nil;
+    NSDictionary *profileInfo = nil;
+    NSString *path = nil, *resolved = nil;
+    @try {
+        if ([manager respondsToSelector:@selector(currentProfile)]) {
+            profile = [manager currentProfile];
+            if ([profile respondsToSelector:@selector(profileId)]) {
+                value = [profile profileId];
+                if (value) {
+                    // Preserve authoritative strings, including invalid path keys
+                    // rejected later by PXValidatedProfileID. Do not redirect an
+                    // unexpected present manager ID to a different file target.
+                    if (![value isKindOfClass:NSString.class]) return nil;
+                    resolved = [value copy];
+                    return [resolved isKindOfClass:NSString.class] ? resolved : nil;
+                }
+            }
         }
+        path = PXCurrentProfileInfoPath();
+        if (![path isKindOfClass:NSString.class] || !path.length) return nil;
+        profileInfo = [NSDictionary dictionaryWithContentsOfFile:path];
+        // The legacy API cannot distinguish an absent file from an unreadable one.
+        if (!profileInfo) return @"default";
+        if (![profileInfo isKindOfClass:NSDictionary.class]) return nil;
+        value = profileInfo[@"ProfileId"];
+        if (!value) return @"default";
+        if ([value isKindOfClass:NSString.class]) resolved = [value copy];
+        else if ([value isKindOfClass:NSNumber.class]) resolved = [[value stringValue] copy];
+        // Never turn containers, dates or NSNull into a potentially valid leaf.
+        return [resolved isKindOfClass:NSString.class] ? resolved : nil;
+    } @catch (__unused NSException *exception) {
+        return nil;
+    } @finally {
+        resolved = nil; path = nil; profileInfo = nil;
+        value = nil; profile = nil; manager = nil;
     }
-    // Fallback to direct file read if ProfileManager isn't available
-    NSString *currentProfileInfoPath = PXCurrentProfileInfoPath();
-    NSDictionary *profileInfo = [NSDictionary dictionaryWithContentsOfFile:currentProfileInfoPath];
-
-    if (profileInfo && profileInfo[@"ProfileId"]) {
-        id profileIdValue = profileInfo[@"ProfileId"];
-        NSString *profileId = nil;
-
-        // Handle both NSNumber and NSString types properly
-        if ([profileIdValue isKindOfClass:[NSNumber class]]) {
-            profileId = [profileIdValue stringValue];
-        } else if ([profileIdValue isKindOfClass:[NSString class]]) {
-            profileId = profileIdValue;
-        } else {
-            profileId = [profileIdValue description];
-        }
-
-        PXLog(@"[WiFiManager] Got current profile ID from plist: %@", profileId);
-        return profileId;
-    }
-
-    // If all else fails, use default
-    return @"default";
 }
 
 // Own cache writers replace whole roots. Copy/validation/I/O and callbacks
@@ -189,7 +214,14 @@
 }
 
 - (void)loadWiFiInfoFromCurrentProfile {
-    [self loadWiFiInfoForProfileID:[self getCurrentProfileID]];
+    uint64_t revision = [self beginWiFiCacheUpdate];
+    NSString *profileID = nil;
+    @try {
+        // Lookup may initialize a provider or reenter cache adoption. Claim before
+        // that work, outside the monitor, and keep the original revision.
+        profileID = [self getCurrentProfileID];
+        [self loadWiFiInfoForProfileID:profileID revision:revision];
+    } @finally { profileID = nil; }
 }
 
 - (void)loadWiFiInfoForProfileID:(NSString *)profileID {

@@ -6,6 +6,10 @@
 
 static NSUInteger gChecks, gFailures, gReads, gPaths, gCopies;
 static BOOL gThrowCopy;
+static id gResolutionManager;
+static BOOL gThrowManager, gThrowProfile, gThrowProfileID;
+static void (^gDuringResolve)(void);
+static NSUInteger gResolutionCalls;
 static NSMutableDictionary *gFiles;
 static void (^gDuringRead)(void);
 #define CHECK(value, label) do { gChecks++; if (!(value)) { gFailures++; fprintf(stderr, "FAIL: %s\n", label); } } while (0)
@@ -15,6 +19,7 @@ static NSString *PXValidatedProfileID(NSString *value) {
 static NSString *PXProfileIdentityPath(NSString *value) {
     gPaths++; return value ? [@"/fixture/" stringByAppendingString:value] : nil;
 }
+static NSString *PXCurrentProfileInfoPath(void) { return @"/fixture/selection.plist"; }
 @interface NSDictionary (CacheFixture)
 + (instancetype)cacheFixtureRead:(NSString *)path;
 @end
@@ -26,6 +31,13 @@ static NSString *PXProfileIdentityPath(NSString *value) {
     @finally { callback = nil; }
 }
 @end
+@interface PXResolutionProfile : NSObject
+@property (nonatomic, strong) id profileId;
+@end
+@interface PXResolutionManager : NSObject
+@property (nonatomic, strong) id profile;
+- (id)currentProfile;
+@end
 @interface PXCacheWiFi : NSObject
 @property (atomic, strong) NSMutableDictionary *wifiInfo;
 @property (atomic, strong) NSString *currentProfileId;
@@ -34,12 +46,18 @@ static NSString *PXProfileIdentityPath(NSString *value) {
 @property (nonatomic) BOOL wifiCacheReadable;
 #include "PXWiFiCacheCoreDeclarations.inc"
 #include "PXWiFiCacheReaderDeclarations.inc"
+#include "PXWiFiResolutionDeclarations.inc"
+- (id)profileManagerForWiFi;
 - (void)loadWiFiInfoForProfileID:(NSString *)profileID;
 - (uint64_t)loadWiFiInfoForProfileID:(NSString *)profileID revision:(uint64_t)revision;
 - (void)adoptCommittedWiFiInfo:(NSDictionary *)info profileID:(NSString *)profile;
 - (NSDictionary *)cachedWiFiInfoForProfileID:(NSString *)profile;
 @end
 @implementation PXCacheWiFi
+- (id)profileManagerForWiFi {
+    if (gThrowManager) [NSException raise:@"fixture.manager" format:@"factory failed"];
+    return gResolutionManager;
+}
 #define dictionaryWithContentsOfFile cacheFixtureRead
 #include "PXWiFiManagerCacheMethods.inc"
 #undef dictionaryWithContentsOfFile
@@ -230,6 +248,96 @@ static void TestDisplayAndTypedReaders(void) {
     CHECK([[manager cachedWiFiDisplayInfo] isEqual:a] && ![manager cachedWiFiInfoForProfileID:@"a"], "display keeps legacy candidate visibility while hook cache still requires acknowledgement");
     CHECK(gReads == reads && gPaths == paths, "entire display metadata matrix remains cache-only");
 }
+@implementation PXResolutionProfile
+@synthesize profileId = _profileId;
+- (id)profileId {
+    if (gThrowProfileID) [NSException raise:@"fixture.id" format:@"ID failed"];
+    id value = _profileId;
+    void (^callback)(void) = gDuringResolve; gDuringResolve = nil;
+    @try { if (callback) callback(); return value; }
+    @finally { value = nil; callback = nil; }
+}
+@end
+@implementation PXResolutionManager
+- (id)currentProfile {
+    gResolutionCalls++;
+    if (gThrowProfile) [NSException raise:@"fixture.profile" format:@"profile failed"];
+    return self.profile;
+}
+@end
+@interface PXResolutionNote : NSObject
+@property (nonatomic, strong) id userInfo;
+@end
+@implementation PXResolutionNote
+@end
+static void TestProfileResolutionAndAdmission(void) {
+    PXCacheWiFi *cache = [PXCacheWiFi new];
+    PXResolutionManager *manager = [PXResolutionManager new];
+    PXResolutionProfile *profile = [PXResolutionProfile new]; manager.profile = profile;
+    gResolutionManager = manager;
+    @try {
+        gFiles[PXCurrentProfileInfoPath()] = @{ @"ProfileId": @"b" };
+        profile.profileId = @"a"; NSUInteger reads = gReads, resolutions = gResolutionCalls;
+        CHECK([[cache getCurrentProfileID] isEqual:@"a"] && reads == gReads && gResolutionCalls == resolutions + 1, "manager authority resolves once without reading a competing file target");
+        NSMutableString *mutableID = [@"a" mutableCopy]; profile.profileId = mutableID;
+        NSString *frozen = [cache getCurrentProfileID]; [mutableID setString:@"b"];
+        CHECK([frozen isEqual:@"a"], "resolved manager ID is detached before caller mutates its string");
+        for (id bad in @[NSNull.null, @7, @[], @{}, NSDate.date]) {
+            profile.profileId = bad; reads = gReads;
+            CHECK(![cache getCurrentProfileID] && reads == gReads, "present malformed manager ID never redirects resolution to file or default");
+        }
+        profile.profileId = @"../retired";
+        CHECK([[cache getCurrentProfileID] isEqual:@"../retired"], "string authority stays raw for existing downstream path validation");
+        profile.profileId = @"a"; gThrowProfile = YES; reads = gReads;
+        CHECK(![cache getCurrentProfileID] && gReads == reads, "throwing manager getter cannot fall back to another target");
+        gThrowProfile = NO; gThrowProfileID = YES;
+        CHECK(![cache getCurrentProfileID] && gReads == reads, "throwing ID getter is unresolved without file fallback");
+        gThrowProfileID = NO; gThrowManager = YES;
+        CHECK(![cache getCurrentProfileID] && gReads == reads, "read factory exception is unresolved without redirecting to disk");
+        gThrowManager = NO; profile.profileId = nil;
+        CHECK([[cache getCurrentProfileID] isEqual:@"b"], "absent manager ID retains file fallback");
+        manager.profile = [NSObject new];
+        CHECK([[cache getCurrentProfileID] isEqual:@"b"], "optional missing profile selector retains compatibility fallback");
+        gResolutionManager = nil;
+        for (id value in @[@"a", @7, @"", @YES]) {
+            gFiles[PXCurrentProfileInfoPath()] = @{ @"ProfileId": value };
+            NSString *expected = [value isKindOfClass:NSString.class] ? value : [value stringValue];
+            CHECK([[cache getCurrentProfileID] isEqual:expected], "file strings and NSNumber normalization preserve existing grammar");
+        }
+        for (id bad in @[NSNull.null, @[], @{}, NSDate.date, @[@"a"]]) {
+            gFiles[PXCurrentProfileInfoPath()] = @{ @"ProfileId": bad };
+            CHECK(![cache getCurrentProfileID], "file containers dates and NSNull never become directory names via description");
+        }
+        gFiles[PXCurrentProfileInfoPath()] = @[@"foreign root"];
+        CHECK(![cache getCurrentProfileID], "unexpected selection root is never subscripted");
+        [gFiles removeObjectForKey:PXCurrentProfileInfoPath()];
+        CHECK([[cache getCurrentProfileID] isEqual:@"default"], "absent selection preserves legacy default label");
+        gFiles[PXCurrentProfileInfoPath()] = @{};
+        CHECK([[cache getCurrentProfileID] isEqual:@"default"], "missing selection field preserves legacy default label");
+        manager.profile = profile; profile.profileId = @"a"; gResolutionManager = manager;
+        NSDictionary *a = Record(@"file A"), *b = Record(@"new B");
+        gFiles[@"/fixture/a/wifi_info.plist"] = a;
+        [cache adoptCommittedWiFiInfo:a profileID:@"a"];
+        reads = gReads;
+        gDuringResolve = ^{ [cache adoptCommittedWiFiInfo:b profileID:@"b"]; };
+        [cache loadWiFiInfoFromCurrentProfile];
+        CHECK([[cache cachedWiFiInfoForProfileID:@"b"] isEqual:b] && gReads == reads, "reload claims before lookup so reentrant adoption wins before any old-target file read");
+        PXResolutionNote *note = [PXResolutionNote new];
+        reads = gReads; uint64_t revision = cache.wifiCacheRevision;
+        for (id payload in @[NSNull.null, @[], @42, @"bad", @{}, @{ @"ProfileId": @[] }, @{ @"ProfileId": @7 }]) {
+            note.userInfo = payload; [cache handleWiFiProfileNotification:(id)note];
+        }
+        CHECK(gReads == reads && cache.wifiCacheRevision == revision, "malformed notification payloads do not resolve or invalidate cache");
+        profile.profileId = @"b"; gFiles[@"/fixture/b/wifi_info.plist"] = b;
+        note.userInfo = @{ @"ProfileId": @"a" };
+        [cache handleWiFiProfileNotification:(id)note];
+        CHECK([[cache cachedWiFiInfoForProfileID:@"b"] isEqual:b] && [cache.currentProfileId isEqual:@"b"], "stale valid event reloads current authority instead of adopting event target");
+    } @finally {
+        gResolutionManager = nil; gDuringResolve = nil;
+        gThrowProfile = gThrowProfileID = gThrowManager = NO;
+        [gFiles removeObjectForKey:PXCurrentProfileInfoPath()];
+    }
+}
 static void TestConcurrentPairs(void) {
     PXCacheWiFi *manager = [PXCacheWiFi new];
     NSDictionary *a = Record(@"A"), *b = Record(@"B");
@@ -257,7 +365,7 @@ static void TestConcurrentPairs(void) {
 int main(void) {
     @autoreleasepool {
         gFiles = [NSMutableDictionary new];
-        @try { TestSnapshotABA(); TestLoadAndAdoptOrdering(); TestLifetime(); TestDisplayAndTypedReaders(); TestConcurrentPairs(); }
+        @try { TestSnapshotABA(); TestLoadAndAdoptOrdering(); TestLifetime(); TestDisplayAndTypedReaders(); TestProfileResolutionAndAdmission(); TestConcurrentPairs(); }
         @catch (NSException *e) { gFailures++; fprintf(stderr, "FAIL: unexpected manager cache exception: %s\n", e.description.UTF8String); }
         printf("WiFi manager cache: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);
         return gFailures ? 1 : 0;

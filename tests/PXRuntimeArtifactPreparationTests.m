@@ -33,6 +33,7 @@ static id gStorageFallbackSpecs;
 static NSString *gLastStorageModel;
 static BOOL gWiFiManagerAvailable = YES;
 static NSString *gWiFiMemoryID;
+static id gWiFiProfileOverride;
 static void (^gDuringWiFiCopy)(void), (^gDuringWiFiWarmup)(void);
 static void (^gDuringHookWiFiPreparation)(void);
 static BOOL gInspectHookWiFiPreparation;
@@ -280,6 +281,12 @@ static int PXPreparationFixtureSysctl(int *name, u_int namelen, void *oldp, size
 @end
 @implementation PXWiFiProfileFixture
 @end
+@interface PXWiFiInvalidProfileFixture : NSObject
+- (id)profileId;
+@end
+@implementation PXWiFiInvalidProfileFixture
+- (id)profileId { return NSNull.null; }
+@end
 @interface ProfileManager : NSObject
 + (instancetype)sharedManager;
 - (id)currentProfile;
@@ -293,6 +300,7 @@ static int PXPreparationFixtureSysctl(int *name, u_int namelen, void *oldp, size
 }
 - (id)currentProfile {
     gWiFiSelections++;
+    if (gWiFiProfileOverride) return gWiFiProfileOverride;
     id selected = gWiFiMemoryID ?: [NSDictionary dictionaryWithContentsOfFile:PXCurrentProfileInfoPath()][@"ProfileId"];
     if (![selected isKindOfClass:NSString.class]) return nil;
     PXWiFiProfileFixture *profile = [PXWiFiProfileFixture new]; profile.profileId = selected; return profile;
@@ -314,6 +322,7 @@ static int PXPreparationFixtureSysctl(int *name, u_int namelen, void *oldp, size
 @property (atomic, strong) NSString *currentProfileId;
 @property (atomic, strong) NSError *error;
 @property (nonatomic, strong) id profileChangeObserver;
+- (void)handleWiFiProfileNotification:(NSNotification *)note;
 - (void)registerForProfileNotifications;
 - (id)profileManagerForWiFi;
 - (NSString *)getCurrentProfileID;
@@ -354,8 +363,8 @@ static NSUInteger gLazyWiFiGenerations;
 @interface PXObservedWiFiFixture : PXOwnedWiFiFixture
 @end
 @implementation PXObservedWiFiFixture
-- (void)loadWiFiInfoForProfileID:(NSString *)profileID {
-    gWiFiReloads++; [super loadWiFiInfoForProfileID:profileID];
+- (uint64_t)loadWiFiInfoForProfileID:(NSString *)profileID revision:(uint64_t)revision {
+    gWiFiReloads++; return [super loadWiFiInfoForProfileID:profileID revision:revision];
 }
 @end
 
@@ -1289,6 +1298,16 @@ static void TestWiFiLifecycle(void) {
         CHECK(![lazy currentWiFiInfo] && gLazyWiFiGenerations == 0 && [before isEqual:AllArtifactFiles()],
               "WiFi lazy miss carries its loader receipt and cannot steal newer pending generation");
     }
+    [wifi loadWiFiInfoFromCurrentProfile];
+    before = AllArtifactFiles(); copies = gWiFiCopies;
+    WiFiSpy(wifi, @{ @"ssid": @"must not persist invalid target", @"bssid": @"02:11:22:33:44:55" });
+    gWiFiProfileOverride = [PXWiFiInvalidProfileFixture new];
+    @try {
+        [wifi saveWiFiInfoToCurrentProfile];
+        CHECK(wifi.error && copies == gWiFiCopies && [before isEqual:AllArtifactFiles()],
+              "malformed authoritative WiFi profile rejects persistence before candidate copy without file redirection");
+        CheckArtifactLeaseFree();
+    } @finally { gWiFiProfileOverride = nil; }
     [wifi loadWiFiInfoFromCurrentProfile];
     // Preserve the existing optional-manager authority and file-only fallback.
     CHECK(SetArtifactSelection(@"b"), "WiFi file authority B selected"); gWiFiMemoryID = @"a";

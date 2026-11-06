@@ -68,6 +68,10 @@ WIFI_MANAGER_READERS = [
     '- (NSDictionary *)cachedWiFiDisplayInfo', '- (NSString *)currentSSID', '- (NSString *)currentBSSID',
     '- (NSString *)currentNetworkType', '- (NSString *)currentWiFiStandard', '- (BOOL)currentAutoJoinStatus', '- (NSDate *)lastConnectionTime',
 ]
+WIFI_MANAGER_RESOLUTION = [
+    '- (NSString *)profileIDFromManager:(id)manager', '- (NSString *)getCurrentProfileID',
+    '- (void)loadWiFiInfoFromCurrentProfile', '- (void)handleWiFiProfileNotification:(NSNotification *)note',
+]
 WIFI_MANAGER_LOAD = '- (uint64_t)loadWiFiInfoForProfileID:(NSString *)profileID revision:(uint64_t)revision'
 WIFI_MANAGER_GENERATE = '- (NSDictionary *)generateWiFiInfoAtRevision:(uint64_t)revision'
 WIFI_MANAGER_CAS = '- (uint64_t)beginWiFiCacheUpdateIfRevision:(uint64_t)revision'
@@ -81,7 +85,7 @@ WIFI_GETTER_PATH = [('- (NSString *)_getSSID', '[self originalSSID]'), ('- (id)_
 CF_EXCEPTION_MODES = (('plain-arc', '-fno-objc-arc-exceptions'), ('arc-eh', '-fobjc-arc-exceptions'))
 WRAPPERS = {
     'PXPreparedWiFiMethod.inc': ('common/WiFiManager.m', [*WIFI_MANAGER_CACHE_METHODS, WIFI_MANAGER_CAS, WIFI_MANAGER_GENERATE, '- (NSDictionary *)generateWiFiInfo', '- (void)adoptCommittedWiFiInfo:(NSDictionary *)wifiInfo profileID:(NSString *)profileID']),
-    'PXOwnedWiFiMethods.inc': ('common/WiFiManager.m', [*WIFI_MANAGER_CACHE_METHODS, WIFI_MANAGER_CAS, WIFI_MANAGER_SAVE, WIFI_MANAGER_LOAD, WIFI_MANAGER_GENERATE,
+    'PXOwnedWiFiMethods.inc': ('common/WiFiManager.m', [*WIFI_MANAGER_CACHE_METHODS, WIFI_MANAGER_CAS, WIFI_MANAGER_SAVE, WIFI_MANAGER_LOAD, WIFI_MANAGER_GENERATE, WIFI_MANAGER_RESOLUTION[3],
         '- (instancetype)init', '- (void)registerForProfileNotifications', '- (id)profileManagerForWiFi',
         '- (NSString *)getCurrentProfileID', '- (NSString *)profileIDFromManager:(id)manager',
         '- (void)loadWiFiInfoFromCurrentProfile', '- (void)loadWiFiInfoForProfileID:(NSString *)profileID',
@@ -320,8 +324,21 @@ def source_contracts():
     observer = identifier.method(wifi_source, '- (void)registerForProfileNotifications')
     assert '@synchronized (self)' in observer and 'if (self.profileChangeObserver) return;' in observer
     assert '__weak typeof(self) weakSelf' in observer and '__strong typeof(weakSelf) owner' in observer
-    assert 'loadWiFiInfoFromCurrentProfile' in observer and 'currentProfileId = eventID' not in observer
+    assert '[owner handleWiFiProfileNotification:note]' in observer
+    assert '@finally { owner = nil; note = nil; }' in observer
+    handler = identifier.method(wifi_source, WIFI_MANAGER_RESOLUTION[3])
+    assert handler.index('isKindOfClass:NSDictionary.class') < handler.index('payload[@"ProfileId"]')
+    assert 'loadWiFiInfoFromCurrentProfile' in handler and 'currentProfileId = eventID' not in handler
     assert '@property (nonatomic, strong) id profileChangeObserver;' in wifi_source
+    resolution = identifier.method(wifi_source, WIFI_MANAGER_RESOLUTION[0])
+    assert '[value description]' not in resolution
+    assert resolution.index('[manager currentProfile]') < resolution.index('PXCurrentProfileInfoPath()')
+    assert 'if (![value isKindOfClass:NSString.class]) return nil;' in resolution
+    assert 'isKindOfClass:NSNumber.class' in resolution and '[[value stringValue] copy]' in resolution
+    assert resolution.index('isKindOfClass:NSDictionary.class') < resolution.index('profileInfo[@"ProfileId"]')
+    assert '@catch' in resolution and '@finally' in resolution
+    reload = identifier.method(wifi_source, WIFI_MANAGER_RESOLUTION[2])
+    assert reload.index('beginWiFiCacheUpdate') < reload.index('getCurrentProfileID') < reload.index('loadWiFiInfoForProfileID:profileID revision:revision')
     profile_manager = identifier.method(wifi_source, '- (id)profileManagerForWiFi')
     assert 'respondsToSelector:@selector(sharedManager)' in profile_manager
     loader = identifier.method(wifi_source, WIFI_MANAGER_LOAD)
@@ -624,7 +641,8 @@ def generate_native_fragments(folder):
     (folder / 'PXWiFiCacheDeclarations.inc').write_text('\n'.join(cache_declarations), encoding='utf-8')
     (folder / 'PXWiFiCacheCoreDeclarations.inc').write_text('\n'.join(cache_declarations[:-1]), encoding='utf-8')
     (folder / 'PXWiFiCacheReaderDeclarations.inc').write_text('\n'.join(identifier.method(wifi_manager, sig).split(' {', 1)[0] + ';' for sig in WIFI_MANAGER_READERS), encoding='utf-8')
-    cache_methods = WIFI_MANAGER_CACHE_METHODS + WIFI_MANAGER_READERS + [WIFI_MANAGER_CAS, WIFI_MANAGER_LOAD, '- (void)loadWiFiInfoForProfileID:(NSString *)profileID', '- (void)adoptCommittedWiFiInfo:(NSDictionary *)wifiInfo profileID:(NSString *)profileID', '- (NSDictionary *)cachedWiFiInfoForProfileID:(NSString *)profileID']
+    (folder / 'PXWiFiResolutionDeclarations.inc').write_text('\n'.join(identifier.method(wifi_manager, sig).split(' {', 1)[0] + ';' for sig in WIFI_MANAGER_RESOLUTION), encoding='utf-8')
+    cache_methods = WIFI_MANAGER_CACHE_METHODS + WIFI_MANAGER_READERS + WIFI_MANAGER_RESOLUTION + [WIFI_MANAGER_CAS, WIFI_MANAGER_LOAD, '- (void)loadWiFiInfoForProfileID:(NSString *)profileID', '- (void)adoptCommittedWiFiInfo:(NSDictionary *)wifiInfo profileID:(NSString *)profileID', '- (NSDictionary *)cachedWiFiInfoForProfileID:(NSString *)profileID']
     (folder / 'PXWiFiManagerCacheMethods.inc').write_text('\n\n'.join(identifier.method(wifi_manager, sig) for sig in cache_methods), encoding='utf-8')
     storage = read('common/StorageManager.m'); hooks = read('TLinkIOSTweak/StorageHooks.x')
     wifi = read('TLinkIOSTweak/WiFiHook.x')
