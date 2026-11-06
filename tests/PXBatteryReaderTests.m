@@ -27,11 +27,15 @@ static NSString *PXProfileIdentityPath(NSString *profile) { return profile ? @"/
 - (NSUInteger)length { return 3; }
 - (float)floatValue { return NAN; }
 @end
+#include "PXBatteryCacheFields.inc"
 @interface PXBatteryReader : NSObject {
     NSString *_currentBatteryLevel;
     BOOL _currentLowPowerMode, _lowPowerModeLoaded;
 }
+@property (atomic, strong) NSError *error;
+#include "PXBatteryCacheDeclarations.inc"
 #include "PXBatteryReaderDeclarations.inc"
+- (NSString *)randomizeBatteryLevelAtMutation:(uint64_t)mutation;
 - (NSString *)generateBatteryLevel;
 - (void)seedLevel:(id)level lowPower:(BOOL)enabled loaded:(BOOL)loaded;
 - (id)cachedLevel;
@@ -39,13 +43,21 @@ static NSString *PXProfileIdentityPath(NSString *profile) { return profile ? @"/
 - (BOOL)lowPowerLoaded;
 @end
 @implementation PXBatteryReader
+@synthesize error = _error;
 - (void)seedLevel:(id)level lowPower:(BOOL)enabled loaded:(BOOL)loaded {
     _currentBatteryLevel = level; _currentLowPowerMode = enabled; _lowPowerModeLoaded = loaded;
 }
 - (id)cachedLevel { return _currentBatteryLevel; }
 - (BOOL)cachedLowPower { return _currentLowPowerMode; }
 - (BOOL)lowPowerLoaded { return _lowPowerModeLoaded; }
-- (NSString *)generateBatteryLevel { gRepairs++; return @"0.42"; }
+- (NSString *)generateBatteryLevel { return [self randomizeBatteryLevelAtMutation:[self beginBatteryMutation]]; }
+- (NSString *)randomizeBatteryLevelAtMutation:(uint64_t)mutation {
+    gRepairs++;
+    [self publishBatteryLevel:@"0.42" lowPowerMode:NO loaded:NO fields:PXBatteryCacheLevel mutation:mutation resultLevel:NULL resultLowPowerMode:NULL];
+    [self finishBatteryMutation:mutation];
+    return @"0.42";
+}
+#include "PXBatteryCacheMethods.inc"
 #define dictionaryWithContentsOfFile px_batteryRead
 #include "PXBatteryReaderMethods.inc"
 #undef dictionaryWithContentsOfFile

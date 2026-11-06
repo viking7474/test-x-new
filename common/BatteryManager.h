@@ -4,8 +4,13 @@
 
 + (instancetype)sharedManager;
 
+// Own cache level/LPM/loaded fields are protected as one short observation.
+// I/O, parsing/copying, generation, persistence and notifications stay outside it.
+// Separate public getter calls are separate observations, not a profile transaction.
 // Battery level string; reads accept 0.01-1.0 in float precision.
+// Repair is bounded: superseded work returns the latest valid cache or nil.
 - (NSString *)batteryLevel;
+// Setter freezes NSString input; nil clears without saving. Unsupported roots are ignored.
 - (void)setBatteryLevel:(NSString *)level;
 - (NSString *)generateBatteryLevel;
 - (NSString *)randomizeBatteryLevel;
@@ -28,11 +33,15 @@
 // Busy/pending/invalid or unavailable namespace never changes the mirror. Reads
 // retain profile/legacy/global fallback and never create profile directories.
 // Reads accept string/numeric levels; unsupported fields use missing-field policy.
-// Level requests retain existing repair behavior for invalid/non-finite values.
+// Level requests retain one-save repair for invalid/non-finite values. A load
+// started before a mutation/newer load cannot overwrite its cache result. Pending
+// candidates also reject disk adoption until their writer releases ownership.
+// Later reads still reload disk after completion, including after failed saves;
+// write/cache/source are not a single global transaction.
 - (void)saveBatteryInfoToDisk;
 - (void)loadBatteryInfoFromDisk;
 
-// Error handling
+// Error handling (retained atomically; late older-mutation results are ignored)
 - (NSError *)lastError;
 
 @end

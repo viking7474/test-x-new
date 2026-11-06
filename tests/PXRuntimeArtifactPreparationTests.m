@@ -121,24 +121,29 @@ static void PXFixtureDarwin(CFNotificationCenterRef center, CFStringRef name, co
     (void)center; (void)name; (void)object; (void)info; (void)immediate;
     gDarwin++; CHECK(gBatterySaves == 1, "Darwin notification follows single batch save");
 }
+#include "PXBatteryCacheFields.inc"
 @interface PXPreparedBatteryFixture : NSObject {
     NSString *_currentBatteryLevel;
     BOOL _currentLowPowerMode;
     BOOL _lowPowerModeLoaded;
 }
-@property (nonatomic, strong) NSError *error;
+@property (atomic, strong) NSError *error;
+#include "PXBatteryCacheDeclarations.inc"
+- (NSString *)randomizeBatteryLevelAtMutation:(uint64_t)mutation;
 - (NSDictionary *)generateBatteryInfo;
 - (NSString *)randomizeBatteryLevel;
 - (void)saveBatteryInfoToDisk;
 - (void)setFixtureLowPowerMode:(BOOL)value;
 - (NSString *)fixtureLevel;
 - (BOOL)persistBatteryRecord:(NSDictionary *)record;
+- (BOOL)persistBatteryRecord:(NSDictionary *)record mutation:(uint64_t)receipt;
 - (NSDictionary *)batteryRecordForLevel:(NSString *)level lowPowerMode:(BOOL)enabled;
 - (BOOL)mirrorBatteryRecord:(NSDictionary *)record error:(NSError **)error;
 - (void)adoptCommittedBatteryInfo:(NSDictionary *)batteryInfo;
 - (void)publishCommittedBatteryInfo:(NSDictionary *)batteryInfo timestamp:(NSDate *)timestamp;
 @end
 @implementation PXPreparedBatteryFixture
+@synthesize error = _error;
 - (void)saveBatteryInfoToDisk { gBatterySaves++; CHECK(_currentBatteryLevel.length > 0, "battery cache ready before legacy save"); }
 - (void)setFixtureLowPowerMode:(BOOL)value { _currentLowPowerMode = value; }
 - (NSString *)fixtureLevel { return _currentBatteryLevel; }
@@ -147,6 +152,9 @@ static void PXFixtureDarwin(CFNotificationCenterRef center, CFStringRef name, co
     CHECK([record[@"BatteryLevel"] isEqual:_currentBatteryLevel] && [record[@"LastUpdated"] isKindOfClass:NSDate.class], "battery wrapper persists captured record once");
     return YES;
 }
+- (BOOL)persistBatteryRecord:(NSDictionary *)record mutation:(uint64_t)receipt {
+    return [self batteryMutationIsCurrent:receipt] && [self persistBatteryRecord:record];
+}
 // Notification delivery is a fixture backend; do not broadcast production IPC.
 #define CFNotificationCenterPostNotification PXFixtureDarwin
 #define CFNotificationCenterGetDarwinNotifyCenter() NULL
@@ -154,6 +162,7 @@ static void PXFixtureDarwin(CFNotificationCenterRef center, CFStringRef name, co
 #define kLowPowerModeKey @"LowPowerMode"
 #define kLastUpdatedKey @"LastUpdated"
 #define BATTERY_PLIST_PATH Path(gRoot, @"legacy-battery.plist")
+#include "PXBatteryCacheMethods.inc"
 #include "PXPreparedBatteryMethods.inc"
 #undef BATTERY_PLIST_PATH
 #undef kLastUpdatedKey
@@ -398,7 +407,10 @@ static void PXOwnedBatteryDarwin(CFNotificationCenterRef center, CFStringRef nam
     NSString *_currentBatteryLevel;
     BOOL _currentLowPowerMode, _lowPowerModeLoaded;
 }
-@property (nonatomic, strong) NSError *error;
+@property (atomic, strong) NSError *error;
+#include "PXBatteryCacheDeclarations.inc"
+- (NSString *)randomizeBatteryLevelAtMutation:(uint64_t)mutation;
+- (void)applyLoadedBatteryInfo:(NSDictionary *)info profileSpecific:(BOOL)profileSpecific revision:(uint64_t)revision sequence:(uint64_t)sequence;
 - (NSString *)batteryLevel;
 - (void)setBatteryLevel:(NSString *)level;
 - (NSString *)generateBatteryLevel;
@@ -415,9 +427,11 @@ static void PXOwnedBatteryDarwin(CFNotificationCenterRef center, CFStringRef nam
 - (void)saveBatteryInfoToDisk;
 - (NSDictionary *)batteryRecordForLevel:(NSString *)level lowPowerMode:(BOOL)enabled;
 - (BOOL)persistBatteryRecord:(NSDictionary *)record;
+- (BOOL)persistBatteryRecord:(NSDictionary *)record mutation:(uint64_t)receipt;
 - (BOOL)mirrorBatteryRecord:(NSDictionary *)record error:(NSError **)error;
 @end
 @implementation PXOwnedBatteryFixture
+@synthesize error = _error;
 - (instancetype)init { if ((self = [super init])) _currentBatteryLevel = @"0.75"; return self; }
 #define CFNotificationCenterPostNotification PXOwnedBatteryDarwin
 #define CFNotificationCenterGetDarwinNotifyCenter() NULL
@@ -425,6 +439,7 @@ static void PXOwnedBatteryDarwin(CFNotificationCenterRef center, CFStringRef nam
 #define kLowPowerModeKey @"LowPowerMode"
 #define kLastUpdatedKey @"LastUpdated"
 #define BATTERY_PLIST_PATH gOwnedBatteryMirrorPath
+#include "PXBatteryCacheMethods.inc"
 #include "PXOwnedBatteryMethods.inc"
 #undef BATTERY_PLIST_PATH
 #undef kLastUpdatedKey
@@ -1626,6 +1641,24 @@ static void TestBatteryLifecycle(void) {
               "battery mutation refuses unavailable lifecycle namespace without creating root or changing mirror");
     } @finally { gRoot = availableRoot; }
     CHECK(SetArtifactSelection(@"a"), "battery selection restored after unavailable namespace test");
+    // Source already accepted: a checkpoint may publish newer local cache/error
+    // without changing the captured source/mirror record or reviving old errors.
+    __block BOOL newerAdoption = NO;
+    gDuringBatteryMirror = nil; gDuringBatteryNotice = nil;
+    gStore.testCheckpoint = ^(NSString *phase) {
+        if ([phase isEqual:@"commit-written"] && !newerAdoption) {
+            newerAdoption = YES;
+            [battery adoptCommittedBatteryInfo:@{ @"BatteryLevel": @"0.91", @"LowPowerMode": @NO }];
+            uint64_t receipt = 0; (void)[battery captureBatteryLevel:NULL loaded:NULL revision:NULL mutation:&receipt];
+            [battery setBatteryError:[NSError errorWithDomain:@"fixture.newer" code:777 userInfo:nil] mutation:receipt];
+        }
+    };
+    @try { [battery setBatteryLevel:@"0.44"]; } @finally { gStore.testCheckpoint = nil; }
+    source = [NSDictionary dictionaryWithContentsOfFile:Path(PXProfileIdentityPath(@"a"), @"battery_info.plist")];
+    mirror = [NSDictionary dictionaryWithContentsOfFile:normalMirror];
+    CHECK(newerAdoption && [source[@"BatteryLevel"] isEqual:@"0.44"] && BatteryLegacyMirrorMatchesSource(source, mirror) &&
+          [[battery captureBatteryLevel:NULL loaded:NULL revision:NULL mutation:NULL] isEqual:@"0.91"] && battery.lastError.code == 777,
+          "accepted battery source keeps captured mirror while newer cache and error survive commit completion");
     gDuringBatteryMirror = nil; gDuringBatteryNotice = nil;
     [NSNotificationCenter.defaultCenter removeObserver:observer];
     CheckArtifactLeaseFree();

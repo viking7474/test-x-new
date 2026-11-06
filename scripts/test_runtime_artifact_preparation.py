@@ -89,11 +89,24 @@ BATTERY_NOTIFICATION_METHODS = [
     'static void PXSeedBatteryLPMBaseline(void)',
     'static void batterySettingsChanged(CFNotificationCenterRef center,\n                                   void *observer,\n                                   CFStringRef name,\n                                   const void *object,\n                                   CFDictionaryRef userInfo)',
 ]
+BATTERY_CACHE_METHODS = [
+    '- (void)finishBatteryMutation:(uint64_t)mutation',
+    '- (uint64_t)beginBatteryMutation', '- (uint64_t)beginBatteryMutationIfRevision:(uint64_t)revision',
+    '- (BOOL)batteryMutationIsCurrent:(uint64_t)mutation',
+    '- (NSString *)captureBatteryLevel:(BOOL *)enabled loaded:(BOOL *)loaded revision:(uint64_t *)revision mutation:(uint64_t *)mutation',
+    '- (BOOL)publishBatteryLevel:(NSString *)level lowPowerMode:(BOOL)enabled loaded:(BOOL)loaded fields:(PXBatteryCacheFields)fields mutation:(uint64_t)mutation resultLevel:(NSString * __strong *)resultLevel resultLowPowerMode:(BOOL *)resultLowPower',
+    '- (NSError *)error', '- (void)setError:(NSError *)error',
+    '- (void)setBatteryError:(NSError *)error mutation:(uint64_t)mutation',
+    '- (uint64_t)beginBatteryLoad:(uint64_t *)sequence', '- (BOOL)isValidBatteryLevel:(id)level',
+]
+BATTERY_APPLY = '- (void)applyLoadedBatteryInfo:(NSDictionary *)info profileSpecific:(BOOL)profileSpecific revision:(uint64_t)revision sequence:(uint64_t)sequence'
+BATTERY_RANDOM = '- (NSString *)randomizeBatteryLevelAtMutation:(uint64_t)mutation'
 BATTERY_READER_METHODS = [
     '- (NSString *)batteryInfoPathForCurrentProfile',
     '- (void)applyLoadedBatteryInfo:(NSDictionary *)info profileSpecific:(BOOL)profileSpecific',
-    '- (void)loadBatteryInfoFromDisk', '- (NSString *)batteryLevel',
+    BATTERY_APPLY, '- (void)loadBatteryInfoFromDisk', '- (NSString *)batteryLevel',
 ]
+
 WIFI_MANAGER_LOAD = '- (uint64_t)loadWiFiInfoForProfileID:(NSString *)profileID revision:(uint64_t)revision'
 WIFI_MANAGER_GENERATE = '- (NSDictionary *)generateWiFiInfoAtRevision:(uint64_t)revision'
 WIFI_MANAGER_CAS = '- (uint64_t)beginWiFiCacheUpdateIfRevision:(uint64_t)revision'
@@ -115,7 +128,7 @@ WRAPPERS = {
         '- (void)adoptCommittedWiFiInfo:(NSDictionary *)wifiInfo profileID:(NSString *)profileID',
         '- (NSDictionary *)currentWiFiInfo', '- (NSDictionary *)cachedWiFiInfoForProfileID:(NSString *)profileID', '- (void)setCurrentWiFiInfo:(NSDictionary *)wifiInfo',
         '- (BOOL)isValidSSID:(NSString *)ssid', '- (BOOL)isValidBSSID:(NSString *)bssid', '- (void)dealloc']),
-    'PXPreparedBatteryMethods.inc': ('common/BatteryManager.m', ['- (NSString *)randomizeBatteryLevel', '- (NSDictionary *)generateBatteryInfo', '- (void)adoptCommittedBatteryInfo:(NSDictionary *)batteryInfo', '- (void)publishCommittedBatteryInfo:(NSDictionary *)batteryInfo timestamp:(NSDate *)timestamp',
+    'PXPreparedBatteryMethods.inc': ('common/BatteryManager.m', [BATTERY_RANDOM, '- (NSString *)randomizeBatteryLevel', '- (NSDictionary *)generateBatteryInfo', '- (void)adoptCommittedBatteryInfo:(NSDictionary *)batteryInfo', '- (void)publishCommittedBatteryInfo:(NSDictionary *)batteryInfo timestamp:(NSDate *)timestamp',
         '- (NSDictionary *)batteryRecordForLevel:(NSString *)level lowPowerMode:(BOOL)enabled',
         '- (BOOL)mirrorBatteryRecord:(NSDictionary *)record error:(NSError **)error']),
     'PXOwnedBatteryMethods.inc': ('common/BatteryManager.m', [
@@ -123,10 +136,10 @@ WRAPPERS = {
         '- (NSString *)randomizeBatteryLevel', '- (BOOL)lowPowerModeEnabled', '- (void)setLowPowerModeEnabled:(BOOL)enabled',
         '- (NSDictionary *)generateBatteryInfo', '- (void)adoptCommittedBatteryInfo:(NSDictionary *)batteryInfo',
         '- (void)publishCommittedBatteryInfo:(NSDictionary *)batteryInfo timestamp:(NSDate *)timestamp', '- (NSError *)lastError',
-        '- (void)applyLoadedBatteryInfo:(NSDictionary *)info profileSpecific:(BOOL)profileSpecific',
+        '- (void)applyLoadedBatteryInfo:(NSDictionary *)info profileSpecific:(BOOL)profileSpecific', BATTERY_APPLY, BATTERY_RANDOM,
         '- (NSString *)batteryInfoPathForCurrentProfile', '- (void)loadBatteryInfoFromDisk', '- (void)saveBatteryInfoToDisk',
         '- (NSDictionary *)batteryRecordForLevel:(NSString *)level lowPowerMode:(BOOL)enabled',
-        '- (BOOL)persistBatteryRecord:(NSDictionary *)record', '- (BOOL)mirrorBatteryRecord:(NSDictionary *)record error:(NSError **)error']),
+        '- (BOOL)persistBatteryRecord:(NSDictionary *)record', '- (BOOL)persistBatteryRecord:(NSDictionary *)record mutation:(uint64_t)receipt', '- (BOOL)mirrorBatteryRecord:(NSDictionary *)record error:(NSError **)error']),
     'PXPreparedStorageMethod.inc': ('common/StorageManager.m', ['- (NSDictionary *)generateStorageForCapacity:(NSString *)capacity', '- (void)adoptCommittedStorageInfo:(NSDictionary *)storageInfo', '- (NSDictionary *)currentStorageInfo',
         *STORAGE_READ_SIGNATURES,
         '- (BOOL)commitDisplayStorageInfo:(NSDictionary *)values updateFilesystem:(BOOL)updateFilesystem error:(NSError **)error',
@@ -458,11 +471,11 @@ def source_contracts():
     assert 'generateWiFiInfoAtRevision:revision' in getter
 
     battery = identifier.method(read('common/BatteryManager.m'), '- (NSDictionary *)generateBatteryInfo')
-    assert 'PXPrepareRuntimeBatteryInfo(_currentLowPowerMode)' in battery
-    assert battery.count('[self persistBatteryRecord:record]') == 1 and 'randomizeBatteryLevel' not in battery
-    assert battery.index('[self persistBatteryRecord:record]') < battery.index('postNotificationName:')
+    assert 'PXPrepareRuntimeBatteryInfo(enabled)' in battery and 'captureBatteryLevel:&enabled' in battery
+    assert battery.count('[self persistBatteryRecord:record mutation:mutation]') == 1 and 'randomizeBatteryLevel' not in battery
+    assert battery.index('[self persistBatteryRecord:record mutation:mutation]') < battery.index('postNotificationName:')
     battery_source = read('common/BatteryManager.m')
-    persist_battery = identifier.method(battery_source, '- (BOOL)persistBatteryRecord:(NSDictionary *)record')
+    persist_battery = identifier.method(battery_source, '- (BOOL)persistBatteryRecord:(NSDictionary *)record mutation:(uint64_t)receipt')
     assert persist_battery.index('acquireInDirectory:PXProfilesPath()') < persist_battery.index('PXRequireNoPendingProfileDeletion') < persist_battery.index('dictionaryWithContentsOfFile:PXCurrentProfileInfoPath()')
     assert 'borrowWithLifecycleLease:lease' in persist_battery and 'PXStageRuntimeBattery' in persist_battery
     assert persist_battery.index('[mutation performSourceWrite:') < persist_battery.index('[lease invalidate]') < persist_battery.index('[self mirrorBatteryRecord:')
@@ -471,21 +484,64 @@ def source_contracts():
     path_reader = identifier.method(battery_source, '- (NSString *)batteryInfoPathForCurrentProfile')
     assert 'createDirectoryAtPath:' not in path_reader and 'PXProfileArtifactMutation' not in path_reader and 'PXLog(' not in path_reader
     level_reader = identifier.method(battery_source, '- (NSString *)batteryLevel')
-    assert 'saveBatteryInfoToDisk' not in level_reader and level_reader.count('[self generateBatteryLevel]') == 2
+    assert 'saveBatteryInfoToDisk' not in level_reader and level_reader.count('[self randomizeBatteryLevelAtMutation:mutation]') == 1
     assert 'isKindOfClass:NSString.class' in level_reader
-    assert '!isfinite(storedLevel)' in level_reader and 'storedLevel < 0.01f || storedLevel > 1.0f' in level_reader
+    valid_level = identifier.method(battery_source, '- (BOOL)isValidBatteryLevel:(id)level')
+    assert 'isfinite(value)' in valid_level and 'value >= 0.01f && value <= 1.0f' in valid_level
     load_battery = identifier.method(battery_source, '- (void)loadBatteryInfoFromDisk')
     assert load_battery.index('profileBatteryPath]') < load_battery.index('legacyPath]') < load_battery.index('BATTERY_PLIST_PATH]')
-    assert 'applyLoadedBatteryInfo:batteryInfo profileSpecific:YES' in load_battery and 'applyLoadedBatteryInfo:batteryInfo profileSpecific:NO' in load_battery
-    apply_battery = identifier.method(battery_source, BATTERY_READER_METHODS[1])
+    assert 'applyLoadedBatteryInfo:batteryInfo profileSpecific:YES' in load_battery and 'profileSpecific:NO revision:revision sequence:sequence' in load_battery
+    apply_battery = identifier.method(battery_source, BATTERY_APPLY)
     assert '[level copy]' in apply_battery and '[[level stringValue] copy]' in apply_battery
     assert 'isKindOfClass:NSNumber.class' in apply_battery and 'isKindOfClass:NSString.class' in apply_battery
     assert 'hasLowPower ? [lowPower boolValue] : NO' in apply_battery and 'else if (profileSpecific)' in apply_battery and 'else if (!_lowPowerModeLoaded)' in apply_battery
-    assert '@finally { normalized = nil; lowPower = nil; level = nil; info = nil; }' in apply_battery
+    assert '@finally { discarded = nil; normalized = nil; lowPower = nil; level = nil; info = nil; }' in apply_battery
     battery_reader_fixture = read('tests/PXBatteryReaderTests.m')
     check_macro_arity(battery_reader_fixture, 'PXBatteryReaderTests.m')
     assert 'battery float endpoints include exact one-percent without regeneration' in battery_reader_fixture
     assert 'battery real plist reader accepts exact one-percent and numeric levels without repairs or publication' in read('tests/PXRuntimeArtifactPreparationTests.m')
+    assert '@property (atomic, strong) NSError *error;' in battery_source
+    cache_methods = [identifier.method(battery_source, sig) for sig in BATTERY_CACHE_METHODS]
+    finish_mutation, begin_mutation, repair_claim, mutation_current, capture, publish, error_getter, error_setter, error_publication, begin_load, valid_level = cache_methods
+    assert '++_batteryMutationSequence' in begin_mutation and '++_batteryCacheRevision' in begin_mutation and '_batteryPendingMutation = _batteryMutationSequence;' in begin_mutation
+    assert '_batteryPendingMutation = 0;' in finish_mutation and '++_batteryCacheRevision' in finish_mutation
+    assert 'if (revision != _batteryCacheRevision || _batteryPendingMutation) return 0;' in repair_claim
+    assert '@synchronized (self)' in capture and 'level = _currentBatteryLevel;' in capture
+    assert 'if (mutation != _batteryMutationSequence) return NO;' in publish
+    assert 'objc_precise_lifetime' in publish and '@finally { discarded = nil; level = nil; }' in publish
+    assert 'resultLowPower) *resultLowPower = _currentLowPowerMode' in publish
+    assert 'if (mutation != _batteryMutationSequence) return;' in error_publication
+    assert 'discarded = _error; _error = error;' in error_publication and 'self.error' not in error_publication
+    assert '@synchronized (self) { value = _error; }' in error_getter and '[self setBatteryError:error mutation:mutation];' in error_setter
+    assert '++_batteryLoadSequence' in begin_load and 'return _batteryCacheRevision;' in begin_load
+    assert 'if (_batteryPendingMutation) { *sequence = 0; return _batteryCacheRevision; }' in begin_load and 'if (!sequence) return;' in load_battery
+    assert load_battery.index('beginBatteryLoad:&sequence') < load_battery.index('batteryInfoPathForCurrentProfile')
+    assert apply_battery.index('[level copy]') < apply_battery.index('@synchronized (self)')
+    assert 'revision != _batteryCacheRevision || sequence != _batteryLoadSequence || _batteryPendingMutation' in apply_battery
+    assert 'discarded = _currentBatteryLevel; _currentBatteryLevel = normalized;' in apply_battery
+    assert 'beginBatteryMutationIfRevision:revision' in level_reader and 'return [self isValidBatteryLevel:level] ? level : nil;' in level_reader
+    level_setter = identifier.method(battery_source, '- (void)setBatteryLevel:(NSString *)level')
+    assert level_setter.index('beginBatteryMutation]') < level_setter.index('[level copy]') < level_setter.index('publishBatteryLevel:')
+    assert 'saveBatteryInfoToDisk' not in level_setter and 'batteryRecordForLevel:candidate lowPowerMode:enabled' in level_setter
+    assert '[self persistBatteryRecord:record mutation:mutation]' in level_setter
+    randomize = identifier.method(battery_source, BATTERY_RANDOM)
+    assert randomize.count('PXPrepareRuntimeBatteryLevel()') == 1 and 'resultLowPowerMode:&enabled' in randomize
+    assert persist_battery.count('if (![self batteryMutationIsCurrent:receipt]) return NO;') == 3
+    for sig in ('- (void)setBatteryLevel:(NSString *)level', BATTERY_RANDOM, '- (void)setLowPowerModeEnabled:(BOOL)enabled',
+                '- (NSDictionary *)generateBatteryInfo', '- (void)adoptCommittedBatteryInfo:(NSDictionary *)batteryInfo', '- (void)saveBatteryInfoToDisk'):
+        assert '@finally { [self finishBatteryMutation:mutation];' in identifier.method(battery_source, sig)
+    assert '[self setBatteryError:nil mutation:receipt];' in persist_battery and 'self.error =' not in persist_battery
+    assert 'if (![self batteryMutationIsCurrent:receipt]) return NO;\n                return PXStageRuntimeBattery' in persist_battery
+    cache_fixture = read('tests/PXBatteryCacheTests.m')
+    check_macro_arity(cache_fixture, 'PXBatteryCacheTests.m')
+    for label in ('old battery load cannot overwrite a newer committed cache pair',
+                  'newer battery load sequence wins when an older disk read completes last',
+                  'superseded battery record creation never persists or relabels a newer cache value',
+                  'late battery persistence error cannot overwrite a newer committed adoption result',
+                  'concurrent battery pair publication and capture never observe mixed fields',
+                  'discarded battery cache root deallocates after monitor release'):
+        assert label in cache_fixture
+    assert 'accepted battery source keeps captured mirror while newer cache and error survive commit completion' in read('tests/PXRuntimeArtifactPreparationTests.m')
     battery_hooks = read('TLinkIOSTweak/BatteryHooks.x')
     bundle_reader, battery_scope, skip_types, match_type, method_abi, signature_abi, enable_gate = [identifier.method(battery_hooks, sig) for sig in BATTERY_ENABLE_METHODS]
     assert 'loadScopedApps' not in battery_hooks and 'isInScopedAppsList' not in battery_hooks
@@ -560,8 +616,8 @@ def source_contracts():
         assert label in snapshot_fixture
     assert '#include "PXBatteryNotification.inc"' in snapshot_fixture
     low_power = identifier.method(battery_source, '- (void)setLowPowerModeEnabled:(BOOL)enabled')
-    assert low_power.index('if (![self persistBatteryRecord:record]) return;') < low_power.index('postNotificationName:')
-    assert 'if (![self persistBatteryRecord:record]) return batteryInfo;' in battery
+    assert low_power.index('if (![self batteryMutationIsCurrent:mutation] || ![self persistBatteryRecord:record mutation:mutation]) return;') < low_power.index('postNotificationName:')
+    assert 'if (![self batteryMutationIsCurrent:mutation] || ![self persistBatteryRecord:record mutation:mutation]) return batteryInfo;' in battery
 
     assert 'PXPrepareRuntimeStorage(capacity)' in read('common/StorageManager.m')
     uptime = identifier.method(read('common/UptimeManager.m'), WRAPPERS['PXPreparedUptimeMethod.inc'][1][0])
@@ -846,6 +902,15 @@ def generate_native_fragments(folder):
     observation_globals = [next(line for line in battery_hooks.splitlines() if line.startswith('static BOOL ' + name + ' =')) for name in ('gHavePostedLPM', 'gLastPostedLPM')]
     (folder / 'PXBatteryNotification.inc').write_text('\n'.join(observation_globals) + '\n\n' + '\n\n'.join(identifier.method(battery_hooks, sig) for sig in BATTERY_NOTIFICATION_METHODS), encoding='utf-8')
     battery_source = read('common/BatteryManager.m')
+    cache_fields = battery_source[battery_source.index('typedef NS_OPTIONS(NSUInteger, PXBatteryCacheFields)'):battery_source.index('@interface BatteryManager ()')]
+    (folder / 'PXBatteryCacheFields.inc').write_text(cache_fields, encoding='utf-8')
+    properties = '\n'.join(line for line in battery_source.splitlines() if line.startswith('@property (nonatomic) uint64_t battery'))
+    (folder / 'PXBatteryCacheDeclarations.inc').write_text(properties + '\n' + '\n'.join(identifier.method(battery_source, sig).split(' {', 1)[0] + ';' for sig in BATTERY_CACHE_METHODS), encoding='utf-8')
+    (folder / 'PXBatteryCacheMethods.inc').write_text('\n\n'.join(identifier.method(battery_source, sig) for sig in BATTERY_CACHE_METHODS), encoding='utf-8')
+    flow = list(dict.fromkeys(WRAPPERS['PXOwnedBatteryMethods.inc'][1]))
+    flow.remove('- (BOOL)persistBatteryRecord:(NSDictionary *)record'); flow.remove('- (BOOL)persistBatteryRecord:(NSDictionary *)record mutation:(uint64_t)receipt'); flow.remove('- (BOOL)mirrorBatteryRecord:(NSDictionary *)record error:(NSError **)error')
+    (folder / 'PXBatteryCacheFlowDeclarations.inc').write_text('\n'.join(identifier.method(battery_source, sig).split(' {', 1)[0] + ';' for sig in flow), encoding='utf-8')
+    (folder / 'PXBatteryCacheFlowMethods.inc').write_text('\n\n'.join(identifier.method(battery_source, sig) for sig in flow), encoding='utf-8')
     (folder / 'PXBatteryReaderDeclarations.inc').write_text('\n'.join(identifier.method(battery_source, sig).split(' {', 1)[0] + ';' for sig in BATTERY_READER_METHODS), encoding='utf-8')
     (folder / 'PXBatteryReaderMethods.inc').write_text('\n\n'.join(identifier.method(battery_source, sig) for sig in BATTERY_READER_METHODS), encoding='utf-8')
     wifi_manager = read('common/WiFiManager.m')
@@ -966,6 +1031,12 @@ def native_tests():
                                 '-Wall', '-Wextra', '-Werror=implicit-function-declaration', '-I', str(folder), *defines,
                                 str(ROOT / 'tests/PXBatterySnapshotTests.m'), '-framework', 'Foundation', '-o', str(battery_snapshot_binary)], check=True, cwd=ROOT, timeout=60)
                 subprocess.run([str(battery_snapshot_binary)], check=True, cwd=ROOT, timeout=60)
+                battery_cache_binary = folder / ('battery-cache-' + scheme + '-' + arc_mode)
+                print('Battery cache flow native matrix:', scheme, arc_mode, flush=True)
+                subprocess.run(['xcrun', 'clang', '-O0', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions', arc_flag,
+                                '-Wall', '-Wextra', '-Werror=implicit-function-declaration', '-I', str(folder), *defines,
+                                str(ROOT / 'tests/PXBatteryCacheTests.m'), '-framework', 'Foundation', '-framework', 'CoreFoundation', '-o', str(battery_cache_binary)], check=True, cwd=ROOT, timeout=60)
+                subprocess.run([str(battery_cache_binary)], check=True, cwd=ROOT, timeout=60)
                 battery_reader_binary = folder / ('battery-reader-' + scheme + '-' + arc_mode)
                 print('Battery reader native matrix:', scheme, arc_mode, flush=True)
                 subprocess.run(['xcrun', 'clang', '-O0', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions', arc_flag,

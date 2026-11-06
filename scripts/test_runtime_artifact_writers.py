@@ -151,7 +151,7 @@ def source_contracts():
     assert single.index('PXStageRuntimeIPv4WithExistingPair') < single.index('generateSpoofedLocalIPv6AddressFromCurrent')
     assert single.index('} error:error]') < single.index('generateSpoofedLocalIPv6AddressFromCurrent')
     for body, helper_name in ((objc_method(wifi, '- (void)saveWiFiInfoToCurrentProfileAtRevision:(uint64_t)revision'), 'WiFi'),
-                              (objc_method(battery, '- (BOOL)persistBatteryRecord:(NSDictionary *)record'), 'Battery'),
+                              (objc_method(battery, '- (BOOL)persistBatteryRecord:(NSDictionary *)record mutation:(uint64_t)receipt'), 'Battery'),
                               (objc_method(uptime, '- (void)generateConsistentUptimeAndBootTimeForProfile:(NSString *)profilePath'), 'Uptime')):
         assert f'PXStageRuntime{helper_name}' in body
         assert '[mutation performSourceWrite:' in body
