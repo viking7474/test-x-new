@@ -72,3 +72,10 @@ and object-release questions. This batch does not claim to fix them. Private
 selector ABI/availability, legacy uninstalled CF ownership, hot-path logging and
 within-profile multi-file snapshot consistency also remain separate. Full Patch
 4 and later stages remain incomplete.
+
+
+Follow-up H6X addresses the four process read-cache policies and object-release
+questions listed above, while preserving this batch's signal/radio implementation.
+See [H6X](PATCH-4C-2H6X-network-read-cache-publication.md) for the new scope and
+verification limits; the user's subsequent build confirmation applies to H6W,
+not to the new H6X native assertions.

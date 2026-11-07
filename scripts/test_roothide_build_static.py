@@ -178,6 +178,16 @@ require('common/PXPaths.m common/PXRuntimeSnapshot.m' in makefile and
         '@"storage"' in runtime_snapshot and '@"batteryInfo"' in runtime_snapshot and
         '@"bootTime"' in runtime_snapshot and '@"systemUptime"' in runtime_snapshot,
         "RootHide runtime mirror is missing profile artifacts or is not mirrored atomically into scoped app containers")
+# Carrier memo and artifact reads now reuse the same captured operationView.
+# Require the capture and all fields inside that exact reader, rather than an
+# obsolete variable alias somewhere else in the source file.
+network_carrier_reader = method(network_hooks, "static NSDictionary *getCarrierDetailsFromProfile()")
+require('PXRuntimeReadSnapshot *operationView = PXCaptureRuntimeSnapshot();' in network_carrier_reader and
+        '[operationView profileArtifact:@"carrierDetails"]' in network_carrier_reader and
+        '[operationView profileArtifact:@"networkSettings"]' in network_carrier_reader and
+        'deviceIDs = operationView.deviceIDs;' in network_carrier_reader and
+        'objc_getAssociatedObject(operationView, &carrierResultKey)' in network_carrier_reader,
+        "RootHide carrier fields and memo must use the same captured operation view")
 require('[runtimeView profileArtifact:@"storage"]' in storage_hooks and
         'runtimeView.tlinkSettings' in storage_hooks and
         '[runtimeView profileArtifact:@"batteryInfo"]' in battery_hooks and
@@ -186,7 +196,6 @@ require('[runtimeView profileArtifact:@"storage"]' in storage_hooks and
         '[snapshot profileArtifact:@"bootTime"]' in boot_time_hooks and
         '[snapshot profileArtifact:@"systemUptime"]' in boot_time_hooks and
         '[runtimeView profileArtifact:@"networkSettings"]' in network_hooks and
-        '[runtimeView profileArtifact:@"carrierDetails"]' in network_hooks and
         '[runtimeView profileArtifact:@"deviceTheme"]' in theme_hooks and
         '[runtimeView profileArtifact:@"userDefaultsUUID"]' in user_defaults_hooks and
         '[runtimeView profileArtifact:@"pasteboardUUID"]' in pasteboard_hooks,

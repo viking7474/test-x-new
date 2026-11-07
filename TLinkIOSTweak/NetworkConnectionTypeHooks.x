@@ -37,23 +37,31 @@ static NSString *const kSecuritySettingsPath = @"/var/mobile/Library/Preferences
 // All network cache values/timestamps are protected by one process-local lock.
 static os_unfair_lock gNetworkCacheLock = OS_UNFAIR_LOCK_INIT;
 
-// Cache for quick lookup
-static NSInteger cachedConnectionType = -1;
-static BOOL cachedNetworkDataSpoofEnabled = NO;
-static NSDate *cacheTimestamp = nil;
-static const NSTimeInterval kCacheValidDuration = 5.0; // 5 seconds
+#pragma mark - Read cache declarations
 
+typedef NS_ENUM(NSUInteger, PXNetworkReadCacheKind) {
+    PXNetworkReadMode, PXNetworkReadISO, PXNetworkReadPinned, PXNetworkReadCarrier,
+    PXNetworkReadCacheCount
+};
+typedef struct {
+    double loadedAt;
+    BOOL hasTime;
+    uint64_t revision;
+} PXNetworkReadCacheStamp;
+static PXNetworkReadCacheStamp gNetworkReadStamps[PXNetworkReadCacheCount];
+static id gNetworkModeValue, gNetworkISOValue, gNetworkPinnedValue, gNetworkCarrierValue;
+static const NSTimeInterval kCacheValidDuration = 5.0;
+static const NSTimeInterval kISOCountryCodeCacheValidDuration = 60.0;
+static const NSTimeInterval kCarrierDetailsCacheValidDuration = 60.0;
+static const NSTimeInterval kTargetRegionCacheValidDuration = 5.0;
+
+#pragma mark - End read cache declarations
 
 // Default cellular identity (US T-Mobile) — never use product name "TLinkIOS" as carrier.
 // Profile/target-region values override these when present.
 static NSString *const kFakeCarrierName = @"T-Mobile";
 static NSString *const kFakeMobileCountryCode = @"310";
 static NSString *const kFakeMobileNetworkCode = @"260";
-
-// Cache for ISO country code
-static NSString *cachedISOCountryCode = nil;
-static NSDate *isoCountryCodeCacheTimestamp = nil;
-static const NSTimeInterval kISOCountryCodeCacheValidDuration = 60.0; // 60 seconds
 
 // Fallback WiFi identity (realistic-looking; profile WiFi info should override when set)
 static NSString *const kFakeWiFiSSID = @"HomeWiFi";
@@ -69,18 +77,6 @@ static NSString *PXCarrierNameForMCCMNC(NSString *mcc, NSString *mnc) {
     }
     return kFakeCarrierName;
 }
-
-// Cache for carrier details
-static NSString *cachedCarrierName = nil;
-static NSString *cachedMobileCountryCode = nil;
-static NSString *cachedMobileNetworkCode = nil;
-static NSDate *carrierDetailsCacheTimestamp = nil;
-static const NSTimeInterval kCarrierDetailsCacheValidDuration = 60.0; // 60 seconds
-
-// Cache for TargetRegion pinned overrides
-static NSDate *targetRegionCacheTimestamp = nil;
-static NSDictionary *cachedTargetRegion = nil;
-static const NSTimeInterval kTargetRegionCacheValidDuration = 5.0;
 
 #pragma mark - Signal cache state
 
@@ -131,33 +127,102 @@ static void PXNetworkInvalidateSignalCachesLocked(void) {
 
 #pragma mark - End signal cache state
 
+#pragma mark - Read cache publication
+
+// Only internal enum constants reach these helpers. No Objective-C messages or
+// allocation in the critical sections; retaining the captured root is allowed.
+static id __strong *PXNetworkReadCacheSlot(PXNetworkReadCacheKind kind) {
+    switch (kind) {
+        case PXNetworkReadMode: return &gNetworkModeValue;
+        case PXNetworkReadISO: return &gNetworkISOValue;
+        case PXNetworkReadPinned: return &gNetworkPinnedValue;
+        case PXNetworkReadCarrier: return &gNetworkCarrierValue;
+        default: return NULL;
+    }
+}
+
+static id PXNetworkReadCached(PXNetworkReadCacheKind kind, double now, double ttl,
+                              uint64_t *revision, BOOL *hit) {
+    id __strong *slot = PXNetworkReadCacheSlot(kind);
+    if (!slot) { if (hit) *hit = NO; return nil; }
+    id result = nil;
+    os_unfair_lock_lock(&gNetworkCacheLock);
+    PXNetworkReadCacheStamp stamp = gNetworkReadStamps[kind];
+    BOOL valid = PXNetworkSignalFresh(now, stamp.loadedAt, stamp.hasTime, ttl);
+    if (valid) result = *slot;
+    if (revision) *revision = stamp.revision;
+    if (hit) *hit = valid; // A valid nil is the pinned-region negative cache.
+    os_unfair_lock_unlock(&gNetworkCacheLock);
+    return result;
+}
+
+static BOOL PXNetworkPublishReadCache(PXNetworkReadCacheKind kind, id value,
+                                     double loadedAt, uint64_t revision) {
+    id __strong *slot = PXNetworkReadCacheSlot(kind);
+    if (!slot) return NO;
+    __attribute__((objc_precise_lifetime)) id retired = nil;
+    BOOL published = NO;
+    @try {
+        os_unfair_lock_lock(&gNetworkCacheLock);
+        if (gNetworkReadStamps[kind].revision == revision) {
+            retired = *slot;
+            *slot = value;
+            gNetworkReadStamps[kind].loadedAt = loadedAt;
+            gNetworkReadStamps[kind].hasTime = isfinite(loadedAt);
+            gNetworkReadStamps[kind].revision++;
+            published = YES;
+        }
+        os_unfair_lock_unlock(&gNetworkCacheLock);
+        return published;
+    } @finally {
+        // Destructors may re-enter a reader/invalidation; never run under lock.
+        retired = nil; value = nil;
+    }
+}
+
+static NSNumber *PXNetworkCurrentModePacket(void) {
+    os_unfair_lock_lock(&gNetworkCacheLock);
+    NSNumber *mode = gNetworkModeValue;
+    os_unfair_lock_unlock(&gNetworkCacheLock);
+    return mode;
+}
+
 static BOOL PXNetworkDataSpoofEnabledCached(void) {
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     return PXRuntimeReadBool(PXCaptureRuntimeSnapshot().securitySettings[@"networkDataSpoofEnabled"]);
 #else
-    os_unfair_lock_lock(&gNetworkCacheLock);
-    BOOL enabled = cachedNetworkDataSpoofEnabled;
-    os_unfair_lock_unlock(&gNetworkCacheLock);
-    return enabled;
+    NSNumber *mode = nil;
+    @try {
+        mode = PXNetworkCurrentModePacket();
+        // Enabled is encoded in the same mode packet: -1 means disabled.
+        return mode && mode.integerValue >= NetworkConnectionTypeAuto;
+    } @finally { mode = nil; }
 #endif
 }
 
 static void PXNetworkInvalidateCaches(void) {
-    os_unfair_lock_lock(&gNetworkCacheLock);
-    cachedConnectionType = -1;
-    cachedNetworkDataSpoofEnabled = NO;
-    cacheTimestamp = nil;
-    cachedISOCountryCode = nil;
-    isoCountryCodeCacheTimestamp = nil;
-    cachedCarrierName = nil;
-    cachedMobileCountryCode = nil;
-    cachedMobileNetworkCode = nil;
-    carrierDetailsCacheTimestamp = nil;
-    cachedTargetRegion = nil;
-    targetRegionCacheTimestamp = nil;
-    PXNetworkInvalidateSignalCachesLocked();
-    os_unfair_lock_unlock(&gNetworkCacheLock);
+    __attribute__((objc_precise_lifetime)) id mode = nil;
+    __attribute__((objc_precise_lifetime)) id iso = nil;
+    __attribute__((objc_precise_lifetime)) id pinned = nil;
+    __attribute__((objc_precise_lifetime)) id carrier = nil;
+    @try {
+        os_unfair_lock_lock(&gNetworkCacheLock);
+        mode = gNetworkModeValue; iso = gNetworkISOValue;
+        pinned = gNetworkPinnedValue; carrier = gNetworkCarrierValue;
+        gNetworkModeValue = nil; gNetworkISOValue = nil;
+        gNetworkPinnedValue = nil; gNetworkCarrierValue = nil;
+        for (NSUInteger index = 0; index < PXNetworkReadCacheCount; index++) {
+            gNetworkReadStamps[index].hasTime = NO;
+            gNetworkReadStamps[index].revision++;
+        }
+        PXNetworkInvalidateSignalCachesLocked();
+        os_unfair_lock_unlock(&gNetworkCacheLock);
+    } @finally {
+        mode = nil; iso = nil; pinned = nil; carrier = nil;
+    }
 }
+
+#pragma mark - End read cache publication
 
 #pragma mark - Helper Functions
 
@@ -227,102 +292,98 @@ static NSDictionary *PXNetworkSecuritySettings(void) {
 // Get the current ISO country code from security settings
 static NSString *getCurrentISOCountryCode() {
     PX_RUNTIME_READ_OPERATION;
+    NSDictionary *settings = nil;
+    NSString *isoCode = nil, *pinnedISO = nil, *configured = nil, *cached = nil;
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     static char isoResultKey;
     PXRuntimeReadSnapshot *operationView = PXCaptureRuntimeSnapshot();
-    NSString *memo = objc_getAssociatedObject(operationView, &isoResultKey);
-    if (memo) return memo;
-#endif
-    NSDate *now = [NSDate date];
-    os_unfair_lock_lock(&gNetworkCacheLock);
-    BOOL valid = cachedISOCountryCode && isoCountryCodeCacheTimestamp &&
-        [now timeIntervalSinceDate:isoCountryCodeCacheTimestamp] < kISOCountryCodeCacheValidDuration;
-    NSString *cached = valid ? cachedISOCountryCode : nil;
-    os_unfair_lock_unlock(&gNetworkCacheLock);
-#if !defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    if (cached) return cached;
-#endif
-
-    NSDictionary *settings = PXNetworkSecuritySettings();
-    NSString *isoCode = nil;
-    if (PXRuntimeReadBool(settings[@"targetRegionFollowsIPEnabled"])) {
-        NSString *pinnedISO = [settings[@"targetRegionPinnedCarrierISO"] isKindOfClass:[NSString class]]
-            ? settings[@"targetRegionPinnedCarrierISO"]
-            : nil;
-        if (pinnedISO.length) isoCode = [pinnedISO lowercaseString];
-    }
-    if (!isoCode.length) {
-        NSString *configured = [settings[@"networkISOCountryCode"] isKindOfClass:[NSString class]]
-            ? settings[@"networkISOCountryCode"]
-            : nil;
-        isoCode = configured.length ? [configured lowercaseString] : @"us";
-    }
-
-    os_unfair_lock_lock(&gNetworkCacheLock);
-#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    os_unfair_lock_unlock(&gNetworkCacheLock);
-    if (operationView) objc_setAssociatedObject(operationView, &isoResultKey, isoCode, OBJC_ASSOCIATION_RETAIN);
-    return isoCode;
 #else
-    cachedISOCountryCode = [isoCode copy];
-    isoCountryCodeCacheTimestamp = now;
-    NSString *published = cachedISOCountryCode;
-    os_unfair_lock_unlock(&gNetworkCacheLock);
-    return published;
+    double now = PXNetworkSignalNow();
+    uint64_t revision = 0;
+    BOOL hit = NO;
 #endif
+    @try {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+        cached = objc_getAssociatedObject(operationView, &isoResultKey);
+#else
+        cached = PXNetworkReadCached(PXNetworkReadISO, now, kISOCountryCodeCacheValidDuration, &revision, &hit);
+#endif
+        if (cached) return cached;
+        settings = PXNetworkSecuritySettings();
+        if (PXRuntimeReadBool(settings[@"targetRegionFollowsIPEnabled"])) {
+            pinnedISO = PXNetworkString(settings[@"targetRegionPinnedCarrierISO"]);
+            if (pinnedISO.length) isoCode = [pinnedISO lowercaseString];
+        }
+        if (!isoCode.length) {
+            configured = PXNetworkString(settings[@"networkISOCountryCode"]);
+            isoCode = configured.length ? [configured lowercaseString] : @"us";
+        }
+        isoCode = [isoCode copy];
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+        if (operationView) objc_setAssociatedObject(operationView, &isoResultKey, isoCode, OBJC_ASSOCIATION_RETAIN);
+#else
+        PXNetworkPublishReadCache(PXNetworkReadISO, isoCode, now, revision);
+#endif
+        return isoCode;
+    } @finally {
+        settings = nil; isoCode = nil; pinnedISO = nil; configured = nil; cached = nil;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+        operationView = nil;
+#endif
+    }
 }
 
 static NSDictionary *getTargetRegionPinnedOverrides(void) {
     PX_RUNTIME_READ_OPERATION;
+    NSDictionary *settings = nil, *resolved = nil;
+    NSString *mcc = nil, *mnc = nil, *iso = nil, *name = nil, *resolvedName = nil;
+    id cached = nil;
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     static char pinnedResultKey;
     PXRuntimeReadSnapshot *operationView = PXCaptureRuntimeSnapshot();
-    id memo = objc_getAssociatedObject(operationView, &pinnedResultKey);
-    if (memo) return memo == NSNull.null ? nil : memo;
-#endif
-    NSDate *now = [NSDate date];
-    os_unfair_lock_lock(&gNetworkCacheLock);
-    BOOL valid = targetRegionCacheTimestamp &&
-        [now timeIntervalSinceDate:targetRegionCacheTimestamp] < kTargetRegionCacheValidDuration;
-    NSDictionary *cached = valid ? cachedTargetRegion : nil;
-    os_unfair_lock_unlock(&gNetworkCacheLock);
-#if !defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    if (valid) return cached;
-#endif
-
-    NSDictionary *settings = PXNetworkSecuritySettings();
-    NSDictionary *resolved = nil;
-    if ([settings isKindOfClass:[NSDictionary class]] && PXRuntimeReadBool(settings[@"targetRegionFollowsIPEnabled"])) {
-        NSString *mcc = [settings[@"targetRegionPinnedCarrierMCC"] isKindOfClass:[NSString class]] ? settings[@"targetRegionPinnedCarrierMCC"] : nil;
-        NSString *mnc = [settings[@"targetRegionPinnedCarrierMNC"] isKindOfClass:[NSString class]] ? settings[@"targetRegionPinnedCarrierMNC"] : nil;
-        NSString *iso = [settings[@"targetRegionPinnedCarrierISO"] isKindOfClass:[NSString class]] ? settings[@"targetRegionPinnedCarrierISO"] : nil;
-        NSString *name = [settings[@"targetRegionPinnedCarrierName"] isKindOfClass:[NSString class]] ? settings[@"targetRegionPinnedCarrierName"] : nil;
-        if (mcc.length && mnc.length) {
-            NSString *resolvedName = name.length ? name : PXCarrierNameForMCCMNC(mcc, mnc);
-            if ([resolvedName isEqualToString:@"TLinkIOS"] || [resolvedName hasPrefix:@"TLinkIOS"]) {
-                resolvedName = PXCarrierNameForMCCMNC(mcc, mnc);
-            }
-            resolved = @{
-                @"carrierName": resolvedName ?: kFakeCarrierName,
-                @"mobileCountryCode": mcc,
-                @"mobileNetworkCode": mnc,
-                @"carrierISO": iso ?: @""
-            };
-        }
-    }
-
-    os_unfair_lock_lock(&gNetworkCacheLock);
-#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    os_unfair_lock_unlock(&gNetworkCacheLock);
-    if (operationView) objc_setAssociatedObject(operationView, &pinnedResultKey, resolved ?: NSNull.null, OBJC_ASSOCIATION_RETAIN);
-    return resolved;
 #else
-    cachedTargetRegion = [resolved copy];
-    targetRegionCacheTimestamp = now;
-    NSDictionary *published = cachedTargetRegion;
-    os_unfair_lock_unlock(&gNetworkCacheLock);
-    return published;
+    double now = PXNetworkSignalNow();
+    uint64_t revision = 0;
+    BOOL hit = NO;
 #endif
+    @try {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+        cached = objc_getAssociatedObject(operationView, &pinnedResultKey);
+        if (cached) return cached == NSNull.null ? nil : cached;
+#else
+        cached = PXNetworkReadCached(PXNetworkReadPinned, now, kTargetRegionCacheValidDuration, &revision, &hit);
+        if (hit) return cached;
+#endif
+        settings = PXNetworkSecuritySettings();
+        if (PXRuntimeReadBool(settings[@"targetRegionFollowsIPEnabled"])) {
+            mcc = PXNetworkString(settings[@"targetRegionPinnedCarrierMCC"]);
+            mnc = PXNetworkString(settings[@"targetRegionPinnedCarrierMNC"]);
+            iso = PXNetworkString(settings[@"targetRegionPinnedCarrierISO"]);
+            name = PXNetworkString(settings[@"targetRegionPinnedCarrierName"]);
+            if (mcc.length && mnc.length) {
+                resolvedName = name.length ? name : PXCarrierNameForMCCMNC(mcc, mnc);
+                if ([resolvedName isEqualToString:@"TLinkIOS"] || [resolvedName hasPrefix:@"TLinkIOS"]) {
+                    resolvedName = PXCarrierNameForMCCMNC(mcc, mnc);
+                }
+                resolved = @{ @"carrierName": resolvedName ?: kFakeCarrierName,
+                              @"mobileCountryCode": mcc, @"mobileNetworkCode": mnc,
+                              @"carrierISO": iso ?: @"" };
+            }
+        }
+        resolved = [resolved copy];
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+        if (operationView) objc_setAssociatedObject(operationView, &pinnedResultKey, resolved ?: NSNull.null, OBJC_ASSOCIATION_RETAIN);
+#else
+        PXNetworkPublishReadCache(PXNetworkReadPinned, resolved, now, revision);
+#endif
+        return resolved;
+    } @finally {
+        settings = nil; resolved = nil; mcc = nil; mnc = nil; iso = nil;
+        name = nil; resolvedName = nil; cached = nil;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+        operationView = nil;
+#endif
+    }
 }
 
 static BOOL shouldForceCarrierSpoof(void) {
@@ -436,41 +497,49 @@ static BOOL isInScopedAppsList() {
 // Get the current connection type setting from the plist
 static NetworkConnectionType getNetworkConnectionType() {
     PX_RUNTIME_READ_OPERATION;
+    NSDictionary *settings = nil;
+    NSNumber *packet = nil;
+    id raw = nil;
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     static char typeKey;
     PXRuntimeReadSnapshot *operationView = PXCaptureRuntimeSnapshot();
-    NSNumber *memo = objc_getAssociatedObject(operationView, &typeKey);
-    if (memo) return (NetworkConnectionType)memo.integerValue;
-#endif
-    NSDate *now = [NSDate date];
-    os_unfair_lock_lock(&gNetworkCacheLock);
-    BOOL valid = cacheTimestamp && [now timeIntervalSinceDate:cacheTimestamp] < kCacheValidDuration;
-    NetworkConnectionType cachedType = (NetworkConnectionType)cachedConnectionType;
-    os_unfair_lock_unlock(&gNetworkCacheLock);
-#if !defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    if (valid) return cachedType;
-#endif
-
-    NSDictionary *settings = PXNetworkSecuritySettings();
-    BOOL enabled = PXRuntimeReadBool(settings[@"networkDataSpoofEnabled"]);
-    NSInteger rawType = [settings[@"networkConnectionType"] respondsToSelector:@selector(integerValue)]
-        ? [settings[@"networkConnectionType"] integerValue]
-        : NetworkConnectionTypeAuto;
-    if (rawType < NetworkConnectionTypeAuto || rawType > NetworkConnectionTypeNone) {
-        rawType = NetworkConnectionTypeAuto;
-    }
-    NetworkConnectionType type = enabled ? (NetworkConnectionType)rawType : (NetworkConnectionType)-1;
-
-#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    if (operationView) objc_setAssociatedObject(operationView, &typeKey, @(type), OBJC_ASSOCIATION_RETAIN);
 #else
-    os_unfair_lock_lock(&gNetworkCacheLock);
-    cachedConnectionType = type;
-    cachedNetworkDataSpoofEnabled = enabled;
-    cacheTimestamp = now;
-    os_unfair_lock_unlock(&gNetworkCacheLock);
+    double now = PXNetworkSignalNow();
+    uint64_t revision = 0;
+    BOOL hit = NO;
 #endif
-    return type;
+    @try {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+        packet = objc_getAssociatedObject(operationView, &typeKey);
+#else
+        packet = PXNetworkReadCached(PXNetworkReadMode, now, kCacheValidDuration, &revision, &hit);
+#endif
+        if (packet) return (NetworkConnectionType)packet.integerValue;
+        settings = PXNetworkSecuritySettings();
+        BOOL enabled = PXRuntimeReadBool(settings[@"networkDataSpoofEnabled"]);
+        raw = settings[@"networkConnectionType"];
+        NSInteger rawType = [raw respondsToSelector:@selector(integerValue)] ? [raw integerValue] : NetworkConnectionTypeAuto;
+        if (rawType < NetworkConnectionTypeAuto || rawType > NetworkConnectionTypeNone) rawType = NetworkConnectionTypeAuto;
+        NetworkConnectionType type = enabled ? (NetworkConnectionType)rawType : (NetworkConnectionType)-1;
+        packet = @(type);
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+        if (operationView) objc_setAssociatedObject(operationView, &typeKey, packet, OBJC_ASSOCIATION_RETAIN);
+#else
+        // A losing cold reader adopts the current winner, avoiding an accidental
+        // real-value passthrough merely because another reader finished first.
+        // If invalidation left no winner, discard the revoked enablement.
+        if (!PXNetworkPublishReadCache(PXNetworkReadMode, packet, now, revision)) {
+            packet = PXNetworkCurrentModePacket();
+            return packet ? (NetworkConnectionType)packet.integerValue : (NetworkConnectionType)-1;
+        }
+#endif
+        return type;
+    } @finally {
+        settings = nil; packet = nil; raw = nil;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+        operationView = nil;
+#endif
+    }
 }
 
 // For Auto mode, decide randomly between WiFi and Cellular
@@ -538,92 +607,91 @@ static BOOL shouldShowAsNoConnection() {
     return shouldApplyNetworkSpoofing() && getNetworkConnectionType() == NetworkConnectionTypeNone;
 }
 
-// Get carrier details from the current profile
+// Freeze the same three fields the legacy cache copied individually. Prepare
+// this complete packet outside the lock, including for pinned overrides.
+static NSDictionary *PXNetworkCarrierPacket(NSString *name, NSString *mcc, NSString *mnc) {
+    NSString *frozenName = nil, *frozenMCC = nil, *frozenMNC = nil;
+    @try {
+        frozenName = [name copy] ?: kFakeCarrierName;
+        frozenMCC = [mcc copy] ?: kFakeMobileCountryCode;
+        frozenMNC = [mnc copy] ?: kFakeMobileNetworkCode;
+        return @{ @"carrierName": frozenName, @"mobileCountryCode": frozenMCC, @"mobileNetworkCode": frozenMNC };
+    } @finally {
+        frozenName = nil; frozenMCC = nil; frozenMNC = nil;
+        name = nil; mcc = nil; mnc = nil;
+    }
+}
+
+// Get carrier details from the current profile.
 static NSDictionary *getCarrierDetailsFromProfile() {
     PX_RUNTIME_READ_OPERATION;
+    NSDictionary *pinned = nil, *cached = nil, *source = nil, *result = nil;
+    NSDictionary *carrier = nil, *network = nil, *deviceIDs = nil;
+    NSString *identityDir = nil, *carrierName = nil, *mcc = nil, *mnc = nil;
+    NSString *sourceName = nil, *sourceMCC = nil, *sourceMNC = nil;
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     static char carrierResultKey;
     PXRuntimeReadSnapshot *operationView = PXCaptureRuntimeSnapshot();
-    NSDictionary *memo = objc_getAssociatedObject(operationView, &carrierResultKey);
-    if (memo) return memo;
+#else
+    double now = PXNetworkSignalNow();
+    uint64_t revision = 0;
+    BOOL hit = NO;
 #endif
-    NSDictionary *pinned = getTargetRegionPinnedOverrides();
-    NSDate *now = [NSDate date];
-    if (pinned) {
-        NSDictionary *result = @{
-            @"carrierName": pinned[@"carrierName"] ?: kFakeCarrierName,
-            @"mobileCountryCode": pinned[@"mobileCountryCode"] ?: kFakeMobileCountryCode,
-            @"mobileNetworkCode": pinned[@"mobileNetworkCode"] ?: kFakeMobileNetworkCode
-        };
-        os_unfair_lock_lock(&gNetworkCacheLock);
-        cachedCarrierName = [result[@"carrierName"] copy];
-        cachedMobileCountryCode = [result[@"mobileCountryCode"] copy];
-        cachedMobileNetworkCode = [result[@"mobileNetworkCode"] copy];
-        carrierDetailsCacheTimestamp = now;
-        os_unfair_lock_unlock(&gNetworkCacheLock);
+    @try {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+        cached = objc_getAssociatedObject(operationView, &carrierResultKey);
+        if (cached) return cached;
+#else
+        // Capture the revision BEFORE the nested pinned lookup: invalidation
+        // during that provider must also revoke this carrier candidate.
+        cached = PXNetworkReadCached(PXNetworkReadCarrier, now, kCarrierDetailsCacheValidDuration, &revision, &hit);
+#endif
+        pinned = getTargetRegionPinnedOverrides();
+        if (pinned) {
+            sourceName = pinned[@"carrierName"];
+            sourceMCC = pinned[@"mobileCountryCode"];
+            sourceMNC = pinned[@"mobileNetworkCode"];
+            result = PXNetworkCarrierPacket(sourceName, sourceMCC, sourceMNC);
+        } else {
+#if !defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+            if (hit) return cached;
+#endif
+            carrierName = kFakeCarrierName; mcc = kFakeMobileCountryCode; mnc = kFakeMobileNetworkCode;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+            carrier = [operationView profileArtifact:@"carrierDetails"];
+            network = [operationView profileArtifact:@"networkSettings"];
+            deviceIDs = operationView.deviceIDs;
+            source = PXNetworkCarrierSource(carrier, network, deviceIDs);
+#else
+            identityDir = getProfileIdentityPath();
+            source = PXNetworkCarrierSourceAtIdentity(identityDir);
+#endif
+            sourceName = PXNetworkCarrierField(source, @"carrierName", @"CarrierName");
+            sourceMCC = PXNetworkCarrierField(source, @"mcc", @"CarrierMCC");
+            sourceMNC = PXNetworkCarrierField(source, @"mnc", @"CarrierMNC");
+            if (sourceName.length) carrierName = sourceName;
+            if (sourceMCC.length) mcc = sourceMCC;
+            if (sourceMNC.length) mnc = sourceMNC;
+            if (!carrierName.length || [carrierName isEqualToString:@"TLinkIOS"] || [carrierName hasPrefix:@"TLinkIOS"]) {
+                carrierName = PXCarrierNameForMCCMNC(mcc, mnc);
+            }
+            result = PXNetworkCarrierPacket(carrierName, mcc, mnc);
+        }
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
         if (operationView) objc_setAssociatedObject(operationView, &carrierResultKey, result, OBJC_ASSOCIATION_RETAIN);
+#else
+        PXNetworkPublishReadCache(PXNetworkReadCarrier, result, now, revision);
 #endif
         return result;
-    }
-
-    os_unfair_lock_lock(&gNetworkCacheLock);
-    BOOL valid = cachedCarrierName && cachedMobileCountryCode && cachedMobileNetworkCode &&
-        carrierDetailsCacheTimestamp &&
-        [now timeIntervalSinceDate:carrierDetailsCacheTimestamp] < kCarrierDetailsCacheValidDuration;
-    NSDictionary *cached = valid ? @{
-        @"carrierName": cachedCarrierName,
-        @"mobileCountryCode": cachedMobileCountryCode,
-        @"mobileNetworkCode": cachedMobileNetworkCode
-    } : nil;
-    os_unfair_lock_unlock(&gNetworkCacheLock);
-#if !defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    if (cached) return cached;
-#endif
-
-    NSString *carrierName = kFakeCarrierName;
-    NSString *mcc = kFakeMobileCountryCode;
-    NSString *mnc = kFakeMobileNetworkCode;
-#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    PXRuntimeReadSnapshot *runtimeView = PXCaptureRuntimeSnapshot();
-    NSDictionary *carrier = [runtimeView profileArtifact:@"carrierDetails"];
-    NSDictionary *network = [runtimeView profileArtifact:@"networkSettings"];
-    NSDictionary *deviceIDs = runtimeView.deviceIDs;
-    NSDictionary *source = PXNetworkCarrierSource(carrier, network, deviceIDs);
-#else
-    NSDictionary *source = nil;
-    NSString *identityDir = nil;
-    @try {
-        identityDir = getProfileIdentityPath();
-        source = PXNetworkCarrierSourceAtIdentity(identityDir);
     } @finally {
-        identityDir = nil;
-    }
-#endif
-    NSString *sourceName = PXNetworkCarrierField(source, @"carrierName", @"CarrierName");
-    NSString *sourceMCC = PXNetworkCarrierField(source, @"mcc", @"CarrierMCC");
-    NSString *sourceMNC = PXNetworkCarrierField(source, @"mnc", @"CarrierMNC");
-    if (sourceName.length) carrierName = sourceName;
-    if (sourceMCC.length) mcc = sourceMCC;
-    if (sourceMNC.length) mnc = sourceMNC;
-    if (!carrierName.length || [carrierName isEqualToString:@"TLinkIOS"] || [carrierName hasPrefix:@"TLinkIOS"]) {
-        carrierName = PXCarrierNameForMCCMNC(mcc, mnc);
-    }
-    NSDictionary *result = @{
-        @"carrierName": carrierName ?: kFakeCarrierName,
-        @"mobileCountryCode": mcc ?: kFakeMobileCountryCode,
-        @"mobileNetworkCode": mnc ?: kFakeMobileNetworkCode
-    };
-    os_unfair_lock_lock(&gNetworkCacheLock);
-    cachedCarrierName = [result[@"carrierName"] copy];
-    cachedMobileCountryCode = [result[@"mobileCountryCode"] copy];
-    cachedMobileNetworkCode = [result[@"mobileNetworkCode"] copy];
-    carrierDetailsCacheTimestamp = now;
-    os_unfair_lock_unlock(&gNetworkCacheLock);
+        pinned = nil; cached = nil; source = nil; result = nil;
+        carrier = nil; network = nil; deviceIDs = nil; identityDir = nil;
+        carrierName = nil; mcc = nil; mnc = nil;
+        sourceName = nil; sourceMCC = nil; sourceMNC = nil;
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    if (operationView) objc_setAssociatedObject(operationView, &carrierResultKey, result, OBJC_ASSOCIATION_RETAIN);
+        operationView = nil;
 #endif
-    return result;
+    }
 }
 
 // Compute policy/RNG outside the lock. Only a matching revision may publish; a

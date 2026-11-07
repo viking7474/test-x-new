@@ -223,6 +223,7 @@ static void TestRealThreadInterleaving(void) {
 // are controlled here; scope admission/bootstrap and Darwin transport are not.
 @interface PXRuntimeReadSnapshot : NSObject
 @property (nonatomic, copy) NSDictionary *deviceIDs;
+@property (nonatomic, copy) NSDictionary *securitySettings;
 @property (nonatomic, copy) NSDictionary *artifacts;
 - (NSDictionary *)profileArtifact:(NSString *)key;
 @end
@@ -236,14 +237,14 @@ static PXRuntimeReadSnapshot * __attribute__((unused)) PXCaptureRuntimeSnapshot(
 static NSString *getProfileIdentityPath(void) { gIdentityReads++; return gIdentity; }
 #include "PXNetworkTypedReads.inc"
 #include "PXNetworkReadBool.inc"
+#include "PXNetworkReadCacheState.inc"
 static NSDictionary *gPinned, *gSettings;
 static NSDictionary *PXNetworkSecuritySettings(void) { return gSettings; }
 static NSDictionary *getTargetRegionPinnedOverrides(void) { return gPinned; }
 static NSString *PXCarrierNameForMCCMNC(NSString *mcc, NSString *mnc) { (void)mcc; (void)mnc; return @"Fixture DB Carrier"; }
 #include "PXNetworkCarrierRead.inc"
 static void ClearCarrier(void) {
-    cachedCarrierName = nil; cachedMobileCountryCode = nil; cachedMobileNetworkCode = nil;
-    carrierDetailsCacheTimestamp = nil; gPinned = nil;
+    PXNetworkInvalidateCaches(); gPinned = nil;
     gView = [PXRuntimeReadSnapshot new];
 }
 static void WritePlist(id value, NSString *file) {
