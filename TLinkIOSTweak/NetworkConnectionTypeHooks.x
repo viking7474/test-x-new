@@ -19,6 +19,9 @@
 #import "PXRuntimeSnapshot.h"
 #import "PXNativeHookCoordinator.h"
 #import <os/lock.h>
+#import <math.h>
+#import <time.h>
+#import <stdint.h>
 
 // Constants for connection types
 typedef NS_ENUM(NSInteger, NetworkConnectionType) {
@@ -79,26 +82,54 @@ static NSDate *targetRegionCacheTimestamp = nil;
 static NSDictionary *cachedTargetRegion = nil;
 static const NSTimeInterval kTargetRegionCacheValidDuration = 5.0;
 
-// Constants for signal strength
-static const int kWiFiSignalStrengthExcellent = -45;  // -45 dBm (Excellent)
-static const int kWiFiSignalStrengthGood = -60;       // -60 dBm (Good)
-static const int kWiFiSignalStrengthFair = -70;       // -70 dBm (Fair)
-static const int kWiFiSignalStrengthPoor = -80;       // -80 dBm (Poor)
+#pragma mark - Signal cache state
 
-// Keep track of current signal values for realistic gradual changes
-static int currentWiFiSignalStrength = -65;  // Start with a reasonable default
-static int currentCellularSignalBars = 4;    // Start with good signal
-static NSDate *lastSignalUpdateTime = nil;
+// Scalar-only state: no Foundation calls, allocation or object destruction under
+// gNetworkCacheLock. Each value owns its own interval and publication revision.
+typedef struct {
+    int value;
+    double updatedAt;
+    BOOL hasTime;
+    uint64_t revision;
+} PXNetworkSignalState;
+static PXNetworkSignalState gWiFiSignal = { .value = -65 };
+static PXNetworkSignalState gCellularSignal = { .value = 4 };
 
-// Cellular network type constants (4G/5G)
-static NSString *const kCellularNetworkType4G = @"CTRadioAccessTechnologyLTE";
-static NSString *const kCellularNetworkType5G = @"CTRadioAccessTechnologyNR";  // iOS 15+ 5G
-static NSString *const kCellularNetworkType5GNSA = @"CTRadioAccessTechnologyNRNSA"; // 5G Non-Standalone
+typedef NS_ENUM(int, PXNetworkRadio) {
+    PXNetworkRadioLTE, PXNetworkRadioNR, PXNetworkRadioNRNSA
+};
+static struct {
+    PXNetworkRadio value;
+    double changedAt;
+    BOOL hasTime;
+    uint64_t revision;
+} gNetworkRadio;
+static const NSTimeInterval kMinNetworkTypeChangeDuration = 120.0;
 
-// Current cellular network type (changes over time)
-static NSString *currentCellularNetworkType = nil;
-static NSDate *lastNetworkTypeChangeTime = nil;
-static const NSTimeInterval kMinNetworkTypeChangeDuration = 120.0; // Minimum 2 minutes between technology changes
+static double PXNetworkSignalNow(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return NAN;
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
+}
+
+static BOOL PXNetworkSignalFresh(double now, double then, BOOL hasTime, double ttl) {
+    return hasTime && isfinite(now) && isfinite(then) &&
+        now >= then && now - then < ttl;
+}
+
+// Caller holds gNetworkCacheLock. Keep gradual signal values across invalidation,
+// but revoke all in-flight candidates and reset the radio to its legacy LTE base.
+static void PXNetworkInvalidateSignalCachesLocked(void) {
+    gWiFiSignal.hasTime = NO;
+    gWiFiSignal.revision++;
+    gCellularSignal.hasTime = NO;
+    gCellularSignal.revision++;
+    gNetworkRadio.hasTime = NO;
+    gNetworkRadio.value = PXNetworkRadioLTE;
+    gNetworkRadio.revision++;
+}
+
+#pragma mark - End signal cache state
 
 static BOOL PXNetworkDataSpoofEnabledCached(void) {
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
@@ -124,9 +155,7 @@ static void PXNetworkInvalidateCaches(void) {
     carrierDetailsCacheTimestamp = nil;
     cachedTargetRegion = nil;
     targetRegionCacheTimestamp = nil;
-    lastSignalUpdateTime = nil;
-    lastNetworkTypeChangeTime = nil;
-    currentCellularNetworkType = nil;
+    PXNetworkInvalidateSignalCachesLocked();
     os_unfair_lock_unlock(&gNetworkCacheLock);
 }
 
@@ -143,11 +172,52 @@ static NSString *getCurrentBundleID() {
     return bundleID;
 }
 
+static NSDictionary *PXNetworkDictionary(id value) {
+    return [value isKindOfClass:NSDictionary.class] ? value : nil;
+}
+
+static NSString *PXNetworkString(id value) {
+    return [value isKindOfClass:NSString.class] ? value : nil;
+}
+
+static NSDictionary *PXNetworkCarrierSource(id carrierValue, id networkValue, id deviceValue) {
+    NSDictionary *carrier = PXNetworkDictionary(carrierValue);
+    NSDictionary *network = PXNetworkDictionary(networkValue);
+    NSDictionary *deviceIDs = PXNetworkDictionary(deviceValue);
+    return carrier.count ? carrier : (network.count ? network : deviceIDs);
+}
+
+static NSString *PXNetworkCarrierField(NSDictionary *source, NSString *key, NSString *legacyKey) {
+    return PXNetworkString(source[key]) ?: PXNetworkString(source[legacyKey]);
+}
+
+#if !defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+static NSDictionary *PXNetworkCarrierSourceAtIdentity(NSString *identityDir) {
+    NSString *path = nil;
+    NSDictionary *carrier = nil, *network = nil, *deviceIDs = nil;
+    @try {
+        if (!identityDir.length) return nil;
+        path = [identityDir stringByAppendingPathComponent:@"carrier_details.plist"];
+        carrier = [NSDictionary dictionaryWithContentsOfFile:path];
+        path = [identityDir stringByAppendingPathComponent:@"network_settings.plist"];
+        network = [NSDictionary dictionaryWithContentsOfFile:path];
+        // Resolve the active identity once. A profile switch must not mix the
+        // first two files with device_ids.plist from the newly active profile.
+        path = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
+        deviceIDs = [NSDictionary dictionaryWithContentsOfFile:path];
+        return PXNetworkCarrierSource(carrier, network, deviceIDs);
+    } @finally {
+        path = nil; carrier = nil; network = nil; deviceIDs = nil;
+        identityDir = nil;
+    }
+}
+#endif
+
 static NSDictionary *PXNetworkSecuritySettings(void) {
     PX_RUNTIME_READ_OPERATION;
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     PXRuntimeReadSnapshot *runtimeView = PXCaptureRuntimeSnapshot();
-    return runtimeView.securitySettings;
+    return PXNetworkDictionary(runtimeView.securitySettings) ?: @{};
 #else
     NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:kSecuritySettingsPath];
     return [settings isKindOfClass:NSDictionary.class] ? settings : @{};
@@ -175,7 +245,7 @@ static NSString *getCurrentISOCountryCode() {
 
     NSDictionary *settings = PXNetworkSecuritySettings();
     NSString *isoCode = nil;
-    if ([settings[@"targetRegionFollowsIPEnabled"] boolValue]) {
+    if (PXRuntimeReadBool(settings[@"targetRegionFollowsIPEnabled"])) {
         NSString *pinnedISO = [settings[@"targetRegionPinnedCarrierISO"] isKindOfClass:[NSString class]]
             ? settings[@"targetRegionPinnedCarrierISO"]
             : nil;
@@ -222,7 +292,7 @@ static NSDictionary *getTargetRegionPinnedOverrides(void) {
 
     NSDictionary *settings = PXNetworkSecuritySettings();
     NSDictionary *resolved = nil;
-    if ([settings isKindOfClass:[NSDictionary class]] && [settings[@"targetRegionFollowsIPEnabled"] boolValue]) {
+    if ([settings isKindOfClass:[NSDictionary class]] && PXRuntimeReadBool(settings[@"targetRegionFollowsIPEnabled"])) {
         NSString *mcc = [settings[@"targetRegionPinnedCarrierMCC"] isKindOfClass:[NSString class]] ? settings[@"targetRegionPinnedCarrierMCC"] : nil;
         NSString *mnc = [settings[@"targetRegionPinnedCarrierMNC"] isKindOfClass:[NSString class]] ? settings[@"targetRegionPinnedCarrierMNC"] : nil;
         NSString *iso = [settings[@"targetRegionPinnedCarrierISO"] isKindOfClass:[NSString class]] ? settings[@"targetRegionPinnedCarrierISO"] : nil;
@@ -259,8 +329,8 @@ static BOOL shouldForceCarrierSpoof(void) {
     PX_RUNTIME_READ_OPERATION;
     NSDictionary *settings = PXNetworkSecuritySettings();
     if (![settings isKindOfClass:[NSDictionary class]]) return NO;
-    if ([settings[@"targetRegionFollowsIPEnabled"] boolValue]) return YES;
-    if ([settings[@"fullSpoofTestModeEnabled"] boolValue]) return YES;
+    if (PXRuntimeReadBool(settings[@"targetRegionFollowsIPEnabled"])) return YES;
+    if (PXRuntimeReadBool(settings[@"fullSpoofTestModeEnabled"])) return YES;
     return NO;
 }
 
@@ -275,10 +345,10 @@ static NSString *getProfileStoredIPAddress(NSString *networkKey, NSString *devic
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     PXRuntimeReadSnapshot *runtimeView = PXCaptureRuntimeSnapshot();
     NSDictionary *networkDict = [runtimeView profileArtifact:@"networkSettings"];
-    id networkValue = networkDict[networkKey];
+    id networkValue = PXNetworkDictionary(networkDict)[networkKey];
     if ([networkValue isKindOfClass:NSString.class] && [(NSString *)networkValue length] > 0) return networkValue;
     NSDictionary *deviceIds = runtimeView.deviceIDs;
-    id deviceValue = deviceIds[deviceIDsKey];
+    id deviceValue = PXNetworkDictionary(deviceIds)[deviceIDsKey];
     return [deviceValue isKindOfClass:NSString.class] && [(NSString *)deviceValue length] > 0 ? deviceValue : nil;
 #else
     NSString *identityDir = getProfileIdentityPath();
@@ -286,14 +356,14 @@ static NSString *getProfileStoredIPAddress(NSString *networkKey, NSString *devic
 
     NSString *networkPath = [identityDir stringByAppendingPathComponent:@"network_settings.plist"];
     NSDictionary *networkDict = [NSDictionary dictionaryWithContentsOfFile:networkPath];
-    id networkValue = networkDict[networkKey];
+    id networkValue = PXNetworkDictionary(networkDict)[networkKey];
     if ([networkValue isKindOfClass:[NSString class]] && [(NSString *)networkValue length] > 0) {
         return networkValue;
     }
 
     NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
     NSDictionary *deviceIds = [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath];
-    id deviceValue = deviceIds[deviceIDsKey];
+    id deviceValue = PXNetworkDictionary(deviceIds)[deviceIDsKey];
     if ([deviceValue isKindOfClass:[NSString class]] && [(NSString *)deviceValue length] > 0) {
         return deviceValue;
     }
@@ -519,33 +589,23 @@ static NSDictionary *getCarrierDetailsFromProfile() {
     NSDictionary *carrier = [runtimeView profileArtifact:@"carrierDetails"];
     NSDictionary *network = [runtimeView profileArtifact:@"networkSettings"];
     NSDictionary *deviceIDs = runtimeView.deviceIDs;
-    NSDictionary *source = carrier.count ? carrier : (network.count ? network : deviceIDs);
-    NSString *sourceName = [source[@"carrierName"] isKindOfClass:NSString.class] ? source[@"carrierName"] : source[@"CarrierName"];
-    NSString *sourceMCC = [source[@"mcc"] isKindOfClass:NSString.class] ? source[@"mcc"] : source[@"CarrierMCC"];
-    NSString *sourceMNC = [source[@"mnc"] isKindOfClass:NSString.class] ? source[@"mnc"] : source[@"CarrierMNC"];
-    if (![sourceName isKindOfClass:NSString.class]) sourceName = nil;
-    if (![sourceMCC isKindOfClass:NSString.class]) sourceMCC = nil;
-    if (![sourceMNC isKindOfClass:NSString.class]) sourceMNC = nil;
+    NSDictionary *source = PXNetworkCarrierSource(carrier, network, deviceIDs);
+#else
+    NSDictionary *source = nil;
+    NSString *identityDir = nil;
+    @try {
+        identityDir = getProfileIdentityPath();
+        source = PXNetworkCarrierSourceAtIdentity(identityDir);
+    } @finally {
+        identityDir = nil;
+    }
+#endif
+    NSString *sourceName = PXNetworkCarrierField(source, @"carrierName", @"CarrierName");
+    NSString *sourceMCC = PXNetworkCarrierField(source, @"mcc", @"CarrierMCC");
+    NSString *sourceMNC = PXNetworkCarrierField(source, @"mnc", @"CarrierMNC");
     if (sourceName.length) carrierName = sourceName;
     if (sourceMCC.length) mcc = sourceMCC;
     if (sourceMNC.length) mnc = sourceMNC;
-#else
-    NSString *identityDir = getProfileIdentityPath();
-    if (identityDir.length) {
-        NSDictionary *carrier = [NSDictionary dictionaryWithContentsOfFile:
-            [identityDir stringByAppendingPathComponent:@"carrier_details.plist"]];
-        NSDictionary *network = [NSDictionary dictionaryWithContentsOfFile:
-            [identityDir stringByAppendingPathComponent:@"network_settings.plist"]];
-        NSDictionary *deviceIDs = [NSDictionary dictionaryWithContentsOfFile:PXActiveProfileDeviceIDsPath()];
-        NSDictionary *source = carrier.count ? carrier : (network.count ? network : deviceIDs);
-        NSString *sourceName = [source[@"carrierName"] isKindOfClass:[NSString class]] ? source[@"carrierName"] : source[@"CarrierName"];
-        NSString *sourceMCC = [source[@"mcc"] isKindOfClass:[NSString class]] ? source[@"mcc"] : source[@"CarrierMCC"];
-        NSString *sourceMNC = [source[@"mnc"] isKindOfClass:[NSString class]] ? source[@"mnc"] : source[@"CarrierMNC"];
-        if (sourceName.length) carrierName = sourceName;
-        if (sourceMCC.length) mcc = sourceMCC;
-        if (sourceMNC.length) mnc = sourceMNC;
-    }
-#endif
     if (!carrierName.length || [carrierName isEqualToString:@"TLinkIOS"] || [carrierName hasPrefix:@"TLinkIOS"]) {
         carrierName = PXCarrierNameForMCCMNC(mcc, mnc);
     }
@@ -566,18 +626,18 @@ static NSDictionary *getCarrierDetailsFromProfile() {
     return result;
 }
 
-// Get a realistic WiFi signal strength in dBm that changes gradually over time
+// Compute policy/RNG outside the lock. Only a matching revision may publish; a
+// notification or another reader wins over an older candidate without retrying.
 static int getWiFiSignalStrength() {
     PX_RUNTIME_READ_OPERATION;
-    NSDate *now = [NSDate date];
     os_unfair_lock_lock(&gNetworkCacheLock);
-    int current = currentWiFiSignalStrength;
-    NSDate *last = lastSignalUpdateTime;
+    PXNetworkSignalState before = gWiFiSignal;
     os_unfair_lock_unlock(&gNetworkCacheLock);
-    if (last && [now timeIntervalSinceDate:last] < 30.0) return current;
+    double now = PXNetworkSignalNow();
+    if (PXNetworkSignalFresh(now, before.updatedAt, before.hasTime, 30.0)) return before.value;
 
     NetworkConnectionType type = getNetworkConnectionType();
-    int target = -65;
+    int target;
     if (type == NetworkConnectionTypeWiFi || (type == NetworkConnectionTypeAuto && shouldUseWiFiForAutoMode())) {
         target = -45 - (int)arc4random_uniform(20);
     } else if (type == NetworkConnectionTypeCellular || (type == NetworkConnectionTypeAuto && !shouldUseWiFiForAutoMode())) {
@@ -585,6 +645,7 @@ static int getWiFiSignalStrength() {
     } else {
         target = -45 - (int)arc4random_uniform(45);
     }
+    int current = before.value;
     int diff = target - current;
     if (diff > 3) current += 3;
     else if (diff < -3) current -= 3;
@@ -593,24 +654,27 @@ static int getWiFiSignalStrength() {
     current = MAX(-90, MIN(-40, current));
 
     os_unfair_lock_lock(&gNetworkCacheLock);
-    currentWiFiSignalStrength = current;
-    lastSignalUpdateTime = now;
+    if (gWiFiSignal.revision == before.revision) {
+        gWiFiSignal.value = current;
+        gWiFiSignal.updatedAt = now;
+        gWiFiSignal.hasTime = isfinite(now);
+        gWiFiSignal.revision++;
+    }
+    int published = gWiFiSignal.value;
     os_unfair_lock_unlock(&gNetworkCacheLock);
-    return current;
+    return published;
 }
 
-// Get realistic cellular signal bars (1-5) that change gradually over time
 static int getCellularSignalBars() {
     PX_RUNTIME_READ_OPERATION;
-    NSDate *now = [NSDate date];
     os_unfair_lock_lock(&gNetworkCacheLock);
-    int current = currentCellularSignalBars;
-    NSDate *last = lastSignalUpdateTime;
+    PXNetworkSignalState before = gCellularSignal;
     os_unfair_lock_unlock(&gNetworkCacheLock);
-    if (last && [now timeIntervalSinceDate:last] < 30.0) return current;
+    double now = PXNetworkSignalNow();
+    if (PXNetworkSignalFresh(now, before.updatedAt, before.hasTime, 30.0)) return before.value;
 
     NetworkConnectionType type = getNetworkConnectionType();
-    int target = 3;
+    int target;
     if (type == NetworkConnectionTypeCellular || (type == NetworkConnectionTypeAuto && !shouldUseWiFiForAutoMode())) {
         target = 3 + (int)arc4random_uniform(3);
     } else if (type == NetworkConnectionTypeWiFi || (type == NetworkConnectionTypeAuto && shouldUseWiFiForAutoMode())) {
@@ -618,45 +682,64 @@ static int getCellularSignalBars() {
     } else {
         target = 1 + (int)arc4random_uniform(5);
     }
+    int current = before.value;
     if (target > current) current += 1;
     else if (target < current) current -= 1;
     current = MAX(1, MIN(5, current));
 
     os_unfair_lock_lock(&gNetworkCacheLock);
-    currentCellularSignalBars = current;
-    lastSignalUpdateTime = now;
-    os_unfair_lock_unlock(&gNetworkCacheLock);
-    return current;
-}
-
-// Get a realistic cellular network type (4G/5G) that changes based on signal strength
-static NSString *getCurrentCellularNetworkType() {
-    NSDate *now = [NSDate date];
-    os_unfair_lock_lock(&gNetworkCacheLock);
-    NSString *currentType = currentCellularNetworkType ?: kCellularNetworkType4G;
-    NSDate *lastChange = lastNetworkTypeChangeTime;
-    int bars = currentCellularSignalBars;
-    os_unfair_lock_unlock(&gNetworkCacheLock);
-
-    if (!lastChange || [now timeIntervalSinceDate:lastChange] >= kMinNetworkTypeChangeDuration) {
-        if (arc4random_uniform(100) < 10) {
-            CGFloat probability = bars >= 5 ? 0.85 : bars == 4 ? 0.65 : bars == 3 ? 0.40 : bars == 2 ? 0.15 : 0.05;
-            CGFloat random = (CGFloat)arc4random_uniform(100) / 100.0;
-            currentType = random < probability
-                ? (arc4random_uniform(100) < 70 ? kCellularNetworkType5GNSA : kCellularNetworkType5G)
-                : kCellularNetworkType4G;
-            lastChange = now;
-        } else if (!lastChange) {
-            lastChange = now;
-        }
+    if (gCellularSignal.revision == before.revision) {
+        gCellularSignal.value = current;
+        gCellularSignal.updatedAt = now;
+        gCellularSignal.hasTime = isfinite(now);
+        gCellularSignal.revision++;
     }
-
-    os_unfair_lock_lock(&gNetworkCacheLock);
-    currentCellularNetworkType = [currentType copy];
-    lastNetworkTypeChangeTime = lastChange;
-    NSString *published = currentCellularNetworkType;
+    int published = gCellularSignal.value;
     os_unfair_lock_unlock(&gNetworkCacheLock);
     return published;
+}
+
+static NSString *getCurrentCellularNetworkType() {
+    os_unfair_lock_lock(&gNetworkCacheLock);
+    PXNetworkRadio radio = gNetworkRadio.value;
+    double last = gNetworkRadio.changedAt;
+    BOOL hasTime = gNetworkRadio.hasTime;
+    uint64_t revision = gNetworkRadio.revision;
+    int bars = gCellularSignal.value;
+    os_unfair_lock_unlock(&gNetworkCacheLock);
+    double now = PXNetworkSignalNow();
+
+    if (!PXNetworkSignalFresh(now, last, hasTime, kMinNetworkTypeChangeDuration)) {
+        if (arc4random_uniform(100) < 10) {
+            double probability = bars >= 5 ? 0.85 : bars == 4 ? 0.65 : bars == 3 ? 0.40 : bars == 2 ? 0.15 : 0.05;
+            double random = (double)arc4random_uniform(100) / 100.0;
+            radio = random < probability
+                ? (arc4random_uniform(100) < 70 ? PXNetworkRadioNRNSA : PXNetworkRadioNR)
+                : PXNetworkRadioLTE;
+            last = now;
+            hasTime = isfinite(now);
+        } else if (!hasTime || !isfinite(now) || now < last) {
+            last = now;
+            hasTime = isfinite(now);
+        }
+        // Preserve the 10% retry policy after 120s: a failed roll with a valid
+        // previous timestamp does not start a new 120-second interval.
+        os_unfair_lock_lock(&gNetworkCacheLock);
+        if (gNetworkRadio.revision == revision) {
+            gNetworkRadio.value = radio;
+            gNetworkRadio.changedAt = last;
+            gNetworkRadio.hasTime = hasTime;
+            gNetworkRadio.revision++;
+        }
+        radio = gNetworkRadio.value;
+        os_unfair_lock_unlock(&gNetworkCacheLock);
+    }
+    // NSString literals have process lifetime; no copy or destructor under lock.
+    switch (radio) {
+        case PXNetworkRadioNR: return @"CTRadioAccessTechnologyNR";
+        case PXNetworkRadioNRNSA: return @"CTRadioAccessTechnologyNRNSA";
+        default: return @"CTRadioAccessTechnologyLTE";
+    }
 }
 
 #pragma mark - SCNetworkReachability Hooks

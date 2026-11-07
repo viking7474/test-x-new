@@ -47,6 +47,7 @@ EXTENDED_PYTHON_TESTS = [
     "scripts/test_ip_display_lifecycle.py",
     "scripts/test_target_region_lifecycle.py",
     "scripts/test_runtime_artifact_writers.py",
+    "scripts/test_network_hook_state.py",
     "scripts/test_runtime_artifact_preparation.py",
     "scripts/test_runtime_identity_preparation.py",
     "scripts/test_runtime_source_transactions.py",

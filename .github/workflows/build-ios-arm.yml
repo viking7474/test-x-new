@@ -65,6 +65,9 @@ jobs:
       - name: Test native runtime artifact writers
         run: python3 scripts/test_runtime_artifact_writers.py --native
 
+      - name: Test native network hook signal radio and typed read boundaries
+        run: python3 scripts/test_network_hook_state.py --native
+
       - name: Test native artifact preparation and manager wrappers
         run: python3 scripts/test_runtime_artifact_preparation.py --native
 
