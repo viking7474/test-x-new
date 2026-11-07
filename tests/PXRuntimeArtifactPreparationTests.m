@@ -260,11 +260,14 @@ static void (^gDuringStoragePreferenceMirror)(void);
 @end
 #undef NSUserDefaults
 
+#include "PXUptimeHelpers.inc"
 @interface PXPreparedUptimeFixture : NSObject
 @property (nonatomic, strong) NSError *error;
 @property (nonatomic, strong) NSDate *bootTimeValue;
 @property (nonatomic) NSTimeInterval uptimeValue;
 @property (nonatomic, strong) NSDate *cacheTime;
+@property (nonatomic) uint64_t uptimeEpoch;
+#include "PXUptimeDeclarations.inc"
 - (void)generateConsistentUptimeAndBootTimeForProfile:(NSString *)path;
 - (NSDictionary *)prepareConsistentUptimeInfo;
 - (NSTimeInterval)currentUptimeForProfile:(NSString *)path;
@@ -275,10 +278,12 @@ static void (^gDuringStoragePreferenceMirror)(void);
 @end
 static int PXPreparationFixtureSysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
     gUptimeProviders++;
-    void (^callback)(void) = gDuringUptime; gDuringUptime = nil; if (callback) callback();
-    return sysctl(name, namelen, oldp, oldlenp, newp, newlen);
+    void (^callback)(void) = gDuringUptime; gDuringUptime = nil;
+    @try { if (callback) callback(); return sysctl(name, namelen, oldp, oldlenp, newp, newlen); }
+    @finally { callback = nil; }
 }
 @implementation PXPreparedUptimeFixture
+@synthesize bootTimeValue = _bootTimeValue, uptimeValue = _uptimeValue, cacheTime = _cacheTime, error = _error, uptimeEpoch = _uptimeEpoch;
 #define sysctl PXPreparationFixtureSysctl
 #include "PXPreparedUptimeMethod.inc"
 #undef sysctl
@@ -705,12 +710,15 @@ static NSUInteger ArtifactDescriptorCount(void) {
 @interface PXObservedUptimeFixture : PXPreparedUptimeFixture
 @end
 @implementation PXObservedUptimeFixture
-- (void)setBootTimeValue:(NSDate *)value {
+- (BOOL)publishUptimeBoot:(NSDate *)boot seconds:(NSTimeInterval)seconds clock:(NSDate *)clock clearError:(BOOL)clearError epoch:(uint64_t)epoch {
     CheckArtifactLeaseFree();
-    NSString *persisted = IDs()[@"BootTime"];
-    CHECK(([persisted isEqual:[NSString stringWithFormat:@"%.0f", value.timeIntervalSince1970]]),
-          "uptime cache setter sees committed tuple after ownership release");
-    [super setBootTimeValue:value];
+    NSString *persisted = nil;
+    @try {
+        persisted = IDs()[@"BootTime"];
+        CHECK(([persisted isEqual:[NSString stringWithFormat:@"%.0f", boot.timeIntervalSince1970]]),
+              "uptime cache publication sees committed tuple after ownership release");
+        return [super publishUptimeBoot:boot seconds:seconds clock:clock clearError:clearError epoch:epoch];
+    } @finally { persisted = nil; boot = nil; clock = nil; }
 }
 @end
 
@@ -1155,6 +1163,20 @@ static void TestUptimeLifecycle(void) {
         if (kind != 0) CHECK([NSFileManager.defaultManager removeItemAtPath:identity error:NULL], "uptime identity replacement fixture removed");
         CHECK([NSFileManager.defaultManager moveItemAtPath:old toPath:identity error:NULL], "uptime original identity restored"); CheckArtifactLeaseFree();
     }
+    PXPreparedUptimeFixture *raceManager = [PXPreparedUptimeFixture new];
+    NSDate *newerClock = [NSDate date];
+    NSDictionary *newerUptime = @{ @"boot": @{ @"value": [newerClock dateByAddingTimeInterval:-1234] }, @"seconds": @1234 };
+    __block BOOL adoptedNewerUptime = NO;
+    gStore.testCheckpoint = ^(NSString *phase) {
+        if ([phase isEqual:@"commit-written"] && !adoptedNewerUptime) {
+            adoptedNewerUptime = YES; [raceManager adoptCommittedUptimeInfo:newerUptime timestamp:newerClock];
+        }
+    };
+    [raceManager generateConsistentUptimeAndBootTimeForProfile:identity];
+    gStore.testCheckpoint = nil;
+    CHECK(adoptedNewerUptime && !raceManager.error && [raceManager.bootTimeValue isEqual:newerUptime[@"boot"][@"value"]] &&
+          raceManager.uptimeValue == 1234, "real acknowledged uptime generation cannot overwrite newer cache adoption");
+    CheckArtifactLeaseFree();
     CHECK(SetArtifactSelection(@"a"), "artifact lifecycle selection restored");
 }
 

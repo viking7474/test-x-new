@@ -24,7 +24,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSString *)generateUptimeForProfile:(NSString *)profilePath;
 - (NSTimeInterval)currentUptimeForProfile:(NSString *)profilePath;
 - (NSString *)generateBootTimeForProfile:(NSString *)profilePath;
-- (NSDate *)currentBootTimeForProfile:(NSString *)profilePath;
+- (nullable NSDate *)currentBootTimeForProfile:(NSString *)profilePath;
 - (void)generateConsistentUptimeAndBootTimeForProfile:(NSString *)profilePath;
 - (void)adoptCommittedUptimeInfo:(NSDictionary *)uptimeInfo timestamp:(NSDate *)timestamp;
 
@@ -33,13 +33,22 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSTimeInterval)currentUptimeForProfile:(NSString *)profilePath generateIfMissing:(BOOL)generateIfMissing;
 - (nullable NSDate *)currentBootTimeForProfile:(NSString *)profilePath generateIfMissing:(BOOL)generateIfMissing;
 // Provider preparation only: no persistence, lifecycle acquire or cache effects.
-- (NSDictionary *)prepareConsistentUptimeInfo;
+- (nullable NSDictionary *)prepareConsistentUptimeInfo;
+
+// Cache boot/seconds/clock publish as one short observation after commit. Copy,
+// parsing, file/provider/source work and formatting stay outside the monitor.
+// Newer adoption/setter intent may supersede old generation/cache/error effects;
+// busy admission does not revoke its current owner. Separate getters remain
+// separate file observations. No profile-tagged/global source cache is implied.
+// Non-finite or unsupported time fields follow existing missing/default policy.
+// Private per-field KVO/overrides do not join this cache protocol.
 
 // Data validation
 - (BOOL)validateBootTimeConsistencyForProfile:(NSString *)profilePath;
 
 // Error handling
-@property (nonatomic, readonly) NSError *lastError;
+// Error is a retained per-instance observation, not a result for an earlier call.
+@property (nonatomic, readonly, nullable) NSError *lastError;
 
 @end
 

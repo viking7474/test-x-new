@@ -173,6 +173,38 @@ static NSUInteger OpenDescriptorCount(void) {
     for (int fd = 0; fd < 1024; fd++) if (fcntl(fd, F_GETFD) != -1) count++;
     return count;
 }
+static void TestNetworkInputBoundaries(NSString *a) {
+    gIdentity = a; CHECK(Seed(a, @{}, @{}) && ClearNetworkCarrier(a), "network input snapshot baseline seeded");
+    NSMutableString *ip = [@"192.0.2.31" mutableCopy];
+    gDuringGeneration = ^{ [ip setString:@"192.0.2.99"]; };
+    CHECK([PXFixtureNetwork saveLocalIPAddress:ip] && [View(a)[@"ids"][@"LocalIPAddress"] isEqual:@"192.0.2.31"],
+          "real source single IPv4 save freezes caller before optional IPv6 callback");
+    gDuringGeneration = nil;
+    ip = [@"192.0.2.32" mutableCopy]; NSMutableString *ipv6 = [@"2001:db8::32" mutableCopy];
+    gAfterSelection = ^{ [ip setString:@"192.0.2.99"]; [ipv6 setString:@"2001:db8::99"]; };
+    CHECK([PXFixtureNetwork saveLocalIPAddress:ip ipv6Address:ipv6] && [View(a)[@"network"][@"localIPAddress"] isEqual:@"192.0.2.32"] &&
+          [View(a)[@"ids"][@"LocalIPv6Address"] isEqual:@"2001:db8::32"], "real source paired IP input snapshot precedes target callbacks");
+    NSMutableString *name = [@"FrozenCarrier" mutableCopy], *mcc = [@"001" mutableCopy], *mnc = [@"01" mutableCopy];
+    gAfterSelection = ^{ [name setString:@"changed"]; [mcc setString:@"999"]; [mnc setString:@"99"]; };
+    CHECK([PXFixtureNetwork saveCarrierDetails:name mcc:mcc mnc:mnc] && [View(a)[@"carrier"][@"carrierName"] isEqual:@"FrozenCarrier"] &&
+          [View(a)[@"network"][@"mcc"] isEqual:@"001"] && [View(a)[@"ids"][@"CarrierMNC"] isEqual:@"01"], "real source carrier tuple remains frozen across all three committed files");
+    CHECK(([gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        return [tx setDictionary:@{ @"carrierName": @[], @"mcc": @"001", @"mnc": @"01" } atPath:Path(a, @"carrier_details.plist") error:error] &&
+            [tx setDictionary:@{ @"localIPAddress": @[], @"localIPv6Address": @42, @"carrierName": @"bad", @"mcc": @[], @"mnc": @"01" } atPath:Path(a, @"network_settings.plist") error:error] &&
+            [tx setDictionary:@{ @"LocalIPAddress": @"saved-ip", @"LocalIPv6Address": @"saved-v6", @"CarrierName": @"IDs", @"CarrierMCC": @310, @"CarrierMNC": @7 } atPath:Path(a, @"device_ids.plist") error:error];
+    } error:NULL]), "real source typed read fallback matrix seeded");
+    NSUInteger providers = atomic_load(&gProviders), entries = atomic_load(&gSourceEntries);
+    CHECK([[PXFixtureNetwork getSavedLocalIPAddress] isEqual:@"saved-ip"] && [[PXFixtureNetwork getSavedLocalIPv6Address] isEqual:@"saved-v6"] &&
+          [[PXFixtureNetwork getSavedCarrierDetails][@"mcc"] isEqual:@"310"] && providers == atomic_load(&gProviders) && entries == atomic_load(&gSourceEntries),
+          "real saved malformed records fall through typed sources without generation or source work");
+    NSDictionary *before = NetworkFiles(); NSUInteger selections = atomic_load(&gSelections);
+    CHECK(![PXFixtureNetwork saveLocalIPAddress:(id)@[]] && ![PXFixtureNetwork saveLocalIPAddress:(id)@1 ipv6Address:nil] &&
+          ![PXFixtureNetwork saveCarrierDetails:(id)@[] mcc:nil mnc:nil] && selections == atomic_load(&gSelections) && [before isEqual:NetworkFiles()],
+          "real source unsupported explicit input cannot acquire lookup or mutate artifacts");
+    CHECK(Seed(a, @{}, @{}) && ClearNetworkCarrier(a), "network input boundary fixture restores source baseline");
+    gAfterSelection = nil; gDuringGeneration = nil; CheckNetworkLeaseFree();
+}
+
 static void TestNetworkLifecycle(NSString *a, NSString *b) {
     gIdentity = a;
     CHECK(Seed(a, @{}, @{}), "network lifecycle fixture seeded");
@@ -423,7 +455,7 @@ int main(void) {
                     @"battery_info.plist", @"boot_time.plist", @"system_uptime.plist" ] containsObject:path.lastPathComponent]);
             } error:NULL];
         CHECK(gStore != nil, "artifact source backend initialized");
-        TestNetwork(targets[0], targets[1]); TestNetworkLifecycle(targets[0], targets[1]); TestComposedStages(targets[2]);
+        TestNetwork(targets[0], targets[1]); TestNetworkInputBoundaries(targets[0]); TestNetworkLifecycle(targets[0], targets[1]); TestComposedStages(targets[2]);
         TestRollback(targets[3]); TestConcurrent(targets[4]);
         gStore = nil;
         [NSFileManager.defaultManager removeItemAtPath:root error:nil];

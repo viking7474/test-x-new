@@ -10,6 +10,9 @@ NS_ASSUME_NONNULL_BEGIN
 + (instancetype)sharedManager;
 
 /// Ensure JSON is loaded. Returns YES if data is available (file or fallback).
+/// Root, country/index maps and fallback status publish together after construction.
+/// First complete catalog wins; cold concurrent calls may build duplicate candidates.
+/// Warm queries only capture immutable state. No monitor spans file/provider work.
 - (BOOL)loadIfNeeded:(NSError * _Nullable * _Nullable)error;
 
 /// ISO-3166 alpha-2 (e.g. @"US", @"VN"). Case-insensitive.
@@ -18,6 +21,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// Random entry from carriersForCountry:; never nil.
 - (NSDictionary *)randomCarrierForCountry:(NSString *)countryCode;
 
+/// Lookup rows are immutable. Numeric legacy codes are stringified; only complete
+/// one-to-three digit MNC strings get zero-padding aliases (exact keys remain).
 /// Lookup by MCC+MNC (e.g. @"310", @"260") → @{name, mcc, mnc, country?} or nil.
 - (NSDictionary * _Nullable)carrierForMCC:(NSString *)mcc mnc:(NSString *)mnc;
 

@@ -95,6 +95,69 @@ def source_contracts():
     assert 'ids[@"SSID"] = wifi[@"ssid"]' in helper and 'ids[@"BSSID"] = wifi[@"bssid"]' in helper
     assert 'timeIntervalSince1970' in helper and 'ids[@"LastUpdated"] = timestamp' in helper
     assert 'writeToFile:' not in network, 'NetworkManager may not bypass source transactions'
+    from test_runtime_identifier_writers import method
+    from test_profile_creation_flow import check_macro_arity
+    for fixture_name in ('PXNetworkBoundaryTests.m', 'PXCarrierCatalogTests.m', 'PXRuntimeArtifactWriterTests.m'):
+        check_macro_arity(read('tests/' + fixture_name), fixture_name)
+    ipv4 = method(network, '+ (NSString *)getCurrentLocalIPAddress')
+    ipv6 = method(network, '+ (NSString *)generateSpoofedLocalIPv6AddressFromCurrent')
+    for body in (ipv4, ipv6):
+        assert 'strcmp(entry->ifa_name, "en0")' in body and 'entry->ifa_addr' in body
+        assert 'if (!inet_ntop(' in body and 'freeifaddrs(interfaces)' in body and '@finally' in body
+        assert 'inet_ntoa(' not in body and 'stringWithUTF8String:entry->ifa_name' not in body
+    spoof = method(network, '+ (NSString *)generateSpoofedLocalIPAddressFromCurrent')
+    assert 'attempts < 10' in spoof and 'if (newLastOctet == lastOctet) newLastOctet =' in spoof
+    assert 'char buffer[INET6_ADDRSTRLEN] = {0};' in ipv6
+    assert 'fe80::1234:abcd:5678:9abc' in ipv6
+    for sig in ('+ (BOOL)saveLocalIPAddress:(NSString *)ipAddress ipv6Address:(NSString *)ipv6Address',
+                '+ (BOOL)saveCarrierDetails:(NSString *)carrierName mcc:(NSString *)mcc mnc:(NSString *)mnc'):
+        body = method(network, sig)
+        assert body.index(' copy]') < body.index('acquireMutationForIdentityDirectory:')
+        assert 'isKindOfClass:NSString.class' in body and '@finally' in body
+    for sig in ('+ (BOOL)saveAddresses:(NSString *)ipAddress ipv6:(NSString *)ipv6Address inMutation:(PXProfileArtifactMutation *)mutation error:(NSError **)error',
+                '+ (BOOL)saveSingleAddress:(NSString *)ipAddress inMutation:(PXProfileArtifactMutation *)mutation error:(NSError **)error',
+                '+ (BOOL)saveCarrierDetails:(NSString *)carrierName mcc:(NSString *)mcc mnc:(NSString *)mnc inMutation:(PXProfileArtifactMutation *)mutation error:(NSError **)error'):
+        body = method(network, sig)
+        assert 'BOOL (^sourceWrite)' in body and 'sourceWrite = nil;' in body and '@finally { tx = nil; }' in body
+        assert 'performSourceWrite:^' not in body
+    acquisition = method(network, '+ (PXProfileArtifactMutation *)acquireMutationForIdentityDirectory:(NSString *)expected error:(NSError **)error')
+    assert 'acquireWithIdentityResolver:resolver error:error]' in acquisition and 'resolver = nil; mutation = nil; expected = nil;' in acquisition
+    for sig in ('+ (NSString *)getSavedLocalIPAddressWithForcedRefresh:(BOOL)forceRefresh', '+ (NSString *)getSavedLocalIPv6Address'):
+        body = method(network, sig)
+        assert 'PXNetworkString(record[' in body and 'if (!identityDir.length)' in body and 'record = nil; path = nil; identityDir = nil;' in body
+    carrier_reader = method(network, '+ (NSDictionary *)getSavedCarrierDetailsWithForcedRefresh:(BOOL)forceRefresh')
+    assert carrier_reader.count('PXNetworkCarrierRecord(') == 3
+    for name in ('PXArtifactPath', 'PXArtifactIPv6', 'PXStageAddressDictionaries', 'PXStageRuntimeIPv4WithExistingPair', 'PXStageRuntimeAddresses', 'PXStageRuntimeCarrier'):
+        assert name in helper  # Exact region is also compiled by the boundary fixture.
+    assert 'identity = [identity copy];' in helper and 'carrier = PXArtifactCarrierSnapshot(carrier);' in helper
+    assert 'return changed ? [changed copy] : carrier;' in helper
+    carrier_db = read('common/CarrierDB.m')
+    assert 'self.db' not in carrier_db and 'self.countries' not in carrier_db and 'self.mccMncIndex' not in carrier_db
+    load = method(carrier_db, '- (BOOL)loadIfNeeded:(NSError **)error')
+    assert load.index('indexes = [self indexesForCountries:countries]') < load.index('catalog = [self publishCarrierCatalogIfAbsent:candidate]')
+    publish = method(carrier_db, '- (NSDictionary *)publishCarrierCatalogIfAbsent:(NSDictionary *)candidate')
+    assert '@synchronized (self)' in publish and 'if (!_carrierCatalog) _carrierCatalog = candidate;' in publish
+    assert 'winner = nil; candidate = nil;' in publish
+    for forbidden in ('PXLoadJSONDict', 'indexesForCountries', 'fileExistsAtPath', ' copy]', 'PXLog', 'dispatch_'):
+        assert forbidden not in publish
+    indexes = method(carrier_db, '- (NSDictionary *)indexesForCountries:(NSDictionary *)countries')
+    assert 'row = @{' in indexes and 'PXCarrierMNCNumber(normalizedMNC, &number)' in indexes
+    assert 'countries = nil;' in indexes and 'byMccMnc = nil;' in indexes
+    mnc_number = method(carrier_db, 'static BOOL PXCarrierMNCNumber(NSString *mnc, NSInteger *number)')
+    assert "digit < '0' || digit > '9'" in mnc_number and 'mnc.length > 3' in mnc_number
+    lookup = method(carrier_db, '- (NSDictionary *)carrierForMCC:(NSString *)mcc mnc:(NSString *)mnc')
+    assert lookup.count('[self readyCarrierCatalog]') == 1 and 'PXCarrierMNCNumber(mnc, &number)' in lookup
+    assert lookup.index('mcc = [PXCarrierScalar(mcc) copy]') < lookup.index('[self readyCarrierCatalog]')
+    assert 'if (![langs[index] isKindOfClass:NSString.class])' in carrier_db
+    assert 'TestNetworkInputBoundaries(targets[0]);' in fixture
+    for file_name, labels in (
+        ('PXNetworkBoundaryTests.m', ('IPv4 repeated RNG respects ten-draw bound and still changes original octet',
+          'network and exact staging helpers release retained inputs partial dictionaries and block captures after pool drain',
+          'paired save freezes both input strings before target resolution')),
+        ('PXCarrierCatalogTests.m', ('carrier ready state remains absent while first index construction is paused',
+          'first complete carrier catalog wins and later stale builder cannot replace any component',
+          'carrier exceptional construction releases input root indexes and callback captures after pool drain'))):
+        for label in labels: assert label in read('tests/' + file_name)
     mutation = read('common/PXProfileArtifactMutation.m')
     acquire = objc_method(mutation, '+ (instancetype)acquireWithDirectoryResolver:(NSString *(^)(PXProfileLifecycleLease *))resolver identityTarget:(BOOL)identityTarget lifecycleLease:(PXProfileLifecycleLease *)borrowed error:(NSError **)error')
     assert acquire.index('acquireInDirectory:PXProfilesPath()') < acquire.index('PXRequireNoPendingProfileDeletion') < acquire.index('resolver(mutation.lease)')
@@ -149,7 +212,7 @@ def source_contracts():
         assert 'profileIdentityPath' not in body, 'explicit-target persistence must not select a second profile'
     single = objc_method(network, '+ (BOOL)saveSingleAddress:(NSString *)ipAddress inMutation:(PXProfileArtifactMutation *)mutation error:(NSError **)error')
     assert single.index('PXStageRuntimeIPv4WithExistingPair') < single.index('generateSpoofedLocalIPv6AddressFromCurrent')
-    assert single.index('} error:error]') < single.index('generateSpoofedLocalIPv6AddressFromCurrent')
+    assert single.index('performSourceWrite:sourceWrite error:error]') < single.index('generateSpoofedLocalIPv6AddressFromCurrent')
     for body, helper_name in ((objc_method(wifi, '- (void)saveWiFiInfoToCurrentProfileAtRevision:(uint64_t)revision'), 'WiFi'),
                               (objc_method(battery, '- (BOOL)persistBatteryRecord:(NSDictionary *)record mutation:(uint64_t)receipt'), 'Battery'),
                               (objc_method(uptime, '- (void)generateConsistentUptimeAndBootTimeForProfile:(NSString *)profilePath'), 'Uptime')):
@@ -163,9 +226,9 @@ def source_contracts():
     assert 'writeToFile:' not in storage_save
     assert 'initWithSuiteName:@"com.hydra.tlinkios.settings"' in storage, 'defaults authority rollout remains pending'
     uptime_save = objc_method(uptime, '- (void)generateConsistentUptimeAndBootTimeForProfile:(NSString *)profilePath')
-    assert uptime_save.index('[mutation performSourceWrite:') < uptime_save.index('self.bootTimeValue = bootTime')
+    assert uptime_save.index('[mutation performSourceWrite:') < uptime_save.index('[self publishUptimeBoot:bootTime')
     provider = objc_method(uptime, '- (NSDictionary *)prepareConsistentUptimeInfo')
-    assert 'PXPrepareRuntimeUptime(now, realUptime, sysctlResult == 0)' in provider
+    assert 'PXPrepareRuntimeUptime(now, realUptime, hasRealUptime)' in provider
     assert uptime_save.index('acquireWithIdentityResolver:') < uptime_save.index('[self prepareConsistentUptimeInfo]') < uptime_save.index('[mutation performSourceWrite:')
     assert 'if (uptime < minUptime) uptime = minUptime;' in read('common/PXRuntimeArtifactPreparation.m'), 'generation policy must not silently change'
     for token in ('network IPv6 precedence preserved', 'existing IPv6 avoids generation',
@@ -179,10 +242,29 @@ def source_contracts():
     print('PASS: Runtime artifact writer source contracts (partial enrollment; native runtime not implied)')
 
 
+def generate_boundary_fragments(folder):
+    from test_runtime_identifier_writers import method
+    network = read('common/NetworkManager.m')
+    signatures = [line[:-2] for line in network.splitlines() if line.startswith('+ (') and line.endswith(' {')]
+    assert len(signatures) == len(set(signatures))
+    helpers = [method(network, sig) for sig in (
+        'static NSString *PXNetworkString(id value)', 'static NSString *PXNetworkCarrierScalar(id value)',
+        'static NSDictionary *PXNetworkCarrierRecord(id raw, NSString *nameKey, NSString *mccKey, NSString *mncKey)')]
+    (folder / 'PXNetworkBoundaryDeclarations.inc').write_text('\n'.join(sig + ';' for sig in signatures), encoding='utf-8')
+    (folder / 'PXNetworkBoundaryHelpers.inc').write_text('\n\n'.join(helpers), encoding='utf-8')
+    (folder / 'PXNetworkBoundaryMethods.inc').write_text('\n\n'.join(method(network, sig) for sig in signatures), encoding='utf-8')
+    stage = read('common/PXRuntimeArtifactWriter.m')
+    # This complete address/carrier region is exact production, including helpers.
+    (folder / 'PXNetworkStages.inc').write_text(stage[stage.index('static NSString *PXArtifactPath'):stage.index('BOOL PXStageRuntimeWiFi')], encoding='utf-8')
+    carrier = read('common/CarrierDB.m')
+    (folder / 'PXCarrierCatalog.inc').write_text(carrier[carrier.index('static NSString *const kCarrierDBErrorDomain'):], encoding='utf-8')
+
+
 def native_tests():
     assert sys.platform == 'darwin' and shutil.which('xcrun'), '--native requires macOS/xcrun; cannot silently skip'
     with tempfile.TemporaryDirectory(prefix='px-artifact-writers-') as folder:
         folder = Path(folder)
+        generate_boundary_fragments(folder)
         for scheme in ('rootful', 'roothide'):
             binary = folder / scheme
             if scheme == 'roothide':
@@ -190,6 +272,16 @@ def native_tests():
             subprocess.run(native_compile_command(folder, scheme), check=True, cwd=ROOT, timeout=60)
             for _ in range(3):
                 subprocess.run([str(binary)], check=True, cwd=ROOT, timeout=60)
+            for arc_mode, arc_flag in (('plain-arc', '-fno-objc-arc-exceptions'), ('arc-eh', '-fobjc-arc-exceptions')):
+                for fixture, name in (('PXNetworkBoundaryTests.m', 'network-boundaries'), ('PXCarrierCatalogTests.m', 'carrier-catalog')):
+                    boundary_binary = folder / (name + '-' + scheme + '-' + arc_mode)
+                    defines = ['-DTHEOS_PACKAGE_SCHEME_ROOTHIDE=1'] if scheme == 'roothide' else []
+                    print('Network/carrier native matrix:', name, scheme, arc_mode, flush=True)
+                    subprocess.run(['xcrun', 'clang', '-O0', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions', arc_flag,
+                                    '-Wall', '-Wextra', '-Werror=implicit-function-declaration', '-I', str(folder), '-I', str(ROOT / 'common'), *defines,
+                                    str(ROOT / 'tests' / fixture), '-framework', 'Foundation', '-framework', 'Security', '-o', str(boundary_binary)],
+                                   check=True, cwd=ROOT, timeout=60)
+                    subprocess.run([str(boundary_binary)], check=True, cwd=ROOT, timeout=60)
 
 
 if __name__ == '__main__':

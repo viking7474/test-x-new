@@ -15,37 +15,64 @@ static NSUInteger PXCarrierRandomIndex(NSUInteger upper) {
 }
 
 static NSDictionary * _Nullable PXLoadJSONDict(NSString *path, NSError **error) {
-    NSData *data = [NSData dataWithContentsOfFile:path options:0 error:error];
-    if (!data) return nil;
-    id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:error];
-    if (![obj isKindOfClass:[NSDictionary class]]) {
-        if (error && !*error) {
-            *error = [NSError errorWithDomain:kCarrierDBErrorDomain code:2
-                                     userInfo:@{NSLocalizedDescriptionKey: @"Invalid carrier_db.json root"}];
+    NSData *data = nil;
+    id obj = nil;
+    @try {
+        data = [NSData dataWithContentsOfFile:path options:0 error:error];
+        if (!data) return nil;
+        obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:error];
+        if (![obj isKindOfClass:NSDictionary.class]) {
+            if (error && !*error) *error = [NSError errorWithDomain:kCarrierDBErrorDomain code:2 userInfo:@{NSLocalizedDescriptionKey: @"Invalid carrier_db.json root"}];
+            return nil;
         }
-        return nil;
-    }
-    return obj;
+        return obj;
+    } @finally { obj = nil; data = nil; path = nil; }
 }
 
+static NSString *PXCarrierScalar(id value) {
+    @try {
+        if ([value isKindOfClass:NSString.class]) return value;
+        return [value isKindOfClass:NSNumber.class] ? [value stringValue] : nil;
+    } @finally { value = nil; }
+}
+static BOOL PXCarrierMNCNumber(NSString *mnc, NSInteger *number) {
+    @try {
+        if (!mnc.length || mnc.length > 3) return NO;
+        NSInteger value = 0;
+        for (NSUInteger index = 0; index < mnc.length; index++) {
+            unichar digit = [mnc characterAtIndex:index];
+            if (digit < '0' || digit > '9') return NO;
+            value = value * 10 + digit - '0';
+        }
+        if (number) *number = value;
+        return YES;
+    } @finally { mnc = nil; }
+}
 static NSString *PXNormCC(NSString *cc) {
-    return [[cc ?: @"" uppercaseString]
-            stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    @try {
+        if (![cc isKindOfClass:NSString.class]) return @"";
+        return [[cc uppercaseString] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    } @finally { cc = nil; }
 }
 
 static NSString *PXNormMNC(NSString *mnc) {
-    // Normalize "01" / "1" → keep original preferred; also try zero-padded 2/3 digit variants in lookup.
-    return [[mnc ?: @"" stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] copy];
+    NSString *value = nil;
+    @try {
+        value = PXCarrierScalar(mnc);
+        return [[value ?: @"" stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] copy];
+    } @finally { value = nil; mnc = nil; }
 }
 
 @interface CarrierDB ()
-@property (nonatomic, strong) NSDictionary *db;
-@property (nonatomic, strong) NSDictionary<NSString *, NSDictionary *> *countries; // CC → entry
-@property (nonatomic, strong) NSDictionary<NSString *, NSDictionary *> *mccMncIndex; // "MCC-MNC" → carrier+country
-@property (nonatomic, assign) BOOL usedFallback;
+- (NSDictionary *)carrierCatalog;
+- (NSDictionary *)readyCarrierCatalog;
+- (NSDictionary *)publishCarrierCatalogIfAbsent:(NSDictionary *)candidate;
+- (NSDictionary *)indexesForCountries:(NSDictionary *)countries;
 @end
 
-@implementation CarrierDB
+@implementation CarrierDB {
+    NSDictionary *_carrierCatalog;
+}
 
 + (instancetype)sharedManager {
     static CarrierDB *shared = nil;
@@ -122,202 +149,224 @@ static NSString *PXNormMNC(NSString *mnc) {
     };
 }
 
-- (void)indexFromCountries:(NSDictionary *)countries {
-    NSMutableDictionary *byCC = [NSMutableDictionary dictionary];
-    NSMutableDictionary *byMccMnc = [NSMutableDictionary dictionary];
-
-    [countries enumerateKeysAndObjectsUsingBlock:^(NSString *ccKey, id entry, BOOL *stop) {
-        (void)stop;
-        if (![ccKey isKindOfClass:[NSString class]] || ![entry isKindOfClass:[NSDictionary class]]) return;
-        NSString *cc = PXNormCC(ccKey);
-        if (cc.length != 2) return;
-        byCC[cc] = entry;
-
-        NSArray *carriers = entry[@"carriers"];
-        if (![carriers isKindOfClass:[NSArray class]]) return;
-        for (id c in carriers) {
-            if (![c isKindOfClass:[NSDictionary class]]) continue;
-            NSString *mcc = [c[@"mcc"] description];
-            NSString *mnc = [c[@"mnc"] description];
-            NSString *name = c[@"name"];
-            if (!mcc.length || !mnc.length || ![name isKindOfClass:[NSString class]] || !name.length) continue;
-            NSString *key = [NSString stringWithFormat:@"%@-%@", mcc, mnc];
-            NSMutableDictionary *row = [@{
-                @"name": name,
-                @"mcc": mcc,
-                @"mnc": mnc,
-                @"country": cc
-            } mutableCopy];
-            byMccMnc[key] = row;
-            // Also index zero-padded MNC variants (1 → 01 / 001)
-            NSInteger mncVal = mnc.integerValue;
-            if (mncVal >= 0) {
-                NSString *mnc2 = [NSString stringWithFormat:@"%02ld", (long)mncVal];
-                NSString *mnc3 = [NSString stringWithFormat:@"%03ld", (long)mncVal];
-                byMccMnc[[NSString stringWithFormat:@"%@-%@", mcc, mnc2]] = row;
-                byMccMnc[[NSString stringWithFormat:@"%@-%@", mcc, mnc3]] = row;
+- (NSDictionary *)indexesForCountries:(NSDictionary *)countries {
+    NSMutableDictionary *byCC = nil, *byMccMnc = nil;
+    NSArray *keys = nil, *carriers = nil;
+    NSString *cc = nil, *mcc = nil, *mnc = nil, *name = nil, *normalizedMNC = nil, *key = nil;
+    NSDictionary *row = nil;
+    id ccKey = nil, entry = nil, carrier = nil;
+    @try {
+        byCC = [NSMutableDictionary dictionary]; byMccMnc = [NSMutableDictionary dictionary];
+        keys = [countries allKeys];
+        for (NSUInteger countryIndex = 0; countryIndex < keys.count; countryIndex++) {
+            ccKey = keys[countryIndex]; entry = countries[ccKey];
+            if (![ccKey isKindOfClass:NSString.class] || ![entry isKindOfClass:NSDictionary.class]) continue;
+            cc = PXNormCC(ccKey); if (cc.length != 2) continue;
+            byCC[cc] = entry;
+            carriers = entry[@"carriers"];
+            if (![carriers isKindOfClass:NSArray.class]) continue;
+            for (NSUInteger index = 0; index < carriers.count; index++) {
+                carrier = carriers[index]; if (![carrier isKindOfClass:NSDictionary.class]) continue;
+                mcc = PXCarrierScalar(carrier[@"mcc"]); mnc = PXCarrierScalar(carrier[@"mnc"]);
+                name = [carrier[@"name"] isKindOfClass:NSString.class] ? carrier[@"name"] : nil;
+                if (!mcc.length || !mnc.length || !name.length) continue;
+                key = [NSString stringWithFormat:@"%@-%@", mcc, mnc];
+                row = @{ @"name": name, @"mcc": mcc, @"mnc": mnc, @"country": cc };
+                byMccMnc[key] = row;
+                NSInteger number = 0;
+                normalizedMNC = PXNormMNC(mnc);
+                if (PXCarrierMNCNumber(normalizedMNC, &number)) {
+                    byMccMnc[[NSString stringWithFormat:@"%@-%02ld", mcc, (long)number]] = row;
+                    byMccMnc[[NSString stringWithFormat:@"%@-%03ld", mcc, (long)number]] = row;
+                }
             }
         }
-    }];
+        return @{ @"countries": [byCC copy], @"index": [byMccMnc copy] };
+    } @finally {
+        row = nil; key = nil; normalizedMNC = nil; name = nil; mnc = nil; mcc = nil; cc = nil;
+        carrier = nil; entry = nil; ccKey = nil; carriers = nil; keys = nil; byMccMnc = nil; byCC = nil; countries = nil;
+    }
+}
 
-    self.countries = [byCC copy];
-    self.mccMncIndex = [byMccMnc copy];
+- (NSDictionary *)carrierCatalog {
+    NSDictionary *catalog = nil;
+    @try { @synchronized (self) { catalog = _carrierCatalog; } return catalog; }
+    @finally { catalog = nil; }
+}
+- (NSDictionary *)readyCarrierCatalog {
+    NSDictionary *catalog = nil;
+    @try {
+        catalog = [self carrierCatalog];
+        if (!catalog) { [self loadIfNeeded:nil]; catalog = [self carrierCatalog]; }
+        return catalog;
+    } @finally { catalog = nil; }
+}
+- (NSDictionary *)publishCarrierCatalogIfAbsent:(NSDictionary *)candidate {
+    NSDictionary *winner = nil;
+    @try {
+        @synchronized (self) {
+            if (!_carrierCatalog) _carrierCatalog = candidate;
+            winner = _carrierCatalog;
+        }
+        return winner;
+    } @finally { winner = nil; candidate = nil; }
 }
 
 - (BOOL)loadIfNeeded:(NSError **)error {
-    if (self.db) return YES;
-
-    NSArray<NSString *> *paths = PXJailbreakPathCandidates(@[
-        @"/var/mobile/Library/WeaponX/Data/carrier_db.json",
-        @"/private/var/mobile/Library/WeaponX/Data/carrier_db.json",
-        // Bundled copy inside app (optional)
-        [[[NSBundle mainBundle] resourcePath] stringByAppendingPathComponent:@"carrier_db.json"] ?: @"",
-        // Package path under /Library/WeaponX
-        @"/Library/WeaponX/Data/carrier_db.json",
-        @"/var/jb/Library/WeaponX/Data/carrier_db.json"
-    ]);
-
+    NSDictionary *catalog = nil, *root = nil, *countries = nil, *indexes = nil, *candidate = nil;
+    NSArray<NSString *> *paths = nil;
+    NSString *path = nil;
     NSError *lastErr = nil;
-    NSDictionary *root = nil;
-    for (NSString *p in paths) {
-        if (!p.length) continue;
-        if (![[NSFileManager defaultManager] fileExistsAtPath:p]) continue;
-        root = PXLoadJSONDict(p, &lastErr);
-        if (root) {
-            PXLog(@"[CarrierDB] Loaded %@", p);
-            break;
+    NSNumber *schema = nil;
+    BOOL usedFallback = NO;
+    @try {
+        catalog = [self carrierCatalog]; if (catalog) return YES;
+        paths = PXJailbreakPathCandidates(@[
+            @"/var/mobile/Library/WeaponX/Data/carrier_db.json",
+            @"/private/var/mobile/Library/WeaponX/Data/carrier_db.json",
+            [[[NSBundle mainBundle] resourcePath] stringByAppendingPathComponent:@"carrier_db.json"] ?: @"",
+            @"/Library/WeaponX/Data/carrier_db.json",
+            @"/var/jb/Library/WeaponX/Data/carrier_db.json"
+        ]);
+        for (NSUInteger index = 0; index < paths.count; index++) {
+            path = paths[index];
+            if (!path.length || ![NSFileManager.defaultManager fileExistsAtPath:path]) continue;
+            root = PXLoadJSONDict(path, &lastErr);
+            if (root) { PXLog(@"[CarrierDB] Loaded %@", path); break; }
         }
-    }
-
-    if (!root) {
-        PXLog(@"[CarrierDB] JSON missing — using built-in fallback (%@)", lastErr.localizedDescription ?: @"no file");
-        root = [self builtInFallbackDB];
-        self.usedFallback = YES;
-    } else {
-        self.usedFallback = NO;
-    }
-
-    NSNumber *schema = root[@"schemaVersion"];
-    if (![schema isKindOfClass:[NSNumber class]] || schema.integerValue < 1) {
-        if (error) {
-            *error = [NSError errorWithDomain:kCarrierDBErrorDomain code:3
-                                     userInfo:@{NSLocalizedDescriptionKey: @"Unsupported carrier_db schemaVersion"}];
+        if (!root) {
+            PXLog(@"[CarrierDB] JSON missing — using built-in fallback (%@)", lastErr.localizedDescription ?: @"no file");
+            root = [self builtInFallbackDB]; usedFallback = YES;
         }
-        // Still try fallback
-        root = [self builtInFallbackDB];
-        self.usedFallback = YES;
-    }
-
-    NSDictionary *countries = root[@"countries"];
-    if (![countries isKindOfClass:[NSDictionary class]] || countries.count == 0) {
-        root = [self builtInFallbackDB];
+        schema = root[@"schemaVersion"];
+        if (![schema isKindOfClass:NSNumber.class] || schema.integerValue < 1) {
+            if (error) *error = [NSError errorWithDomain:kCarrierDBErrorDomain code:3 userInfo:@{NSLocalizedDescriptionKey: @"Unsupported carrier_db schemaVersion"}];
+            root = [self builtInFallbackDB]; usedFallback = YES;
+        }
         countries = root[@"countries"];
-        self.usedFallback = YES;
-    }
-
-    self.db = root;
-    [self indexFromCountries:countries];
-    return YES;
+        if (![countries isKindOfClass:NSDictionary.class] || countries.count == 0) {
+            root = [self builtInFallbackDB]; countries = root[@"countries"]; usedFallback = YES;
+        }
+        indexes = [self indexesForCountries:countries];
+        candidate = @{ @"root": root, @"countries": indexes[@"countries"], @"index": indexes[@"index"], @"usedFallback": @(usedFallback) };
+        catalog = [self publishCarrierCatalogIfAbsent:candidate];
+        return catalog != nil;
+    } @finally { schema = nil; lastErr = nil; path = nil; paths = nil; candidate = nil; indexes = nil; countries = nil; root = nil; catalog = nil; }
 }
 
 #pragma mark - Queries
 
 - (NSArray<NSDictionary *> *)carriersForCountry:(NSString *)countryCode {
-    [self loadIfNeeded:nil];
-    NSString *cc = PXNormCC(countryCode);
-    NSDictionary *entry = self.countries[cc];
-    NSArray *carriers = entry[@"carriers"];
-    if ([carriers isKindOfClass:[NSArray class]] && carriers.count > 0) {
-        return carriers;
-    }
-    // Fallback US
-    entry = self.countries[@"US"];
-    carriers = entry[@"carriers"];
-    return [carriers isKindOfClass:[NSArray class]] ? carriers : @[];
+    NSDictionary *catalog = nil, *countries = nil, *entry = nil;
+    NSString *cc = nil;
+    NSArray *carriers = nil;
+    @try {
+        cc = PXNormCC(countryCode); catalog = [self readyCarrierCatalog]; countries = catalog[@"countries"];
+        entry = countries[cc]; carriers = entry[@"carriers"];
+        if ([carriers isKindOfClass:NSArray.class] && carriers.count > 0) return carriers;
+        entry = countries[@"US"]; carriers = entry[@"carriers"];
+        return [carriers isKindOfClass:NSArray.class] ? carriers : @[];
+    } @finally { carriers = nil; cc = nil; entry = nil; countries = nil; catalog = nil; countryCode = nil; }
 }
 
 - (NSDictionary *)randomCarrierForCountry:(NSString *)countryCode {
-    NSArray *carriers = [self carriersForCountry:countryCode];
-    if (carriers.count == 0) {
-        return @{@"name": @"T-Mobile", @"mcc": @"310", @"mnc": @"260"};
-    }
-    id pick = carriers[PXCarrierRandomIndex(carriers.count)];
-    if ([pick isKindOfClass:[NSDictionary class]] && pick[@"name"] && pick[@"mcc"] && pick[@"mnc"]) {
-        return pick;
-    }
-    return @{@"name": @"T-Mobile", @"mcc": @"310", @"mnc": @"260"};
+    NSArray *carriers = nil;
+    id pick = nil;
+    NSString *name = nil, *mcc = nil, *mnc = nil;
+    NSMutableDictionary *normalized = nil;
+    @try {
+        carriers = [self carriersForCountry:countryCode];
+        if (carriers.count) {
+            pick = carriers[PXCarrierRandomIndex(carriers.count)];
+            if ([pick isKindOfClass:NSDictionary.class]) {
+                name = [pick[@"name"] isKindOfClass:NSString.class] ? pick[@"name"] : nil;
+                mcc = PXCarrierScalar(pick[@"mcc"]); mnc = PXCarrierScalar(pick[@"mnc"]);
+                if (name && mcc && mnc) {
+                    if (mcc == pick[@"mcc"] && mnc == pick[@"mnc"]) return pick;
+                    normalized = [pick mutableCopy]; normalized[@"mcc"] = mcc; normalized[@"mnc"] = mnc;
+                    return [normalized copy];
+                }
+            }
+        }
+        return @{ @"name": @"T-Mobile", @"mcc": @"310", @"mnc": @"260" };
+    } @finally { normalized = nil; mnc = nil; mcc = nil; name = nil; pick = nil; carriers = nil; countryCode = nil; }
 }
 
 - (NSDictionary *)carrierForMCC:(NSString *)mcc mnc:(NSString *)mnc {
-    [self loadIfNeeded:nil];
-    mcc = [mcc description];
-    mnc = PXNormMNC(mnc);
-    if (!mcc.length || !mnc.length) return nil;
-
-    NSString *key = [NSString stringWithFormat:@"%@-%@", mcc, mnc];
-    NSDictionary *hit = self.mccMncIndex[key];
-    if (hit) return hit;
-
-    // Try padded MNC
-    NSInteger mncVal = mnc.integerValue;
-    if (mncVal >= 0) {
-        hit = self.mccMncIndex[[NSString stringWithFormat:@"%@-%02ld", mcc, (long)mncVal]];
+    NSDictionary *catalog = nil, *index = nil, *hit = nil;
+    NSString *key = nil;
+    @try {
+        mcc = [PXCarrierScalar(mcc) copy]; mnc = PXNormMNC(mnc);
+        catalog = [self readyCarrierCatalog]; index = catalog[@"index"];
+        if (!mcc.length || !mnc.length) return nil;
+        key = [NSString stringWithFormat:@"%@-%@", mcc, mnc]; hit = index[key];
         if (hit) return hit;
-        hit = self.mccMncIndex[[NSString stringWithFormat:@"%@-%03ld", mcc, (long)mncVal]];
-        if (hit) return hit;
-    }
-    return nil;
+        NSInteger number = 0;
+        if (PXCarrierMNCNumber(mnc, &number)) {
+            hit = index[[NSString stringWithFormat:@"%@-%02ld", mcc, (long)number]]; if (hit) return hit;
+            hit = index[[NSString stringWithFormat:@"%@-%03ld", mcc, (long)number]]; if (hit) return hit;
+        }
+        return nil;
+    } @finally { key = nil; hit = nil; index = nil; catalog = nil; mnc = nil; mcc = nil; }
 }
 
 - (NSString *)carrierNameForMCC:(NSString *)mcc mnc:(NSString *)mnc {
-    NSDictionary *row = [self carrierForMCC:mcc mnc:mnc];
-    NSString *name = row[@"name"];
-    if ([name isKindOfClass:[NSString class]] && name.length &&
-        ![name isEqualToString:@"TLinkIOS"] && ![name hasPrefix:@"TLinkIOS"]) {
-        return name;
-    }
-    // Last resort: US default name (never product branding)
-    return @"T-Mobile";
+    NSDictionary *row = nil;
+    NSString *name = nil;
+    @try {
+        row = [self carrierForMCC:mcc mnc:mnc]; name = row[@"name"];
+        if ([name isKindOfClass:NSString.class] && name.length && ![name isEqualToString:@"TLinkIOS"] && ![name hasPrefix:@"TLinkIOS"]) return name;
+        return @"T-Mobile";
+    } @finally { name = nil; row = nil; mnc = nil; mcc = nil; }
 }
 
 - (NSDictionary *)regionDefaultsForCountryCode:(NSString *)countryCode {
-    [self loadIfNeeded:nil];
-    NSString *cc = PXNormCC(countryCode);
-    if (cc.length != 2) cc = @"US";
+    NSDictionary *catalog = nil, *entry = nil, *carrier = nil;
+    NSString *cc = nil, *iso = nil, *locale = nil;
+    NSArray *langs = nil;
+    @try {
+        cc = PXNormCC(countryCode);
+        catalog = [self readyCarrierCatalog];
+        if (cc.length != 2) cc = @"US";
 
-    NSDictionary *entry = self.countries[cc];
-    if (![entry isKindOfClass:[NSDictionary class]]) {
-        entry = self.countries[@"US"];
-        cc = @"US";
-    }
+        entry = catalog[@"countries"][cc];
+        if (![entry isKindOfClass:[NSDictionary class]]) {
+            entry = catalog[@"countries"][@"US"];
+            cc = @"US";
+        }
 
-    NSDictionary *carrier = [self randomCarrierForCountry:cc];
-    NSString *iso = entry[@"iso"];
-    if (![iso isKindOfClass:[NSString class]] || !iso.length) {
-        iso = [cc lowercaseString];
-    }
-    NSString *locale = entry[@"localeIdentifier"];
-    if (![locale isKindOfClass:[NSString class]] || !locale.length) {
-        locale = [NSString stringWithFormat:@"en_%@", cc];
-    }
-    NSArray *langs = entry[@"preferredLanguages"];
-    if (![langs isKindOfClass:[NSArray class]] || langs.count == 0) {
-        langs = @[ @"en-US" ];
-    }
+        carrier = [self randomCarrierForCountry:cc];
+        iso = entry[@"iso"];
+        if (![iso isKindOfClass:[NSString class]] || !iso.length) {
+            iso = [cc lowercaseString];
+        }
+        locale = entry[@"localeIdentifier"];
+        if (![locale isKindOfClass:[NSString class]] || !locale.length) {
+            locale = [NSString stringWithFormat:@"en_%@", cc];
+        }
+        langs = entry[@"preferredLanguages"];
+        if (![langs isKindOfClass:[NSArray class]] || langs.count == 0) {
+            langs = @[ @"en-US" ];
+        }
+        for (NSUInteger index = 0; index < langs.count; index++) {
+            if (![langs[index] isKindOfClass:NSString.class]) { langs = @[@"en-US"]; break; }
+        }
 
-    return @{
-        @"carrierISO": iso,
-        @"mcc": carrier[@"mcc"] ?: @"310",
-        @"mnc": carrier[@"mnc"] ?: @"260",
-        @"carrierName": carrier[@"name"] ?: @"T-Mobile",
-        @"localeIdentifier": locale,
-        @"preferredLanguages": langs
-    };
+        return @{
+            @"carrierISO": iso,
+            @"mcc": carrier[@"mcc"] ?: @"310",
+            @"mnc": carrier[@"mnc"] ?: @"260",
+            @"carrierName": carrier[@"name"] ?: @"T-Mobile",
+            @"localeIdentifier": locale,
+            @"preferredLanguages": langs
+        };
+    } @finally { langs = nil; locale = nil; iso = nil; cc = nil; carrier = nil; entry = nil; catalog = nil; countryCode = nil; }
 }
 
 - (NSArray<NSString *> *)availableCountryCodes {
-    [self loadIfNeeded:nil];
-    return [[self.countries allKeys] sortedArrayUsingSelector:@selector(compare:)];
+    NSDictionary *catalog = nil;
+    @try { catalog = [self readyCarrierCatalog]; return [[catalog[@"countries"] allKeys] sortedArrayUsingSelector:@selector(compare:)]; }
+    @finally { catalog = nil; }
 }
 
 @end

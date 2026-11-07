@@ -14,6 +14,19 @@ read = lambda p: (ROOT / p).read_text(encoding='utf-8')
 spec = importlib.util.spec_from_file_location('identifier_writers', ROOT / 'scripts/test_runtime_identifier_writers.py')
 identifier = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(identifier)
+UPTIME_CACHE_METHODS = [
+    '- (uint64_t)uptimeEpoch',
+    '- (uint64_t)captureUptimeEpoch',
+    '- (uint64_t)claimUptimeEpoch:(uint64_t)observed',
+    '- (BOOL)uptimeEpochIsCurrent:(uint64_t)epoch',
+    '- (NSDate *)captureUptimeSeconds:(NSTimeInterval *)seconds cacheTime:(NSDate * __strong *)clock error:(NSError * __strong *)error',
+    '- (BOOL)publishUptimeBoot:(NSDate *)boot seconds:(NSTimeInterval)seconds clock:(NSDate *)clock clearError:(BOOL)clearError epoch:(uint64_t)epoch',
+    '- (void)setUptimeError:(NSError *)error epoch:(uint64_t)epoch',
+    '- (NSDate *)bootTimeValue',
+    '- (NSTimeInterval)uptimeValue',
+    '- (NSDate *)cacheTime',
+    '- (NSError *)error',
+]
 STORAGE_CACHE_METHODS = [
     '- (uint64_t)storageCacheRevision',
     '- (uint64_t)beginStorageCacheWorkIfRevision:(uint64_t)revision',
@@ -160,12 +173,15 @@ WRAPPERS = {
         '- (void)setTotalStorageCapacity:(NSString *)capacity', '- (void)setFreeStorageSpace:(NSString *)freeSpace', '- (void)setFilesystemType:(NSString *)fsType',
         '- (BOOL)isStorageSpoofingEnabled', '- (void)setStorageSpoofingEnabled:(BOOL)enabled',
         '- (BOOL)setStorageSpoofingEnabled:(BOOL)enabled error:(NSError **)error']),
-    'PXPreparedUptimeMethod.inc': ('common/UptimeManager.m', ['- (void)generateConsistentUptimeAndBootTimeForProfile:(NSString *)profilePath', '- (void)adoptCommittedUptimeInfo:(NSDictionary *)uptimeInfo timestamp:(NSDate *)timestamp',
+    'PXPreparedUptimeMethod.inc': ('common/UptimeManager.m', [*UPTIME_CACHE_METHODS, '- (void)generateConsistentUptimeAndBootTimeForProfile:(NSString *)profilePath', '- (void)adoptCommittedUptimeInfo:(NSDictionary *)uptimeInfo timestamp:(NSDate *)timestamp',
         '- (NSDictionary *)prepareConsistentUptimeInfo',
         '- (NSTimeInterval)currentUptimeForProfile:(NSString *)profilePath',
         '- (NSDate *)currentBootTimeForProfile:(NSString *)profilePath',
         '- (NSTimeInterval)currentUptimeForProfile:(NSString *)profilePath generateIfMissing:(BOOL)generateIfMissing',
-        '- (NSDate *)currentBootTimeForProfile:(NSString *)profilePath generateIfMissing:(BOOL)generateIfMissing']),
+        '- (NSDate *)currentBootTimeForProfile:(NSString *)profilePath generateIfMissing:(BOOL)generateIfMissing',
+        '- (void)setCurrentUptime:(NSTimeInterval)uptime', '- (void)setCurrentBootTime:(NSDate *)bootTime',
+        '- (NSString *)generateUptimeForProfile:(NSString *)profilePath', '- (NSString *)generateBootTimeForProfile:(NSString *)profilePath',
+        '- (BOOL)validateBootTimeConsistencyForProfile:(NSString *)profilePath', '- (NSString *)debugSpoofedUptimeInfo', '- (NSError *)lastError']),
 }
 
 
@@ -660,12 +676,61 @@ def source_contracts():
     assert 'if (![self batteryMutationIsCurrent:mutation] || ![self persistBatteryRecord:record mutation:mutation]) return batteryInfo;' in battery
 
     assert 'PXPrepareRuntimeStorage(capacity)' in read('common/StorageManager.m')
-    uptime = identifier.method(read('common/UptimeManager.m'), WRAPPERS['PXPreparedUptimeMethod.inc'][1][0])
+    uptime = identifier.method(read('common/UptimeManager.m'), '- (void)generateConsistentUptimeAndBootTimeForProfile:(NSString *)profilePath')
     provider = identifier.method(read('common/UptimeManager.m'), '- (NSDictionary *)prepareConsistentUptimeInfo')
-    assert 'PXPrepareRuntimeUptime(now, realUptime, sysctlResult == 0)' in provider
+    assert 'PXPrepareRuntimeUptime(now, realUptime, hasRealUptime)' in provider
     assert uptime.index('acquireWithIdentityResolver:') < uptime.index('[self prepareConsistentUptimeInfo]') < uptime.index('[mutation performSourceWrite:')
-    assert uptime.index('[mutation invalidate]') < uptime.index('self.bootTimeValue = bootTime')
-    assert '@finally { [mutation invalidate]; }' in uptime and 'createDirectoryAtPath:' not in uptime
+    assert uptime.index('[mutation invalidate]', uptime.index('BOOL committed')) < uptime.index('[self publishUptimeBoot:bootTime')
+    uptime_source = read('common/UptimeManager.m')
+    assert 'concurrentQueue' not in uptime_source and 'dispatch_queue_create' not in uptime_source
+    assert 'self.bootTimeValue =' not in uptime_source and 'self.uptimeValue =' not in uptime_source and 'self.cacheTime =' not in uptime_source and 'self.error =' not in uptime_source
+    assert provider.index('sz >= sizeof(boottv)') < provider.index('PXPrepareRuntimeUptime(')
+    assert 'isfinite(realUptime)' in provider and 'realUptime >= 0' in provider
+    assert uptime.index('acquireWithIdentityResolver:') < uptime.index('claimUptimeEpoch:observed') < uptime.index('[self prepareConsistentUptimeInfo]')
+    assert uptime.count('uptimeEpochIsCurrent:epoch') == 2 and 'PXUptimePreparedPacket(raw)' in uptime
+    assert 'sourceWrite = nil; resolver = nil;' in uptime and 'profilePath = nil;' in uptime
+    assert 'performSourceWrite:^' not in uptime and 'acquireWithIdentityResolver:^' not in uptime
+    current_epoch = identifier.method(uptime_source, '- (BOOL)uptimeEpochIsCurrent:(uint64_t)epoch')
+    claim_epoch = identifier.method(uptime_source, '- (uint64_t)claimUptimeEpoch:(uint64_t)observed')
+    assert '@synchronized (self)' in current_epoch and 'return epoch == _uptimeEpoch;' in current_epoch
+    assert claim_epoch.index('observed != _uptimeEpoch') < claim_epoch.index('++_uptimeEpoch')
+    publish = identifier.method(uptime_source, '- (BOOL)publishUptimeBoot:(NSDate *)boot seconds:(NSTimeInterval)seconds clock:(NSDate *)clock clearError:(BOOL)clearError epoch:(uint64_t)epoch')
+    assert 'objc_precise_lifetime' in publish and 'epoch != _uptimeEpoch' in publish
+    assert '_bootTimeValue = boot; _uptimeValue = seconds; _cacheTime = clock;' in publish
+    assert 'oldError = nil; oldClock = nil; oldBoot = nil;' in publish
+    capture = identifier.method(uptime_source, '- (NSDate *)captureUptimeSeconds:(NSTimeInterval *)seconds cacheTime:(NSDate * __strong *)clock error:(NSError * __strong *)error')
+    assert '@synchronized (self)' in capture and 'if (clock) *clock = time;' in capture and 'failure = nil; time = nil; boot = nil;' in capture
+    error_update = identifier.method(uptime_source, '- (void)setUptimeError:(NSError *)error epoch:(uint64_t)epoch')
+    assert 'epoch == _uptimeEpoch' in error_update and 'old = nil; error = nil;' in error_update
+    for body in (publish, capture, error_update):
+        for forbidden in (' copy]', 'mutableCopy', 'dictionaryWithContentsOfFile', 'PXLog', 'dispatch_', 'sysctl(', 'performSourceWrite:'):
+            assert forbidden not in body
+    debug = identifier.method(uptime_source, '- (NSString *)debugSpoofedUptimeInfo')
+    assert debug.count('captureUptimeSeconds:') == 1 and 'self.bootTimeValue' not in debug
+    number = identifier.method(uptime_source, 'static BOOL PXUptimeNumber(id value, NSTimeInterval *result)')
+    assert 'isKindOfClass:NSString.class' in number and 'isKindOfClass:NSNumber.class' in number and '!isfinite(seconds)' in number
+    for sig in ('- (NSTimeInterval)currentUptimeForProfile:(NSString *)profilePath generateIfMissing:(BOOL)generateIfMissing',
+                '- (NSDate *)currentBootTimeForProfile:(NSString *)profilePath generateIfMissing:(BOOL)generateIfMissing',
+                '- (BOOL)validateBootTimeConsistencyForProfile:(NSString *)profilePath'):
+        body = identifier.method(uptime_source, sig)
+        assert 'profilePath = PXUptimePath(profilePath)' in body and 'PXUptimeNumber' in body and 'profilePath = nil;' in body
+    prepared_packet = identifier.method(uptime_source, 'static NSDictionary *PXUptimePreparedPacket(id raw)')
+    assert 'PXUptimeNumber(seconds, &parsed)' in prepared_packet and 'PXUptimeNumber(value, &parsed)' in prepared_packet
+    assert 'elapsedCopy[@"value"] = [value copy]' in prepared_packet and 'packet[@"seconds"] = [seconds copy]' in prepared_packet
+    stage_uptime = identifier.method(read('common/PXRuntimeArtifactWriter.m'), 'BOOL PXStageRuntimeUptime(PXRuntimeSourceTransaction *tx, NSString *identity,\n                         NSDictionary *boot, NSDictionary *uptime, NSDate *timestamp, NSError **error)')
+    assert stage_uptime.index('identity = [identity copy]') < stage_uptime.index('[tx dictionaryAtPath:')
+    assert stage_uptime.index('uptimeCopy[@"value"] = [value copy]') < stage_uptime.index('[tx dictionaryAtPath:')
+    assert '!isfinite(date.timeIntervalSince1970)' in stage_uptime and '!isfinite([value doubleValue])' in stage_uptime
+    assert 'timestamp = nil; uptime = nil; boot = nil; identity = nil; tx = nil;' in stage_uptime
+    uptime_fixture = read('tests/PXUptimeBoundaryTests.m')
+    check_macro_arity(uptime_fixture, 'PXUptimeBoundaryTests.m')
+    for case in ('busy reentrant uptime generation does not revoke its outer owner',
+                 'acknowledged uptime commit preserves newer tuple and newer error',
+                 'uptime exceptional exit releases prepared partial records input and block captures after pool drain',
+                 'concurrent uptime adoption and capture never expose mixed tuple or perform I/O',
+                 'discarded uptime error metadata deallocates outside cache monitor'):
+        assert case in uptime_fixture
+    assert '@finally {\n        [mutation invalidate];' in uptime and 'createDirectoryAtPath:' not in uptime
     for typename, name, sentinel in (('NSTimeInterval', 'currentUptimeForProfile', '0'), ('NSDate *', 'currentBootTimeForProfile', 'nil')):
         typename = typename.rstrip()
         signature = f'- ({typename}){name}:(NSString *)profilePath generateIfMissing:(BOOL)generateIfMissing'
@@ -868,7 +933,7 @@ def source_contracts():
     root = identifier.method(mutation, '+ (instancetype)acquireWithProfileIDResolver:(NSString *(^)(void))resolver error:(NSError **)error')
     assert 'PXProfileRootPath(PXValidatedProfileID(' in root and 'identityTarget:NO' in root
 
-    assert uptime.index('[mutation performSourceWrite:') < uptime.index('self.bootTimeValue = bootTime')
+    assert uptime.index('[mutation performSourceWrite:') < uptime.index('[self publishUptimeBoot:bootTime')
     for path, _ in WRAPPERS.values():
         assert '#import "PXRuntimeArtifactPreparation.h"' in read(path), path
     fixture = read('tests/PXRuntimeArtifactPreparationTests.m')
@@ -882,6 +947,10 @@ def source_contracts():
                  'WiFi wrapper keeps detached result and mutable cache', 'all prepared artifacts commit together',
                  'prepared artifact failure rolls back entire tuple', 'uptime cache changes only after commit'):
         assert case in fixture, case
+    for case in ('malformed uptime provider packets reject before source staging and preserve prior cache',
+                 'uptime preparation freezes required nested fields before source callbacks',
+                 'direct uptime staging freezes identity and known fields without acquiring ownership'):
+        assert case in read('tests/PXUptimeBoundaryTests.m'), case
     for case in ('storage explicit inactive target persists once without selecting active profile',
                  'busy storage blocks current and explicit persistence before copying cache',
                  'pending delete blocks storage before target cache capture',
@@ -895,7 +964,8 @@ def source_contracts():
                  'storage rejects removed replaced and symlink profile roots without recreating target',
                  'storage setter autosaves use owned current-target persistence without altering units',
                  'profile-root capability closes descriptors on explicit release dealloc and failed acquire',
-                 'uptime cache setter sees committed tuple after ownership release',
+                 'uptime cache publication sees committed tuple after ownership release',
+                 'real acknowledged uptime generation cannot overwrite newer cache adoption',
                  'busy uptime avoids sysctl preparation cache changes and source writes',
                  'pending delete stops uptime before sysctl and preserves cache',
                  'uptime refuses absent identity instead of recreating legacy directory',
@@ -1015,6 +1085,15 @@ def generate_native_fragments(folder):
     (folder / 'PXWiFiResolutionDeclarations.inc').write_text('\n'.join(identifier.method(wifi_manager, sig).split(' {', 1)[0] + ';' for sig in WIFI_MANAGER_RESOLUTION), encoding='utf-8')
     cache_methods = WIFI_MANAGER_CACHE_METHODS + WIFI_MANAGER_READERS + WIFI_MANAGER_RESOLUTION + [WIFI_MANAGER_CAS, WIFI_MANAGER_LOAD, '- (void)loadWiFiInfoForProfileID:(NSString *)profileID', '- (void)adoptCommittedWiFiInfo:(NSDictionary *)wifiInfo profileID:(NSString *)profileID', '- (NSDictionary *)cachedWiFiInfoForProfileID:(NSString *)profileID']
     (folder / 'PXWiFiManagerCacheMethods.inc').write_text('\n\n'.join(identifier.method(wifi_manager, sig) for sig in cache_methods), encoding='utf-8')
+    uptime = read('common/UptimeManager.m')
+    helper_start = uptime.index('static BOOL PXUptimeNumber')
+    helper_end = uptime.index('@interface UptimeManager ()')
+    (folder / 'PXUptimeHelpers.inc').write_text(uptime[helper_start:helper_end], encoding='utf-8')
+    uptime_sigs = WRAPPERS['PXPreparedUptimeMethod.inc'][1]
+    (folder / 'PXUptimeDeclarations.inc').write_text('\n'.join(sig + ';' for sig in uptime_sigs), encoding='utf-8')
+    stage = read('common/PXRuntimeArtifactWriter.m')
+    (folder / 'PXUptimeStage.inc').write_text(identifier.method(stage, 'static NSString *PXArtifactPath(NSString *identity, NSString *file)') + '\n' + identifier.method(stage,
+        'BOOL PXStageRuntimeUptime(PXRuntimeSourceTransaction *tx, NSString *identity,\n                         NSDictionary *boot, NSDictionary *uptime, NSDate *timestamp, NSError **error)'), encoding='utf-8')
     storage = read('common/StorageManager.m'); hooks = read('TLinkIOSTweak/StorageHooks.x')
     wifi = read('TLinkIOSTweak/WiFiHook.x')
     start = wifi.index('static os_unfair_lock gWiFiCacheLock =')
@@ -1145,6 +1224,12 @@ def native_tests():
                                 '-Wall', '-Wextra', '-Werror=implicit-function-declaration', '-I', str(folder), '-I', str(ROOT / 'common'), *defines,
                                 str(ROOT / 'tests/PXWiFiHookCacheTests.m'), '-framework', 'Foundation', '-o', str(wifi_binary)], check=True, cwd=ROOT, timeout=60)
                 subprocess.run([str(wifi_binary)], check=True, cwd=ROOT, timeout=60)
+                uptime_binary = folder / ('uptime-boundaries-' + scheme + '-' + arc_mode)
+                print('Uptime boundaries native matrix:', scheme, arc_mode, flush=True)
+                subprocess.run(['xcrun', 'clang', '-O0', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions', arc_flag,
+                                '-Wall', '-Wextra', '-Werror=implicit-function-declaration', '-I', str(folder), *defines,
+                                str(ROOT / 'tests/PXUptimeBoundaryTests.m'), '-framework', 'Foundation', '-o', str(uptime_binary)], check=True, cwd=ROOT, timeout=60)
+                subprocess.run([str(uptime_binary)], check=True, cwd=ROOT, timeout=60)
                 storage_cache_binary = folder / ('storage-manager-cache-' + scheme + '-' + arc_mode)
                 print('Storage manager cache native matrix:', scheme, arc_mode, flush=True)
                 subprocess.run(['xcrun', 'clang', '-O0', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions', arc_flag,
