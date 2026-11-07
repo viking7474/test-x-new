@@ -26,9 +26,24 @@ static void (^gDuringFreeze)(void);
     return [NSPropertyListSerialization propertyListWithData:data options:options format:format error:error];
 }
 @end
+// Keep the production clock adapter intact; control only its external backend.
+// Exact integral seconds make (now + 30) - now independent of runner uptime.
+static BOOL gUseRealClock, gClockUnavailable;
+static time_t gClockSeconds = 1000;
+static long gClockNanoseconds;
+static NSUInteger gClockCalls;
+static int __attribute__((unused)) PXStorageFixtureClock(clockid_t clock, struct timespec *instant) {
+    gClockCalls++;
+    if (gUseRealClock) return clock_gettime(clock, instant);
+    if (gClockUnavailable || clock != CLOCK_MONOTONIC) return -1;
+    instant->tv_sec = gClockSeconds; instant->tv_nsec = gClockNanoseconds;
+    return 0;
+}
+#define clock_gettime PXStorageFixtureClock
 #define NSPropertyListSerialization PXCacheSerializationFixture
 #include "PXStorageObjectCache.inc"
 #undef NSPropertyListSerialization
+#undef clock_gettime
 
 @interface PXCacheDeallocSentinel : NSObject
 @end
@@ -49,6 +64,33 @@ static uint64_t MissAt(NSTimeInterval now) {
     uint64_t generation = UINT64_MAX;
     CHECK(PXStorageCachedValues(now, &generation) == nil, "cache miss captures an invalidation generation");
     return generation;
+}
+static void TestClockAdapter(void) {
+    gUseRealClock = YES; NSUInteger calls = gClockCalls;
+    NSTimeInterval live = PXStorageCacheTime();
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    CHECK(live == 0 && gClockCalls == calls, "RootHide clock bypass never calls even a live backend");
+#else
+    CHECK(isfinite(live) && live >= 0 && gClockCalls == calls + 1, "rootful clock adapter still exercises real CLOCK_MONOTONIC");
+#endif
+    gUseRealClock = NO; gClockSeconds = 1000; gClockNanoseconds = 250000000;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    CHECK(PXStorageCacheTime() == 0, "RootHide ignores synthetic clock values");
+#else
+    CHECK(PXStorageCacheTime() == 1000.25, "clock adapter preserves exact seconds and nanoseconds conversion");
+#endif
+    gClockUnavailable = YES;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    CHECK(PXStorageCacheTime() == 0 && gClockCalls == calls, "RootHide ignores backend failure without touching the clock");
+#else
+    CHECK(isnan(PXStorageCacheTime()), "failed clock backend retains the production unavailable-time sentinel");
+#endif
+    gClockUnavailable = NO; gClockNanoseconds = 0;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    CHECK(PXStorageCacheTime() == 0, "RootHide keeps captured-view clock policy after backend recovery");
+#else
+    CHECK(PXStorageCacheTime() == 1000, "clock backend recovers to the exact TTL test origin");
+#endif
 }
 static void TestLifetime(void) {
     NSUInteger released = gDeallocations;
@@ -75,21 +117,26 @@ static void TestObjectCache(void) {
     uint64_t generation = MissAt(now);
     NSUInteger serialized = gSerializations;
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    CHECK(now == 0 && generation == 0, "RootHide bypass needs no object-cache clock or epoch");
+    CHECK(now == 0 && generation == 0 && !gClockCalls, "RootHide bypass needs no object-cache clock or epoch");
     NSDictionary *published = PXStoragePublishValues(packet, NAN, UINT64_MAX);
     CHECK(published == packet && !PXStorageCachedValues(0, &generation) && serialized == gSerializations,
           "RootHide returns its captured view unchanged without codec or cross-view object reuse");
     PXStorageInvalidateCache();
     CHECK(PXStoragePublishValues(packet, 123, 999) == packet, "RootHide invalidation never substitutes the object-cache authority");
 #else
-    CHECK(isfinite(now) && now >= 0, "rootful object cache uses an available monotonic timestamp");
+    CHECK(now == 1000 && !gUseRealClock, "rootful object cache uses an exact controlled monotonic timestamp");
     NSDictionary *published = PXStoragePublishValues(packet, now, generation);
     CHECK(published != packet && serialized + 1 == gSerializations, "rootful cache detaches a plist packet once outside the lock");
     [total setString:@"999"]; [tag setString:@"changed"]; [tags addObject:@"new"]; packet[@"extra"] = @YES;
     CHECK([published[@"TotalStorage"] isEqual:@"64"] && [published[@"tags"] count] == 1 &&
           [published[@"tags"][0] isEqual:@"tag"] && !published[@"extra"], "cached descendants cannot change through caller-owned mutable strings arrays or dictionary");
-    CHECK(PXStorageCachedValues(now + 29.999, &generation) == published &&
-          !PXStorageCachedValues(now + 30, &generation), "cache retains its 30-second exclusive TTL boundary");
+    NSTimeInterval loadedAt = gStorageCacheLoadedAt;
+    NSDictionary *beforeExpiry = PXStorageCachedValues(now + 29.999, &generation);
+    NSDictionary *atExpiry = PXStorageCachedValues(now + 30, &generation);
+    if (beforeExpiry != published || atExpiry)
+        fprintf(stderr, "DETAIL: storage TTL now=%.17g loaded=%.17g age-at-boundary=%.17g before-hit=%d at-hit=%d generation=%llu\n",
+                now, loadedAt, (now + 30) - loadedAt, beforeExpiry == published, atExpiry != nil, (unsigned long long)generation);
+    CHECK(beforeExpiry == published && !atExpiry, "cache retains its 30-second exclusive TTL boundary");
     generation = MissAt(now);
     PXStoragePublishValues(published, now + 10, generation);
     CHECK(!PXStorageCachedValues(now, &generation), "negative elapsed time is never accepted as fresh");
@@ -124,7 +171,7 @@ static void TestObjectCache(void) {
 }
 int main(void) {
     @autoreleasepool {
-        @try { TestLifetime(); TestObjectCache(); }
+        @try { TestClockAdapter(); TestLifetime(); TestObjectCache(); }
         @catch (NSException *exception) { gFailures++; fprintf(stderr, "FAIL: unexpected storage-cache exception: %s\n", exception.description.UTF8String); }
         PXStorageInvalidateCache();
         printf("Storage object cache: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);

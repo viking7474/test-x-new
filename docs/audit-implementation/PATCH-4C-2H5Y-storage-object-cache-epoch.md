@@ -123,3 +123,60 @@ failure is the known bridge-retirement Git Bash mkdir permission issue. H5X
 native copy/refresh/scheduler bodies and the entire storage constructor/provider
 registration are compared with HEAD and unchanged. Foundation/Theos/device
 execution is unavailable locally; H5Y requires the next macOS CI/device run.
+
+## Native follow-up — deterministic TTL clock fixture (2026-11-07)
+
+Baseline 2594ed7. The user's native artifact preparation runs pass 848/848 three
+times, then rootful Storage object cache fails 20/22 at the exclusive 30-second
+boundary and the immediately following MissAt call. Earlier logs passed the same
+22 checks. The fixture constructs a deadline from a real fractional monotonic
+sample, then expects (now + 30) - now to equal exactly 30. Floating addition across
+an exponent boundary need not preserve that equality. Local binary64 arithmetic
+reproduces now=226.00000000000003, now+30=256.0, elapsed=29.99999999999997.
+The production '< 30' predicate therefore accepts this constructed timestamp,
+leaving the cache populated for the next miss assertion too. The same defect
+is reachable through the exact production timespec conversion: tv_sec=226 and
+tv_nsec=2 yield now=226.000000002, deadline=256.000000002 and the same elapsed
+29.99999999999997. Analogous reachable samples are 31 seconds/3 nanoseconds and
+1009 seconds/6 nanoseconds. This explains the two-failure pattern without a
+generation bug. The runner did not print its actual
+sample, so this is a reproducible fixture defect consistent with the log, not a
+claim to know that runner's exact timestamp.
+
+Only the fixture and its source guards change. Wrap the external clock_gettime
+backend around the exact production cache fragment. Deterministic cases use
+1000 integral seconds and zero nanoseconds; both explicit query timestamps and
+PXStoragePublishValues' internal observed-now query now use one controlled clock
+domain. The existing 29.999-hit and exact-30-miss assertions stay strict. Do not
+add an epsilon, shorten the TTL, relax the miss assertion, change production time
+math or use sleep/retry. A failure diagnostic records full-precision now, loaded
+origin, computed age, hit states and generation.
+
+A separate clock-adapter control forwards to the real CLOCK_MONOTONIC backend
+once on rootful, verifies nanosecond conversion using exact 1000.25, injects an
+unavailable backend and checks NAN, then restores the exact TTL origin. RootHide
+still returns zero without calling either backend; its existing no-cache policy
+also asserts zero backend calls. The fixture's unused backend attribute only
+accounts for that intentional compile-time bypass. A controlled backend avoids
+both phase-dependent arithmetic at the exact boundary and scheduler-dependent
+fresh-winner assertions. Foundation codec, invalidation-during-freeze callback,
+reentrant deallocation, stale generations, negative elapsed time and safe-default
+cases are unchanged.
+
+Local validation: twelve source negatives reject missing clock wrapping,
+live-backend forwarding, exact origin, live-clock-independent checks, RootHide
+bypass counters, either TTL boundary, strict expiry assertion, adapter invocation,
+fractional conversion or failure sentinel. An arithmetic reproduction confirms
+the old two-hit pattern at representable samples near 31, 226 and 1009 seconds,
+while the fixed origin expresses the exact boundary without rounding loss. These
+are arithmetic/source checks, not native cache execution. Five fragment generators,
+exact unchanged cache region, CHECK arity, both rootful/RootHide object-cache native
+recipes, source hardening, RootHide metadata/static checks (6/6) and diff checks
+pass locally. Recipes were captured; compiler/binary calls were not executed.
+Full Windows regression remains 62/63 Python and 4/4 Node, with only the known
+Keychain Git Bash permission failure (4 failures, 1 error, 1 skip).
+
+No production file, TTL, cache epoch/authority, hook, bootstrap/ctor/install policy,
+package/Makefile/dependency or iOS 15.8.8/AIDA64 behavior changes. macOS CI must
+confirm the native fix and remaining matrices; no new native/device pass,
+benchmark or rollout completion is claimed.

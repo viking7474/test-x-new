@@ -889,6 +889,17 @@ def source_contracts():
     assert 'PXStorageCachedValues(now, &generation)' in values_reader and values_reader.count('now, generation)') == 5
     assert 'timeIntervalSince1970' not in values_reader
     check_macro_arity(read('tests/PXStorageObjectCacheTests.m'), 'PXStorageObjectCacheTests.m')
+    storage_clock_fixture = read('tests/PXStorageObjectCacheTests.m')
+    assert storage_clock_fixture.count('TestClockAdapter();') == 1
+    assert storage_clock_fixture.index('#define clock_gettime PXStorageFixtureClock') < storage_clock_fixture.index('#include "PXStorageObjectCache.inc"') < storage_clock_fixture.index('#undef clock_gettime')
+    assert 'if (gUseRealClock) return clock_gettime(clock, instant);' in storage_clock_fixture
+    assert 'clock != CLOCK_MONOTONIC' in storage_clock_fixture and 'gClockSeconds = 1000;' in storage_clock_fixture
+    assert 'now == 1000 && !gUseRealClock' in storage_clock_fixture
+    assert 'now == 0 && generation == 0 && !gClockCalls' in storage_clock_fixture
+    assert 'PXStorageCacheTime() == 1000.25' in storage_clock_fixture and 'isnan(PXStorageCacheTime())' in storage_clock_fixture
+    assert 'beforeExpiry == published && !atExpiry' in storage_clock_fixture
+    assert 'PXStorageCachedValues(now + 29.999, &generation)' in storage_clock_fixture and 'PXStorageCachedValues(now + 30, &generation)' in storage_clock_fixture
+    assert 'gClockCalls == calls' in storage_clock_fixture and 'age-at-boundary=%.17g' in storage_clock_fixture
     native_copy = identifier.method(hooks, 'static BOOL PXStorageCopyNativeSnapshot(uint64_t *totalBytes, uint64_t *freeBytes)')
     assert native_copy.count('atomic_load_explicit(&gStorageNativeRevision, memory_order_seq_cst)') == 2
     assert 'free > total' in native_copy and 'revision & 1' in native_copy
