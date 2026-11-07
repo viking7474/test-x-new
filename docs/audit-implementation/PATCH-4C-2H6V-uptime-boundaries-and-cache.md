@@ -118,3 +118,11 @@ and their finally cleanup remain. See the H6U native-follow-up section for user
 CI evidence, compiler references, preserved behavior and verification limits.
 The original Uptime exceptional-owner assertions remain enrolled in both ARC
 modes and both package schemes; native results are still pending.
+
+A second native follow-up reported Network owner release but a live copied
+identity. Uptime shares the inline identity getter stage-argument pattern, so its
+callback now holds that getter result in a named strong local and clears it in
+finally after the epoch check. The existing construction scope, source success,
+cache ordering and exceptional weak-root assertions remain. The H6U report records
+the 49/57 CI evidence and direct-stage/success controls; Uptime native outcomes
+are still pending.

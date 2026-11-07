@@ -223,3 +223,61 @@ Native compiler/binary recipes were captured, not executed. The reported 43/47
 failure has not been rerun on this Windows host; macOS CI must confirm the fix.
 No package/bootstrap/hook/dependency/Makefile, source engine or lifecycle engine
 change, benchmark, commit or deployment is claimed.
+
+## Native follow-up — getter-result identity lifetime (2026-11-06)
+
+The next user CI run again passed the real source writer fixture three times at
+175/175. Network boundaries reached 49/57: all eight failing exceptional cases
+reported owner=0, transaction=0, blocks=0, input/token=0 and only identity=1.
+The seven construction-scope changes therefore address the previously observed
+owner retention, but do not establish complete exceptional lifetime cleanup.
+The copied-identity oracle exposed a further retained object after the owner was
+gone; it must remain in the assertions.
+
+All four Network callbacks passed mutation.identityDirectory directly as a
+staging C-call argument. Uptime's callback used the same pattern. The boundary
+between the getter expression and a throwing C stage had no named caller-owned
+slot. Under [plain ARC exception rules](https://clang.llvm.org/docs/AutomaticReferenceCounting.html#exceptions),
+cleanup of full-expression temporaries is not guaranteed. This is a concrete
+remaining cleanup boundary consistent with the log; without the runner compiler
+and native execution we cannot establish the exact emitted retain instruction or
+rule out an additional fixture/runtime retainer merely from the weak observation.
+
+The five callbacks now evaluate the getter into a named strong identity inside
+their existing try, then pass that variable to staging and clear it with the
+transaction parameter in finally. The getter assignment completes before the
+throwing call. It still happens in the callback at the same point (after Uptime's
+epoch check), exactly once per callback invocation. Mutation captures stay strong,
+construction scopes stay in place, and the C stages/source/lifecycle engines are
+unchanged. There is no new path copy/normalization, namespace lookup, write,
+provider, notification, exception catch or ARC build flag.
+
+Keep all eight failing assertions and the copied-identity weak probe. Add a
+successful owned-save control which observes a copied path distinct from the
+caller's mutable string while the capability is live, clears mock file ownership,
+and requires owner/path/transaction/callback roots to disappear after pool drain.
+Add four direct-stage exceptional controls for read, write, second-write and
+carrier-third-write with an explicitly named immutable identity and weak lifetime
+probe, without a capability getter or source ownership. These distinguish a
+caller-expression gap from an error in the C stages or the lifetime oracle;
+their native outcomes are pending, not assumed to pass. Uptime's capability
+stand-in also copies through a mutable temporary to create a distinct owned
+identity and adds that identity to its existing exceptional weak-root checks;
+this catches the fifth getter boundary without relying on a constant string.
+
+Source guards cover all five getter assignments/cleanup blocks, prohibit inline
+identity getter stage arguments, and keep both new controls invoked with their
+weak assertions. Fourteen negative controls remove the five named assignments,
+five explicit releases, two fixture invocations, the direct weak assertion or
+copied-identity distinction; each is rejected. Five generators and exact Network/
+Uptime method extraction, CHECK macro arity and eight affected rootful/RootHide x
+plain ARC/ARC-EH recipe captures pass. Compiler/binary calls were captured, not
+executed. Windows regression remains 62/63 Python and 4/4 Node, with the established
+Keychain Git Bash permission failure; source hardening, RootHide metadata/static
+controls (6/6) and diff checks pass.
+
+Common code applies to both schemes. Rootful remains first in the matrix and
+stops later configurations on failure. The user has not supplied a passing native
+result for this follow-up. The added retained local has bounded expected low
+cost, unmeasured; hooks/bootstrap/package/Makefile/dependencies are unchanged.
+No native/build/device pass or full source-consistency completion is claimed.

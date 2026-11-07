@@ -242,13 +242,15 @@ static NSDictionary *PXUptimePreparedPacket(id raw) {
         bootTime = bootTimeDict[@"value"]; NSTimeInterval uptime = [prepared[@"seconds"] doubleValue];
         {
             sourceWrite = ^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+                NSString *identity = nil;
                 @try {
                     if (![self uptimeEpochIsCurrent:epoch]) {
                         if (error) *error = [NSError errorWithDomain:@"com.weaponx.UptimeManager" code:1004 userInfo:@{NSLocalizedDescriptionKey: @"Uptime operation was superseded"}];
                         return NO;
                     }
-                    return PXStageRuntimeUptime(tx, mutation.identityDirectory, bootTimeDict, uptimeDict, now, error);
-                } @finally { tx = nil; }
+                    identity = mutation.identityDirectory;
+                    return PXStageRuntimeUptime(tx, identity, bootTimeDict, uptimeDict, now, error);
+                } @finally { identity = nil; tx = nil; }
             };
         }
         BOOL committed = [mutation performSourceWrite:sourceWrite error:&writeError];

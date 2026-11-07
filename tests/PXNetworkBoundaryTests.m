@@ -252,6 +252,43 @@ static void TestDirectStageSnapshots(void) {
           [tx.staged[File(@"carrier_details.plist")][@"keep"] boolValue] && tx.staged.count == 3 && !gAcquires && !gWrites,
           "direct carrier staging freezes mutable scalars once for all files without acquiring ownership or losing extras");
 }
+static void TestIdentityLifetimeControls(void) {
+    Reset(); gIdentity = [@"/profiles/a/identity" mutableCopy];
+    @autoreleasepool {
+        gDuringSource = ^{
+            CHECK(gIdentityRoot && gIdentityRoot != gIdentity,
+                  "identity lifetime oracle observes a detached capability copy while ownership is live");
+        };
+        CHECK([PXProviderNetwork saveLocalIPAddress:@"192.0.2.10" ipv6Address:@"2001:db8::10"] && gWrites == 1 && !gHeld,
+              "identity lifetime success control commits and releases ownership");
+        [gFiles removeAllObjects];
+    }
+    CHECK(!gOwnerRoot && !gIdentityRoot && !gTxRoot && !gCallbackRoots.allObjects.count,
+          "identity lifetime success control releases the copied path after pool drain");
+}
+static void TestDirectStageExceptionalIdentity(void) {
+    for (NSString *fault in @[@"tx-read", @"tx-set", @"second-write", @"carrier-third-write"]) {
+        Reset(); __weak id weakIdentity = nil;
+        @autoreleasepool {
+            NSString *identity = [[@"/profiles/a/identity" mutableCopy] copy]; weakIdentity = identity;
+            PXRuntimeSourceTransaction *tx = [PXRuntimeSourceTransaction new];
+            NSDate *timestamp = NSDate.date;
+            NSDictionary *carrier = @{ @"carrierName": @"Fixture", @"mcc": @"001", @"mnc": @"01" };
+            gFault = fault;
+            if ([fault isEqual:@"second-write"]) gFailSetAt = 2;
+            if ([fault isEqual:@"carrier-third-write"]) gFailSetAt = 3;
+            BOOL threw = NO;
+            @try {
+                if ([fault isEqual:@"carrier-third-write"]) PXStageRuntimeCarrier(tx, identity, carrier, timestamp, NULL);
+                else PXStageRuntimeAddresses(tx, identity, @"192.0.2.10", @"2001:db8::10", NO, timestamp, NULL);
+            } @catch (NSException *exception) { threw = [exception.name isEqual:@"fixture.network"]; }
+            CHECK(threw && !gAcquires && !gWrites, "direct staging identity faults propagate without ownership or mock commits");
+            tx = nil; identity = nil; timestamp = nil; carrier = nil;
+        }
+        if (weakIdentity) fprintf(stderr, "DETAIL: direct network stage fault=%s identity=1\n", fault.UTF8String);
+        CHECK(!weakIdentity, "direct staging releases named identity after exceptional cleanup and pool drain");
+    }
+}
 static void TestExceptionalOwnership(void) {
     for (NSString *fault in @[@"acquire", @"read", @"tx-read", @"tx-set", @"provider", @"second-write", @"carrier-third-write"]) {
         Reset(); gIdentity = [@"/profiles/a/identity" mutableCopy]; __weak id weakInput = nil, weakToken = nil;
@@ -304,7 +341,7 @@ static void TestSingleAddressExceptionalOwnership(void) {
     }
 }
 int main(void) { @autoreleasepool {
-    @try { TestInterfaces(); TestReaders(); TestFrozenWrites(); TestDirectStageSnapshots(); TestExceptionalOwnership(); TestSingleAddressExceptionalOwnership(); }
+    @try { TestInterfaces(); TestReaders(); TestFrozenWrites(); TestDirectStageSnapshots(); TestIdentityLifetimeControls(); TestDirectStageExceptionalIdentity(); TestExceptionalOwnership(); TestSingleAddressExceptionalOwnership(); }
     @catch (NSException *exception) { gFailures++; fprintf(stderr, "FAIL: unexpected network exception: %s\n", exception.description.UTF8String); }
     printf("Network boundaries: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);
     return gFailures ? 1 : 0;

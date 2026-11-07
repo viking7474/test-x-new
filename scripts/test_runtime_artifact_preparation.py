@@ -693,6 +693,8 @@ def source_contracts():
     from test_runtime_artifact_writers import callback_construction_scopes
     assert callback_construction_scopes(uptime, 'resolver') == 1
     assert callback_construction_scopes(uptime, 'sourceWrite') == 1
+    assert 'identity = mutation.identityDirectory;' in uptime and '@finally { identity = nil; tx = nil; }' in uptime
+    assert 'tx, mutation.identityDirectory,' not in uptime
     current_epoch = identifier.method(uptime_source, '- (BOOL)uptimeEpochIsCurrent:(uint64_t)epoch')
     claim_epoch = identifier.method(uptime_source, '- (uint64_t)claimUptimeEpoch:(uint64_t)observed')
     assert '@synchronized (self)' in current_epoch and 'return epoch == _uptimeEpoch;' in current_epoch
@@ -727,6 +729,7 @@ def source_contracts():
     assert 'timestamp = nil; uptime = nil; boot = nil; identity = nil; tx = nil;' in stage_uptime
     uptime_fixture = read('tests/PXUptimeBoundaryTests.m')
     check_macro_arity(uptime_fixture, 'PXUptimeBoundaryTests.m')
+    assert 'gIdentityRoot = owner.identityDirectory;' in uptime_fixture and '!gOwnerRoot && !gIdentityRoot && !gTxRoot' in uptime_fixture
     for case in ('busy reentrant uptime generation does not revoke its outer owner',
                  'acknowledged uptime commit preserves newer tuple and newer error',
                  'uptime exceptional exit releases prepared partial records input and block captures after pool drain',

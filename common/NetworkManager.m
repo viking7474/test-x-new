@@ -219,8 +219,12 @@ static NSDictionary *PXNetworkCarrierRecord(id raw, NSString *nameKey, NSString 
             // End stack-literal capture lifetime before a source collaborator can throw.
             // The named heap callback remains owned until the outer finally clears it.
             sourceWrite = ^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
-                @try { return PXStageRuntimeAddresses(tx, mutation.identityDirectory, ipAddress, ipv6Address, NO, now, writeError); }
-                @finally { tx = nil; }
+                // Own the getter result before the staging call can unwind.
+                NSString *identity = nil;
+                @try {
+                    identity = mutation.identityDirectory;
+                    return PXStageRuntimeAddresses(tx, identity, ipAddress, ipv6Address, NO, now, writeError);
+                } @finally { identity = nil; tx = nil; }
             };
         }
         return [mutation performSourceWrite:sourceWrite error:error];
@@ -254,8 +258,11 @@ static NSDictionary *PXNetworkCarrierRecord(id raw, NSString *nameKey, NSString 
         now = NSDate.date;
         {
             sourceWrite = ^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
-                @try { return PXStageRuntimeIPv4WithExistingPair(tx, mutation.identityDirectory, ipAddress, now, &needsIPv6, writeError); }
-                @finally { tx = nil; }
+                NSString *identity = nil;
+                @try {
+                    identity = mutation.identityDirectory;
+                    return PXStageRuntimeIPv4WithExistingPair(tx, identity, ipAddress, now, &needsIPv6, writeError);
+                } @finally { identity = nil; tx = nil; }
             };
         }
         BOOL success = [mutation performSourceWrite:sourceWrite error:error];
@@ -265,8 +272,11 @@ static NSDictionary *PXNetworkCarrierRecord(id raw, NSString *nameKey, NSString 
             preparedAt = NSDate.date;
             {
                 sourceWrite = ^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
-                    @try { return PXStageRuntimeAddresses(tx, mutation.identityDirectory, ipAddress, candidateIPv6, YES, preparedAt, writeError); }
-                    @finally { tx = nil; }
+                    NSString *identity = nil;
+                    @try {
+                        identity = mutation.identityDirectory;
+                        return PXStageRuntimeAddresses(tx, identity, ipAddress, candidateIPv6, YES, preparedAt, writeError);
+                    } @finally { identity = nil; tx = nil; }
                 };
             }
             success = [mutation performSourceWrite:sourceWrite error:error];
@@ -382,8 +392,11 @@ static NSDictionary *PXNetworkCarrierRecord(id raw, NSString *nameKey, NSString 
         networkTimestamp = NSDate.date;
         {
             sourceWrite = ^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
-                @try { return PXStageRuntimeCarrier(tx, mutation.identityDirectory, carrier, networkTimestamp, writeError); }
-                @finally { tx = nil; }
+                NSString *identity = nil;
+                @try {
+                    identity = mutation.identityDirectory;
+                    return PXStageRuntimeCarrier(tx, identity, carrier, networkTimestamp, writeError);
+                } @finally { identity = nil; tx = nil; }
             };
         }
         return [mutation performSourceWrite:sourceWrite error:error];

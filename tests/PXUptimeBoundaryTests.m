@@ -19,7 +19,7 @@ static NSMutableDictionary *gFiles;
 static id gPacketOverride;
 static void (^gDuringClock)(void), (^gDuringRead)(void), (^gDuringTxRead)(void), (^gDuringSysctl)(void), (^gDuringCapture)(void), (^gBeforeSource)(void), (^gAfterCommit)(void), (^gDuringDealloc)(void);
 static NSHashTable *gCallbackRoots;
-static __weak id gOwnerRoot, gTxRoot;
+static __weak id gOwnerRoot, gTxRoot, gIdentityRoot;
 #define CHECK(value, label) do { gChecks++; if (!(value)) { gFailures++; fprintf(stderr, "FAIL: %s\n", label); } } while (0)
 #define PXLog(...) do {} while (0)
 static void Raise(void) { [NSException raise:@"fixture.uptime" format:@"controlled failure"]; }
@@ -91,12 +91,13 @@ static NSDictionary *PXPrepareRuntimeUptime(NSDate * __unsafe_unretained now, NS
 + (instancetype)acquireWithIdentityResolver:(NSString *(^ __unsafe_unretained)(void))resolver error:(NSError **)error {
     if (gHeld) { if (error) *error = [NSError errorWithDomain:@"fixture.busy" code:12 userInfo:nil]; return nil; }
     PXProfileArtifactMutation *owner = [self new]; gOwnerRoot = owner;
-    NSString *identity = nil; BOOL handedOff = NO; owner.active = YES; gHeld = YES;
+    NSString *identity = nil; NSMutableString *ownedPath = nil; BOOL handedOff = NO; owner.active = YES; gHeld = YES;
     @try {
         [gCallbackRoots addObject:resolver]; if ([gFault isEqual:@"acquire"]) Raise();
-        identity = resolver(); if (!identity) return nil; owner.identityDirectory = identity;
+        identity = resolver(); if (!identity) return nil;
+        ownedPath = [identity mutableCopy]; owner.identityDirectory = ownedPath; gIdentityRoot = owner.identityDirectory;
         handedOff = YES; return owner;
-    } @finally { if (!handedOff) [owner invalidate]; identity = nil; owner = nil; }
+    } @finally { if (!handedOff) [owner invalidate]; ownedPath = nil; identity = nil; owner = nil; }
 }
 - (BOOL)performSourceWrite:(BOOL (^ __unsafe_unretained)(PXRuntimeSourceTransaction *, NSError **))body error:(NSError **)error {
     PXRuntimeSourceTransaction *tx = [PXRuntimeSourceTransaction new]; gTxRoot = tx;
@@ -156,7 +157,7 @@ static void Reset(void) {
     gSysResult = 0; gSysSize = sizeof(struct timeval); gBootSeconds = 1000000; gNow = [NSDate dateWithTimeIntervalSince1970:2000000];
     gHeld = gInsideSource = gHasReal = NO; gFault = nil; gPacketOverride = nil; gFiles = [NSMutableDictionary dictionary];
     gDuringClock = nil; gDuringRead = nil; gDuringTxRead = nil; gDuringSysctl = nil; gDuringCapture = nil; gBeforeSource = nil; gAfterCommit = nil; gDuringDealloc = nil;
-    gCallbackRoots = [NSHashTable weakObjectsHashTable]; gOwnerRoot = nil; gTxRoot = nil;
+    gCallbackRoots = [NSHashTable weakObjectsHashTable]; gOwnerRoot = nil; gTxRoot = nil; gIdentityRoot = nil;
 }
 static void TestTypedReaders(void) {
     Reset(); PXUptimeFixture *owner = [PXUptimeFixture new];
@@ -285,9 +286,9 @@ static void TestPreparationAndWeakExit(void) {
             CHECK(!gHeld && !gInsideSource, "uptime exceptional exit releases owned capability");
             gPacketOverride = nil; [gFiles removeAllObjects]; manager = nil; path = nil; packet = nil; boot = nil; token = nil;
         }
-        if (weakOwner || weakToken || weakInput || gOwnerRoot || gTxRoot || gCallbackRoots.allObjects.count)
-            fprintf(stderr, "DETAIL: uptime fault=%s owner=%d token=%d input=%d capability=%d tx=%d blocks=%lu\n", fault.UTF8String, weakOwner != nil, weakToken != nil, weakInput != nil, gOwnerRoot != nil, gTxRoot != nil, (unsigned long)gCallbackRoots.allObjects.count);
-        CHECK(!weakOwner && !weakToken && !weakInput && !gOwnerRoot && !gTxRoot && !gCallbackRoots.allObjects.count, "uptime exceptional exit releases prepared partial records input and block captures after pool drain");
+        if (weakOwner || weakToken || weakInput || gOwnerRoot || gIdentityRoot || gTxRoot || gCallbackRoots.allObjects.count)
+            fprintf(stderr, "DETAIL: uptime fault=%s owner=%d token=%d input=%d capability=%d identity=%d tx=%d blocks=%lu\n", fault.UTF8String, weakOwner != nil, weakToken != nil, weakInput != nil, gOwnerRoot != nil, gIdentityRoot != nil, gTxRoot != nil, (unsigned long)gCallbackRoots.allObjects.count);
+        CHECK(!weakOwner && !weakToken && !weakInput && !gOwnerRoot && !gIdentityRoot && !gTxRoot && !gCallbackRoots.allObjects.count, "uptime exceptional exit releases prepared partial records input and block captures after pool drain");
     }
 }
 static void TestConcurrencyAndDeferredRelease(void) {

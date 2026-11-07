@@ -137,7 +137,11 @@ def source_contracts():
                 '+ (BOOL)saveSingleAddress:(NSString *)ipAddress inMutation:(PXProfileArtifactMutation *)mutation error:(NSError **)error',
                 '+ (BOOL)saveCarrierDetails:(NSString *)carrierName mcc:(NSString *)mcc mnc:(NSString *)mnc inMutation:(PXProfileArtifactMutation *)mutation error:(NSError **)error'):
         body = method(network, sig)
-        assert 'BOOL (^sourceWrite)' in body and 'sourceWrite = nil;' in body and '@finally { tx = nil; }' in body
+        assert 'BOOL (^sourceWrite)' in body and 'sourceWrite = nil;' in body
+        callbacks = 2 if 'saveSingleAddress:' in sig else 1
+        assert body.count('identity = mutation.identityDirectory;') == callbacks
+        assert body.count('@finally { identity = nil; tx = nil; }') == callbacks
+        assert 'tx, mutation.identityDirectory,' not in body
         assert 'performSourceWrite:^' not in body
         assert callback_construction_scopes(body, 'sourceWrite') == (2 if 'saveSingleAddress:' in sig else 1)
     acquisition = method(network, '+ (PXProfileArtifactMutation *)acquireMutationForIdentityDirectory:(NSString *)expected error:(NSError **)error')
@@ -182,6 +186,15 @@ def source_contracts():
     assert 'TestSingleAddressExceptionalOwnership();' in read('tests/PXNetworkBoundaryTests.m')
     assert '!gOwnerRoot && !gTxRoot && !gIdentityRoot && !gCallbackRoots.allObjects.count' in read('tests/PXNetworkBoundaryTests.m')
     assert 'gFailReadAt = 3' in read('tests/PXNetworkBoundaryTests.m')
+    assert 'TestIdentityLifetimeControls();' in read('tests/PXNetworkBoundaryTests.m')
+    assert 'TestDirectStageExceptionalIdentity();' in read('tests/PXNetworkBoundaryTests.m')
+    network_fixture = read('tests/PXNetworkBoundaryTests.m')
+    direct_identity = method(network_fixture, 'static void TestDirectStageExceptionalIdentity(void)')
+    assert 'PXStageRuntimeAddresses(tx, identity,' in direct_identity and 'PXStageRuntimeCarrier(tx, identity,' in direct_identity
+    assert 'CHECK(!weakIdentity,' in direct_identity and 'tx = nil; identity = nil; timestamp = nil; carrier = nil;' in direct_identity
+    identity_control = method(network_fixture, 'static void TestIdentityLifetimeControls(void)')
+    assert 'gIdentityRoot != gIdentity' in identity_control and '[gFiles removeAllObjects]' in identity_control
+    assert '!gOwnerRoot && !gIdentityRoot && !gTxRoot' in identity_control
     mutation = read('common/PXProfileArtifactMutation.m')
     acquire = objc_method(mutation, '+ (instancetype)acquireWithDirectoryResolver:(NSString *(^)(PXProfileLifecycleLease *))resolver identityTarget:(BOOL)identityTarget lifecycleLease:(PXProfileLifecycleLease *)borrowed error:(NSError **)error')
     assert acquire.index('acquireInDirectory:PXProfilesPath()') < acquire.index('PXRequireNoPendingProfileDeletion') < acquire.index('resolver(mutation.lease)')
