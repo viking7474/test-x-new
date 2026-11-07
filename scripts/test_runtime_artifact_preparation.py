@@ -186,6 +186,7 @@ WRAPPERS = {
 
 
 def source_contracts():
+    from test_runtime_artifact_writers import callback_construction_scopes
     from test_profile_creation_flow import check_macro_arity
     preparation = read('common/PXRuntimeArtifactPreparation.m')
     for forbidden in ('PXActiveProfile', 'PXProfile', 'NSFileManager', 'writeToFile:', 'dictionaryWithContentsOfFile:',
@@ -201,6 +202,10 @@ def source_contracts():
     assert save_wifi.index('[self profileManagerForWiFi]') < save_wifi.index('acquireWithIdentityResolver:') < save_wifi.index('[candidate copy]')
     assert '[self profileIDFromManager:manager]' in save_wifi and '[mutation performSourceWrite:' in save_wifi
     assert '@finally' in save_wifi and 'prepared = nil; candidate = nil; mutation = nil;' in save_wifi
+    assert callback_construction_scopes(save_wifi, 'identityResolver') == 1 and callback_construction_scopes(save_wifi, 'sourceWrite') == 1
+    assert 'performSourceWrite:^' not in save_wifi and 'acquireWithIdentityResolver:^' not in save_wifi
+    assert 'identity = mutation.identityDirectory;' in save_wifi and '@finally { identity = nil; tx = nil; }' in save_wifi
+    assert save_wifi.rindex('[mutation invalidate];') < save_wifi.index('sourceWrite = nil; identityResolver = nil;')
     assert 'createDirectoryAtPath:' not in save_wifi
     assert 'PXPerformRuntimeSourceWrite' not in wifi_source
     begin = identifier.method(wifi_source, WIFI_MANAGER_CACHE_METHODS[0])
@@ -306,10 +311,10 @@ def source_contracts():
     assert 'merged[@"WiFi"] = display;' in owner and 'preparedInput = PXPrepareRuntimeWiFiInfo();' in owner
     assert 'prepared = PXWiFiHookFreeze(preparedInput);' in owner
     assert '@finally { candidate = nil; cacheError = nil; }' in owner
-    assert '@finally { target = nil; cacheReader = nil; profileID = nil; }' in owner
+    assert '@finally { admissionWrite = nil; target = nil; cacheReader = nil; profileID = nil; }' in owner
     assert 'mutation = nil; resolved = nil; ids = nil; wifi = nil; selection = nil;' in owner
     assert 'prepared = nil; preparedInput = nil; idsPath = nil; wifiPath = nil; cached = nil;' in owner
-    assert '@finally { display = nil; merged = nil; currentIDs = nil; currentWifi = nil; tx = nil; }' in owner
+    assert '@finally { stagedIDs = nil; identity = nil; display = nil; merged = nil; currentIDs = nil; currentWifi = nil; tx = nil; }' in owner
     assert owner.index('[mutation invalidate]') < owner.index('mutation = nil; resolved = nil;') < owner.index('gWiFiHookResolving = NO;')
     assert 'NSString *(^identityResolver)(void) = nil;' in owner
     assert 'BOOL (^sourceWrite)(PXRuntimeSourceTransaction *, NSError **) = nil;' in owner
@@ -320,6 +325,12 @@ def source_contracts():
     assert owner.count('identityResolver = nil;') == 2
     assert 'sourceWrite = nil; identityResolver = nil;' in owner
     assert owner.index('[mutation invalidate]') < owner.index('sourceWrite = nil; identityResolver = nil;') < owner.index('mutation = nil; resolved = nil;')
+    assert callback_construction_scopes(owner, 'identityResolver') == 1
+    assert callback_construction_scopes(owner, 'sourceWrite') == 2
+    assert callback_construction_scopes(owner, 'admissionWrite') == 1
+    assert 'PXPerformStandaloneRuntimeSourceWrite(admissionWrite, error)' in owner
+    assert 'tx, mutation.identityDirectory,' not in owner and 'identity = mutation.identityDirectory;' in owner
+    assert 'stagedIDs = [tx dictionaryAtPath:idsPath error:failure];' in owner and 'merged = [stagedIDs mutableCopy];' in owner
     freeze = identifier.method(hook_resolver, 'static NSDictionary *PXWiFiHookFreeze(id info)')
     assert freeze.index('PXWiFiHookHasPair(info)') < freeze.index('data = [NSPropertyListSerialization')
     assert freeze.index('PXWiFiHookHasPair(info)') < freeze.index('@try', freeze.index('@try') + 4)
@@ -334,6 +345,12 @@ def source_contracts():
     check_macro_arity(resolver_fixture, 'PXWiFiResolverLifetimeTests.m')
     assert '#include "PXWiFiResolverLifetime.inc"' in resolver_fixture
     assert resolver_fixture.count('TestSuccessAndNestedGuard();') == 1
+    assert resolver_fixture.count('TestOwnedWriterLifetime();') == 1
+    assert '#include "PXWiFiWriterLifetime.inc"' in resolver_fixture
+    assert 'owned WiFi writer releases manager provider prepared metadata identity and heap callbacks after pool drain' in resolver_fixture
+    assert '!weakProvider && !weakManager && !weakToken && !weakTransaction && !gMutationRoot && !gIdentityRoot && !gCallbackRoots.allObjects.count' in resolver_fixture
+    assert 'gIdentityRoot = mutation.identityDirectory;' in resolver_fixture and '!gMutationRoot && !gIdentityRoot && !gMergedRoot' in resolver_fixture
+    assert '!gCopyInputRoots.allObjects.count' in resolver_fixture and '@"merge-copy"' in resolver_fixture
     assert '[gCallbackRoots addObject:body];' in resolver_fixture and '[gCallbackRoots addObject:resolver];' in resolver_fixture
     assert 'resolver exceptional exit releases its method argument blocks after pool drain' in resolver_fixture
     for case in ('generated success', 'source hit', 'cache hit'):
@@ -411,12 +428,13 @@ def source_contracts():
     assert fetch.count('PX_RUNTIME_READ_OPERATION;') == 2
     assert 'network = nil; synthetic = nil; info = nil;' in fetch
     assert 'deliver = nil; completion = nil;' in fetch and fetch.count('@finally') == 2
+    assert callback_construction_scopes(fetch, 'deliver') == 1
     assert fetch.count('@catch') == 1, 'only preparation exceptions may be swallowed'
     assert fetch.index('@catch') < fetch.index('completion(synthetic);') < fetch.index('network = nil;')
     assert 'dispatch_' not in fetch and 'dispatch_' not in factory
     fetch_fixture = read('tests/PXWiFiFetchTests.m')
     check_macro_arity(fetch_fixture, 'PXWiFiFetchTests.m')
-    for call in ('TestFactory();', 'TestForwarding();', 'TestExceptionalClosureLifetime();', 'TestDeferred();'):
+    for call in ('TestFactory();', 'TestForwarding();', 'TestExceptionalClosureLifetime();', 'TestDeferred();', 'TestDeferredExceptionalLifetime();'):
         assert fetch_fixture.count(call) == 1
     cf_builder = identifier.method(wifi_hooks, WIFI_CF_SIGNATURES[1])
     assert cf_builder.count('isKindOfClass:NSString.class') == 2
@@ -690,7 +708,6 @@ def source_contracts():
     assert uptime.count('uptimeEpochIsCurrent:epoch') == 2 and 'PXUptimePreparedPacket(raw)' in uptime
     assert 'sourceWrite = nil; resolver = nil;' in uptime and 'profilePath = nil;' in uptime
     assert 'performSourceWrite:^' not in uptime and 'acquireWithIdentityResolver:^' not in uptime
-    from test_runtime_artifact_writers import callback_construction_scopes
     assert callback_construction_scopes(uptime, 'resolver') == 1
     assert callback_construction_scopes(uptime, 'sourceWrite') == 1
     assert 'identity = mutation.identityDirectory;' in uptime and '@finally { identity = nil; tx = nil; }' in uptime
@@ -1073,6 +1090,7 @@ def source_contracts():
 def generate_native_fragments(folder):
     resolver_source = read('common/PXWiFiHookResolver.m')
     (folder / 'PXWiFiResolverLifetime.inc').write_text(resolver_source[resolver_source.index('static __thread BOOL gWiFiHookResolving'):], encoding='utf-8')
+    (folder / 'PXWiFiWriterLifetime.inc').write_text(identifier.method(read('common/WiFiManager.m'), WIFI_MANAGER_SAVE), encoding='utf-8')
     for name, (source, signatures) in WRAPPERS.items():
         (folder / name).write_text('\n\n'.join(identifier.method(read(source), signature) for signature in signatures), encoding='utf-8')
     battery_hooks = read('TLinkIOSTweak/BatteryHooks.x')

@@ -183,8 +183,9 @@ static void TestForwarding(void) {
     CHECK(gDeaths == 1, "explicit callback cleanup releases synthetic instance on client exception");
 }
 static void TestExceptionalClosureLifetime(void) {
-    for (NSUInteger fault = 0; fault < 2; fault++) {
+    for (NSUInteger fault = 0; fault < 3; fault++) {
         Reset(); gThrowOriginal = fault == 0;
+        if (fault == 2) gOriginalNetwork = [NSObject new];
         __weak NSObject *weakConsumer = nil;
         __block NSUInteger calls = 0;
         BOOL raised = NO;
@@ -229,9 +230,29 @@ static void TestDeferred(void) {
     @autoreleasepool { Emit(nil); }
     CHECK(weakConsumer == nil && !gPending, "consumer is released after original releases delivered callback");
 }
+static void TestDeferredExceptionalLifetime(void) {
+    Reset(); gDeferred = YES; __weak NSObject *weakConsumer = nil;
+    __block NSUInteger calls = 0; BOOL raised = NO;
+    @autoreleasepool {
+        NSObject *consumer = [NSObject new]; weakConsumer = consumer;
+        void (^handler)(id) = ^(id __unsafe_unretained network) {
+            (void)network; (void)consumer.description; calls++;
+            [NSException raise:@"fixture.client" format:@"deferred client failed"];
+        };
+        Fetch(handler); handler = nil; consumer = nil;
+    }
+    @autoreleasepool {
+        CHECK(weakConsumer && gPending && !calls, "deferred exceptional completion remains owned only by the original callback");
+    }
+    @autoreleasepool {
+        @try { Emit(nil); } @catch (NSException *exception) { raised = [exception.name isEqual:@"fixture.client"]; }
+    }
+    CHECK(raised && calls == 1 && !weakConsumer && !gPending,
+          "deferred client exception propagates once and releases the wrapper captured consumer");
+}
 int main(void) {
     @autoreleasepool {
-        @try { TestFactory(); TestForwarding(); TestExceptionalClosureLifetime(); TestDeferred(); }
+        @try { TestFactory(); TestForwarding(); TestExceptionalClosureLifetime(); TestDeferred(); TestDeferredExceptionalLifetime(); }
         @catch (NSException *e) { gFailures++; fprintf(stderr, "FAIL: unexpected fetch exception: %s\n", e.description.UTF8String); }
         printf("WiFi fetch lifecycle: %lu/%lu checks passed\n", (unsigned long)(gChecks - gFailures), (unsigned long)gChecks);
         return gFailures ? 1 : 0;

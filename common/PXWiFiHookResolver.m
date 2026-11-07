@@ -63,15 +63,21 @@ static NSDictionary *PXWiFiHookSelection(PXRuntimeSourceTransaction *tx, NSStrin
 NSDictionary *PXResolveHookWiFiInfo(NSString *profileID, PXWiFiHookCacheReader cacheReader, NSError **error) {
     if (error) *error = nil;
     NSString *target = nil;
+    BOOL (^admissionWrite)(PXRuntimeSourceTransaction *, NSError **) = nil;
     @try {
         target = [PXValidatedProfileID(profileID) copy];
         if (!target) { PXWiFiHookError(error, 3020, @"Invalid WiFi hook profile"); return nil; }
         // Standalone admission remains before the TLS check/provider so ignored
         // nested source staging still poisons its outer transaction.
-        if (!PXPerformStandaloneRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **failure) {
-            @try { return PXWiFiHookSelection(tx, target, failure) != nil; }
-            @finally { tx = nil; }
-        }, error)) return nil;
+        {
+            admissionWrite = ^BOOL(PXRuntimeSourceTransaction *tx, NSError **failure) {
+                @try { return PXWiFiHookSelection(tx, target, failure) != nil; }
+                @finally { tx = nil; }
+            };
+        }
+        BOOL admitted = PXPerformStandaloneRuntimeSourceWrite(admissionWrite, error);
+        admissionWrite = nil;
+        if (!admitted) return nil;
         if (gWiFiHookResolving) { PXWiFiHookError(error, 3025, @"WiFi hook resolution is already in progress"); return nil; }
         gWiFiHookResolving = YES;
         NSDictionary *cached = nil, *prepared = nil, *preparedInput = nil;
@@ -94,24 +100,28 @@ NSDictionary *PXResolveHookWiFiInfo(NSString *profileID, PXWiFiHookCacheReader c
                 PXWiFiHookError(error, 3023, @"WiFi cache provider failed"); return nil;
             } @finally { candidate = nil; cacheError = nil; }
             // Keep acquisition exceptions outside the preparation catch, as before.
-            identityResolver = ^NSString *{ return PXProfileIdentityPath(target); };
+            {
+                identityResolver = ^NSString *{ return PXProfileIdentityPath(target); };
+            }
             mutation = [PXProfileArtifactMutation acquireWithIdentityResolver:identityResolver error:error];
             identityResolver = nil;
             @try {
                 if (!mutation) return nil;
                 wifiPath = [mutation.identityDirectory stringByAppendingPathComponent:@"wifi_info.plist"];
                 idsPath = [mutation.identityDirectory stringByAppendingPathComponent:@"device_ids.plist"];
-                sourceWrite = ^BOOL(PXRuntimeSourceTransaction *tx, NSError **failure) {
-                    @try {
-                        selection = PXWiFiHookSelection(tx, target, failure);
-                        if (!selection) return NO;
-                        wifi = [tx dictionaryAtPath:wifiPath exists:&wifiExists error:failure];
-                        ids = wifi ? [tx dictionaryAtPath:idsPath exists:&idsExist error:failure] : nil;
-                        if (!ids) return NO;
-                        resolved = PXWiFiHookSourceInfo(wifi, ids);
-                        return YES;
-                    } @finally { tx = nil; }
-                };
+                {
+                    sourceWrite = ^BOOL(PXRuntimeSourceTransaction *tx, NSError **failure) {
+                        @try {
+                            selection = PXWiFiHookSelection(tx, target, failure);
+                            if (!selection) return NO;
+                            wifi = [tx dictionaryAtPath:wifiPath exists:&wifiExists error:failure];
+                            ids = wifi ? [tx dictionaryAtPath:idsPath exists:&idsExist error:failure] : nil;
+                            if (!ids) return NO;
+                            resolved = PXWiFiHookSourceInfo(wifi, ids);
+                            return YES;
+                        } @finally { tx = nil; }
+                    };
+                }
                 BOOL readSucceeded = [mutation performSourceWrite:sourceWrite error:error];
                 sourceWrite = nil;
                 if (!readSucceeded) return nil;
@@ -122,27 +132,32 @@ NSDictionary *PXResolveHookWiFiInfo(NSString *profileID, PXWiFiHookCacheReader c
                 prepared = PXWiFiHookFreeze(preparedInput);
                 preparedInput = nil; // The frozen packet is sufficient for commit.
                 if (!prepared) { PXWiFiHookError(error, 3023, @"Invalid prepared WiFi hook record"); return nil; }
-                sourceWrite = ^BOOL(PXRuntimeSourceTransaction *tx, NSError **failure) {
-                    NSDictionary *currentWifi = nil, *currentIDs = nil;
-                    NSMutableDictionary *merged = nil;
-                    NSString *display = nil;
-                    @try {
-                        if (!PXRuntimeProfileSelectionMatches(tx, selection, PXCurrentProfileInfoPath(), PXLegacyActiveProfileInfoPath(), failure)) return NO;
-                        BOOL nowWifi = NO, nowIDs = NO;
-                        currentWifi = [tx dictionaryAtPath:wifiPath exists:&nowWifi error:failure];
-                        currentIDs = currentWifi ? [tx dictionaryAtPath:idsPath exists:&nowIDs error:failure] : nil;
-                        if (!currentIDs) return NO;
-                        if (nowWifi != wifiExists || nowIDs != idsExist || ![currentWifi isEqual:wifi] || ![currentIDs isEqual:ids])
-                            return PXWiFiHookError(failure, 3022, @"WiFi sources changed during preparation");
-                        if (!PXStageRuntimeWiFi(tx, mutation.identityDirectory, prepared, failure)) return NO;
-                        merged = [[tx dictionaryAtPath:idsPath error:failure] mutableCopy];
-                        if (!merged) return NO;
-                        // Preserve the formatted display scalar in the paired commit.
-                        display = [NSString stringWithFormat:@"%@ (%@)", prepared[@"ssid"], prepared[@"bssid"]];
-                        merged[@"WiFi"] = display;
-                        return [tx setDictionary:merged atPath:idsPath error:failure];
-                    } @finally { display = nil; merged = nil; currentIDs = nil; currentWifi = nil; tx = nil; }
-                };
+                {
+                    sourceWrite = ^BOOL(PXRuntimeSourceTransaction *tx, NSError **failure) {
+                        NSDictionary *currentWifi = nil, *currentIDs = nil;
+                        NSMutableDictionary *merged = nil;
+                        NSString *display = nil, *identity = nil;
+                        NSDictionary *stagedIDs = nil;
+                        @try {
+                            if (!PXRuntimeProfileSelectionMatches(tx, selection, PXCurrentProfileInfoPath(), PXLegacyActiveProfileInfoPath(), failure)) return NO;
+                            BOOL nowWifi = NO, nowIDs = NO;
+                            currentWifi = [tx dictionaryAtPath:wifiPath exists:&nowWifi error:failure];
+                            currentIDs = currentWifi ? [tx dictionaryAtPath:idsPath exists:&nowIDs error:failure] : nil;
+                            if (!currentIDs) return NO;
+                            if (nowWifi != wifiExists || nowIDs != idsExist || ![currentWifi isEqual:wifi] || ![currentIDs isEqual:ids])
+                                return PXWiFiHookError(failure, 3022, @"WiFi sources changed during preparation");
+                            identity = mutation.identityDirectory;
+                            if (!PXStageRuntimeWiFi(tx, identity, prepared, failure)) return NO;
+                            stagedIDs = [tx dictionaryAtPath:idsPath error:failure];
+                            merged = [stagedIDs mutableCopy];
+                            if (!merged) return NO;
+                            // Preserve the formatted display scalar in the paired commit.
+                            display = [NSString stringWithFormat:@"%@ (%@)", prepared[@"ssid"], prepared[@"bssid"]];
+                            merged[@"WiFi"] = display;
+                            return [tx setDictionary:merged atPath:idsPath error:failure];
+                        } @finally { stagedIDs = nil; identity = nil; display = nil; merged = nil; currentIDs = nil; currentWifi = nil; tx = nil; }
+                    };
+                }
                 BOOL committed = [mutation performSourceWrite:sourceWrite error:error];
                 sourceWrite = nil;
                 return committed ? prepared : nil;
@@ -159,5 +174,5 @@ NSDictionary *PXResolveHookWiFiInfo(NSString *profileID, PXWiFiHookCacheReader c
                 prepared = nil; preparedInput = nil; idsPath = nil; wifiPath = nil; cached = nil;
             } @finally { gWiFiHookResolving = NO; }
         }
-    } @finally { target = nil; cacheReader = nil; profileID = nil; }
+    } @finally { admissionWrite = nil; target = nil; cacheReader = nil; profileID = nil; }
 }

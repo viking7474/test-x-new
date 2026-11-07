@@ -416,27 +416,30 @@ static void replaced_NEHotspotNetwork_fetchCurrent(id self, SEL _cmd, void (^com
         return;
     }
     PX_RUNTIME_READ_OPERATION;
-    void (^deliver)(id) = ^(id network) {
-        PX_RUNTIME_READ_OPERATION;
-        NSDictionary *info = nil;
-        id synthetic = nil;
-        @try {
-            // Property swizzles handle real networks; only nil needs fallback work.
-            if (network) { completion(network); return; }
+    void (^deliver)(id) = nil;
+    {
+        deliver = ^(id network) {
+            PX_RUNTIME_READ_OPERATION;
+            NSDictionary *info = nil;
+            id synthetic = nil;
             @try {
-                if (shouldSpoofForBundle(NSBundle.mainBundle.bundleIdentifier)) {
-                    info = PXResolvedWiFiInfo();
-                    if (PXWiFiInfoHasIdentity(info))
-                        synthetic = PXCreateSpoofedNEHotspotNetwork(info[@"ssid"], info[@"bssid"]);
-                }
-            } @catch (__unused NSException *e) {}
-            // Client exceptions propagate; no dispatch, retry or extra delivery.
-            completion(synthetic);
-        } @finally {
-            // Explicit cleanup also works without -fobjc-arc-exceptions.
-            network = nil; synthetic = nil; info = nil;
-        }
-    };
+                // Property swizzles handle real networks; only nil needs fallback work.
+                if (network) { completion(network); return; }
+                @try {
+                    if (shouldSpoofForBundle(NSBundle.mainBundle.bundleIdentifier)) {
+                        info = PXResolvedWiFiInfo();
+                        if (PXWiFiInfoHasIdentity(info))
+                            synthetic = PXCreateSpoofedNEHotspotNetwork(info[@"ssid"], info[@"bssid"]);
+                    }
+                } @catch (__unused NSException *e) {}
+                // Client exceptions propagate; no dispatch, retry or extra delivery.
+                completion(synthetic);
+            } @finally {
+                // Explicit cleanup also works without -fobjc-arc-exceptions.
+                network = nil; synthetic = nil; info = nil;
+            }
+        };
+    }
 
     @try {
         if (orig_NEHotspotNetwork_fetchCurrent) {

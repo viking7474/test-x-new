@@ -270,14 +270,20 @@
     PXProfileArtifactMutation *mutation = nil;
     NSDictionary *candidate = nil, *prepared = nil;
     NSMutableDictionary *cache = nil;
+    NSString *(^identityResolver)(void) = nil;
+    BOOL (^sourceWrite)(PXRuntimeSourceTransaction *, NSError **) = nil;
     @try {
         // Optional manager callbacks and lifecycle ownership stay outside the monitor.
         manager = [self profileManagerForWiFi];
         if (![self wiFiCacheRevisionIsCurrent:revision]) return;
-        mutation = [PXProfileArtifactMutation acquireWithIdentityResolver:^NSString *{
-            profileID = PXValidatedProfileID([self profileIDFromManager:manager]);
-            return PXProfileIdentityPath(profileID);
-        } error:&error];
+        {
+            identityResolver = ^NSString *{
+                profileID = PXValidatedProfileID([self profileIDFromManager:manager]);
+                return PXProfileIdentityPath(profileID);
+            };
+        }
+        mutation = [PXProfileArtifactMutation acquireWithIdentityResolver:identityResolver error:&error];
+        identityResolver = nil;
         if (!mutation) { [self setWiFiCacheError:error revision:revision]; return; }
         @synchronized (self) {
             if (revision == _wifiCacheRevision) candidate = self.wifiInfo;
@@ -285,9 +291,17 @@
         if (![self wiFiCacheRevisionIsCurrent:revision]) return;
         prepared = [candidate copy];
         if (![self wiFiCacheRevisionIsCurrent:revision]) return;
-        BOOL committed = [mutation performSourceWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
-            return PXStageRuntimeWiFi(tx, mutation.identityDirectory, prepared, writeError);
-        } error:&error];
+        {
+            // Finish stack capture cleanup before the synchronous writer can throw.
+            sourceWrite = ^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+                NSString *identity = nil;
+                @try {
+                    identity = mutation.identityDirectory;
+                    return PXStageRuntimeWiFi(tx, identity, prepared, writeError);
+                } @finally { identity = nil; tx = nil; }
+            };
+        }
+        BOOL committed = [mutation performSourceWrite:sourceWrite error:&error];
         [mutation invalidate];
         if (committed) {
             cache = [prepared mutableCopy];
@@ -299,6 +313,7 @@
         }
     } @finally {
         [mutation invalidate];
+        sourceWrite = nil; identityResolver = nil;
         cache = nil; prepared = nil; candidate = nil; mutation = nil;
         profileID = nil; manager = nil; error = nil;
     }
