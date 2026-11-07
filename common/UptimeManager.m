@@ -223,7 +223,9 @@ static NSDictionary *PXUptimePreparedPacket(id raw) {
             [self setUptimeError:[NSError errorWithDomain:@"com.weaponx.UptimeManager" code:1003 userInfo:@{NSLocalizedDescriptionKey: message}] epoch:epoch];
             PXLog(@"[WeaponX] ❌ %@", message); return;
         }
-        resolver = ^NSString *{ return profilePath; };
+        {
+            resolver = ^NSString *{ return profilePath; };
+        }
         mutation = [PXProfileArtifactMutation acquireWithIdentityResolver:resolver error:&writeError];
         resolver = nil;
         if (!mutation) { [self setUptimeError:writeError epoch:epoch]; return; }
@@ -238,15 +240,17 @@ static NSDictionary *PXUptimePreparedPacket(id raw) {
         }
         now = prepared[@"boot"][@"lastUpdated"]; bootTimeDict = prepared[@"boot"]; uptimeDict = prepared[@"uptime"];
         bootTime = bootTimeDict[@"value"]; NSTimeInterval uptime = [prepared[@"seconds"] doubleValue];
-        sourceWrite = ^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
-            @try {
-                if (![self uptimeEpochIsCurrent:epoch]) {
-                    if (error) *error = [NSError errorWithDomain:@"com.weaponx.UptimeManager" code:1004 userInfo:@{NSLocalizedDescriptionKey: @"Uptime operation was superseded"}];
-                    return NO;
-                }
-                return PXStageRuntimeUptime(tx, mutation.identityDirectory, bootTimeDict, uptimeDict, now, error);
-            } @finally { tx = nil; }
-        };
+        {
+            sourceWrite = ^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+                @try {
+                    if (![self uptimeEpochIsCurrent:epoch]) {
+                        if (error) *error = [NSError errorWithDomain:@"com.weaponx.UptimeManager" code:1004 userInfo:@{NSLocalizedDescriptionKey: @"Uptime operation was superseded"}];
+                        return NO;
+                    }
+                    return PXStageRuntimeUptime(tx, mutation.identityDirectory, bootTimeDict, uptimeDict, now, error);
+                } @finally { tx = nil; }
+            };
+        }
         BOOL committed = [mutation performSourceWrite:sourceWrite error:&writeError];
         [mutation invalidate];
         if (!committed) {

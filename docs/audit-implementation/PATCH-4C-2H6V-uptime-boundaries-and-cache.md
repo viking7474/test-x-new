@@ -110,3 +110,11 @@ Foundation/xcrun/Theos/device execution is unavailable on this Windows host. H6U
 and H6V native assertions and package/device behavior require macOS CI/device
 verification; no native/build/device pass, benchmark, commit, push or deployment
 is claimed. Full Patch 4 and later stages remain incomplete.
+
+Native follow-up: H6U CI exposed a stack-literal capture-scope gap under plain
+ARC. The Uptime resolver and source callback now finish construction in explicit
+inner lexical scopes before the potentially throwing calls; named heap callbacks
+and their finally cleanup remain. See the H6U native-follow-up section for user
+CI evidence, compiler references, preserved behavior and verification limits.
+The original Uptime exceptional-owner assertions remain enrolled in both ARC
+modes and both package schemes; native results are still pending.

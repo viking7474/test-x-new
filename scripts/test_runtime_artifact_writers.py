@@ -18,6 +18,25 @@ def objc_method(source, signature):
     return source[start:min(ends)]
 
 
+def callback_construction_scopes(source, slot):
+    """Require stack-literal scopes to finish normally before throwing calls."""
+    lines = source.splitlines(); count = 0
+    for index, line in enumerate(lines):
+        if not line.lstrip().startswith(slot + ' = ^'):
+            continue
+        count += 1
+        previous = index - 1
+        while lines[previous].lstrip().startswith('//'):
+            previous -= 1
+        assert lines[previous].strip() == '{', (slot, 'missing construction scope')
+        indent = len(line) - len(line.lstrip())
+        end = index
+        while not (lines[end].endswith('};') and len(lines[end]) - len(lines[end].lstrip()) == indent):
+            end += 1
+        assert lines[end + 1] == ' ' * (indent - 4) + '}', (slot, 'scope must end before callback invocation')
+    return count
+
+
 def native_compile_command(folder, scheme):
     assert scheme in ('rootful', 'roothide'), f'unsupported native fixture scheme: {scheme}'
     # Compile actual manager, carrier dependency, stage helpers and source engine.
@@ -120,8 +139,10 @@ def source_contracts():
         body = method(network, sig)
         assert 'BOOL (^sourceWrite)' in body and 'sourceWrite = nil;' in body and '@finally { tx = nil; }' in body
         assert 'performSourceWrite:^' not in body
+        assert callback_construction_scopes(body, 'sourceWrite') == (2 if 'saveSingleAddress:' in sig else 1)
     acquisition = method(network, '+ (PXProfileArtifactMutation *)acquireMutationForIdentityDirectory:(NSString *)expected error:(NSError **)error')
     assert 'acquireWithIdentityResolver:resolver error:error]' in acquisition and 'resolver = nil; mutation = nil; expected = nil;' in acquisition
+    assert callback_construction_scopes(acquisition, 'resolver') == 1
     for sig in ('+ (NSString *)getSavedLocalIPAddressWithForcedRefresh:(BOOL)forceRefresh', '+ (NSString *)getSavedLocalIPv6Address'):
         body = method(network, sig)
         assert 'PXNetworkString(record[' in body and 'if (!identityDir.length)' in body and 'record = nil; path = nil; identityDir = nil;' in body
@@ -158,6 +179,9 @@ def source_contracts():
           'first complete carrier catalog wins and later stale builder cannot replace any component',
           'carrier exceptional construction releases input root indexes and callback captures after pool drain'))):
         for label in labels: assert label in read('tests/' + file_name)
+    assert 'TestSingleAddressExceptionalOwnership();' in read('tests/PXNetworkBoundaryTests.m')
+    assert '!gOwnerRoot && !gTxRoot && !gIdentityRoot && !gCallbackRoots.allObjects.count' in read('tests/PXNetworkBoundaryTests.m')
+    assert 'gFailReadAt = 3' in read('tests/PXNetworkBoundaryTests.m')
     mutation = read('common/PXProfileArtifactMutation.m')
     acquire = objc_method(mutation, '+ (instancetype)acquireWithDirectoryResolver:(NSString *(^)(PXProfileLifecycleLease *))resolver identityTarget:(BOOL)identityTarget lifecycleLease:(PXProfileLifecycleLease *)borrowed error:(NSError **)error')
     assert acquire.index('acquireInDirectory:PXProfilesPath()') < acquire.index('PXRequireNoPendingProfileDeletion') < acquire.index('resolver(mutation.lease)')

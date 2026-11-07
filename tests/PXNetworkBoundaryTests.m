@@ -7,7 +7,7 @@
 #include <stdatomic.h>
 #include <stdio.h>
 
-static NSUInteger gChecks, gFailures, gReads, gWrites, gAcquires, gProviders, gTxReads, gSets, gFailSetAt;
+static NSUInteger gChecks, gFailures, gReads, gWrites, gAcquires, gProviders, gTxReads, gSets, gFailSetAt, gFailReadAt;
 static _Atomic NSUInteger gGets, gFrees, gActiveLists, gConversions, gRNGCalls;
 static int gIfMode = 4, gConvertMode;
 static uint32_t gRNGValue;
@@ -17,7 +17,7 @@ static id gIdentity, gRawIPv4, gRawIPv6, gRawCarrier;
 static NSMutableDictionary *gFiles;
 static void (^gDuringRead)(void), (^gDuringAcquire)(void), (^gDuringProvider)(void), (^gDuringSource)(void), (^gDuringTxRead)(void);
 static NSHashTable *gCallbackRoots;
-static __weak id gOwnerRoot, gTxRoot;
+static __weak id gOwnerRoot, gTxRoot, gIdentityRoot;
 #define CHECK(value, label) do { gChecks++; if (!(value)) { gFailures++; fprintf(stderr, "FAIL: %s\n", label); } } while (0)
 static void Raise(void) { [NSException raise:@"fixture.network" format:@"controlled failure"]; }
 static void Run(void (^ __strong *slot)(void)) { void (^body)(void) = *slot; *slot = nil; @try { if (body) body(); } @finally { body = nil; } }
@@ -90,7 +90,7 @@ static NSString *PXActiveProfileIdentityPath(void) { return gIdentity; }
 @end
 @implementation PXRuntimeSourceTransaction
 - (NSDictionary *)dictionaryAtPath:(NSString * __unsafe_unretained)path error:(NSError **)error {
-    (void)error; gTxReads++; if ([gFault isEqual:@"tx-read"]) Raise();
+    (void)error; gTxReads++; if ([gFault isEqual:@"tx-read"] || (gFailReadAt && gTxReads == gFailReadAt)) Raise();
     Run(&gDuringTxRead);
     return self.staged[path] ?: gFiles[path] ?: @{};
 }
@@ -119,7 +119,7 @@ static NSString *PXActiveProfileIdentityPath(void) { return gIdentity; }
         [gCallbackRoots addObject:resolver]; Run(&gDuringAcquire);
         if ([gFault isEqual:@"acquire"]) Raise();
         target = resolver(); if (!target.length) return nil;
-        owner.identityDirectory = target; handedOff = YES; return owner;
+        owner.identityDirectory = target; gIdentityRoot = owner.identityDirectory; handedOff = YES; return owner;
     } @finally { if (!handedOff) [owner invalidate]; target = nil; owner = nil; }
 }
 - (BOOL)performSourceWrite:(BOOL (^ __unsafe_unretained)(PXRuntimeSourceTransaction *, NSError **))body error:(NSError **)error {
@@ -163,13 +163,13 @@ static NSString *PXActiveProfileIdentityPath(void) { return gIdentity; }
 @end
 static NSString *File(NSString *name) { return [@"/profiles/a/identity" stringByAppendingPathComponent:name]; }
 static void Reset(void) {
-    gReads = gWrites = gAcquires = gProviders = gTxReads = gSets = gFailSetAt = 0;
+    gReads = gWrites = gAcquires = gProviders = gTxReads = gSets = gFailSetAt = gFailReadAt = 0;
     atomic_store(&gGets, 0); atomic_store(&gFrees, 0); atomic_store(&gConversions, 0); atomic_store(&gRNGCalls, 0);
     gIfMode = 4; gConvertMode = 0; gRNGValue = 0; gThrowFormatting = NO; gHeld = gInsideSource = NO; gFault = nil;
     gIdentity = @"/profiles/a/identity"; gRawIPv4 = @"192.0.2.2"; gRawIPv6 = @"2001:db8::20";
     gRawCarrier = @{ @"name": @"Fixture", @"mcc": @"001", @"mnc": @"01", @"extra": @YES };
     gFiles = [NSMutableDictionary dictionary]; gCallbackRoots = [NSHashTable weakObjectsHashTable];
-    gDuringRead = nil; gDuringAcquire = nil; gDuringProvider = nil; gDuringSource = nil; gDuringTxRead = nil; gOwnerRoot = nil; gTxRoot = nil;
+    gDuringRead = nil; gDuringAcquire = nil; gDuringProvider = nil; gDuringSource = nil; gDuringTxRead = nil; gOwnerRoot = nil; gTxRoot = nil; gIdentityRoot = nil;
 }
 static void TestInterfaces(void) {
     Reset(); CHECK([[NetworkManager getCurrentLocalIPAddress] isEqual:@"192.0.2.2"], "IPv4 en0 selection skips missing address name and other interface");
@@ -254,7 +254,7 @@ static void TestDirectStageSnapshots(void) {
 }
 static void TestExceptionalOwnership(void) {
     for (NSString *fault in @[@"acquire", @"read", @"tx-read", @"tx-set", @"provider", @"second-write", @"carrier-third-write"]) {
-        Reset(); __weak id weakInput = nil, weakToken = nil;
+        Reset(); gIdentity = [@"/profiles/a/identity" mutableCopy]; __weak id weakInput = nil, weakToken = nil;
         @autoreleasepool {
             NSMutableString *input = [@"192.0.2.10" mutableCopy]; weakInput = input;
             id token = [NSObject new]; weakToken = token;
@@ -274,13 +274,37 @@ static void TestExceptionalOwnership(void) {
             CHECK(threw && !gHeld && !gInsideSource && !gWrites, "network exceptional exit propagates and releases ownership before any mock commit");
             [gFiles removeAllObjects]; input = nil; token = nil;
         }
-        if (weakInput || weakToken || gOwnerRoot || gTxRoot || gCallbackRoots.allObjects.count)
-            fprintf(stderr, "DETAIL: network fault=%s input=%d token=%d owner=%d tx=%d blocks=%lu\n", fault.UTF8String, weakInput != nil, weakToken != nil, gOwnerRoot != nil, gTxRoot != nil, (unsigned long)gCallbackRoots.allObjects.count);
-        CHECK(!weakInput && !weakToken && !gOwnerRoot && !gTxRoot && !gCallbackRoots.allObjects.count, "network and exact staging helpers release retained inputs partial dictionaries and block captures after pool drain");
+        if (weakInput || weakToken || gOwnerRoot || gTxRoot || gIdentityRoot || gCallbackRoots.allObjects.count)
+            fprintf(stderr, "DETAIL: network fault=%s input=%d token=%d owner=%d tx=%d identity=%d blocks=%lu\n", fault.UTF8String, weakInput != nil, weakToken != nil, gOwnerRoot != nil, gTxRoot != nil, gIdentityRoot != nil, (unsigned long)gCallbackRoots.allObjects.count);
+        CHECK(!weakInput && !weakToken && !gOwnerRoot && !gTxRoot && !gIdentityRoot && !gCallbackRoots.allObjects.count, "network and exact staging helpers release retained inputs partial dictionaries and block captures after pool drain");
+    }
+}
+static void TestSingleAddressExceptionalOwnership(void) {
+    for (NSUInteger fault = 0; fault < 4; fault++) {
+        Reset(); gIdentity = [@"/profiles/a/identity" mutableCopy];
+        @autoreleasepool {
+            if (fault == 0) gFault = @"tx-read";
+            if (fault == 1) {
+                gFiles[File(@"network_settings.plist")] = @{ @"localIPv6Address": @"2001:db8::10" };
+                gFault = @"tx-set";
+            }
+            if (fault == 2) gFailReadAt = 3; // First read-only pass succeeds; generated-IPv6 pass throws.
+            if (fault == 3) gFailSetAt = 2; // Generated-IPv6 pass stages network, then IDs throw.
+            BOOL threw = NO;
+            @try { [PXProviderNetwork saveLocalIPAddress:@"192.0.2.10"]; }
+            @catch (NSException *exception) { threw = [exception.name isEqual:@"fixture.network"]; }
+            CHECK(threw && !gHeld && !gInsideSource && !gWrites && gProviders == (fault >= 2 ? 1 : 0),
+                  "single-address faults preserve first-pass and generated-IPv6 flow without mock commit");
+        }
+        if (gOwnerRoot || gTxRoot || gIdentityRoot || gCallbackRoots.allObjects.count)
+            fprintf(stderr, "DETAIL: single network fault=%lu owner=%d tx=%d identity=%d blocks=%lu\n", (unsigned long)fault,
+                    gOwnerRoot != nil, gTxRoot != nil, gIdentityRoot != nil, (unsigned long)gCallbackRoots.allObjects.count);
+        CHECK(!gOwnerRoot && !gTxRoot && !gIdentityRoot && !gCallbackRoots.allObjects.count,
+              "both single-address callback scopes release capability identity and heap callbacks after pool drain");
     }
 }
 int main(void) { @autoreleasepool {
-    @try { TestInterfaces(); TestReaders(); TestFrozenWrites(); TestDirectStageSnapshots(); TestExceptionalOwnership(); }
+    @try { TestInterfaces(); TestReaders(); TestFrozenWrites(); TestDirectStageSnapshots(); TestExceptionalOwnership(); TestSingleAddressExceptionalOwnership(); }
     @catch (NSException *exception) { gFailures++; fprintf(stderr, "FAIL: unexpected network exception: %s\n", exception.description.UTF8String); }
     printf("Network boundaries: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);
     return gFailures ? 1 : 0;

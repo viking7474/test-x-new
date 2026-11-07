@@ -162,3 +162,64 @@ user said "tiếp tục". The uptime-stage preservation and UptimeManager follow
 statements above describe the H6U checkpoint. See
 [H6V report](PATCH-4C-2H6V-uptime-boundaries-and-cache.md) for the intentional uptime
 changes and combined validation; there is no separate confirmed H6U build pass.
+
+## Native follow-up — stack-literal capture scope (2026-11-06)
+
+User CI compiled and ran the real source fixture three times at 175/175, then
+reached the new Network boundary fixture at 43/47 in rootful plain ARC. The four
+faults were tx-read, tx-set, second-write and carrier-third-write. Each reported
+owner=1 while input/token/transaction/heap callback roots were zero. The ownership
+flag was already released. This is an object-lifetime assertion failure after
+compilation, not an undefined symbol or evidence of a held lifecycle lease.
+
+The named heap callback slot did not explicitly bound the stack block literal's
+capture scope. Clang's [block emission implementation](https://raw.githubusercontent.com/llvm/llvm-project/main/clang/lib/CodeGen/CGBlocks.cpp)
+retains strong stack captures and can extend their cleanup to the enclosing
+scope. [ARC exception semantics](https://clang.llvm.org/docs/AutomaticReferenceCounting.html#exceptions)
+do not guarantee ordinary strong/full-expression cleanup in plain ARC. A stack
+capture surviving a throw is consistent with a released heap block and a live
+captured owner. This identifies a missing explicit boundary in our code; the
+exact Apple-clang retain sequence still requires native execution/IR inspection,
+so no claim is made that every production failed source transaction leaks. The
+real source engine normally converts body exceptions into error results; these
+fixtures deliberately allow collaborators to unwind through the caller.
+
+Each of the four Network source callback literals now initializes its named slot
+inside a separate lexical block. That block ends normally before invoking the
+source collaborator. The stack capture cleanup can complete there; the heap
+callback keeps all required strong captures alive during the synchronous call
+and is cleared by the existing finally if the call throws. The target resolver
+uses the same boundary before acquisition. Apply the same rule to Uptime's
+resolver and source callback in the pending H6V batch (seven sites in total).
+No weak/unsafe mutation capture, byref ownership workaround, exception swallowing
+or global ARC build-flag change is introduced. Callback bodies, argument values,
+source/provider counts, target validation, post-commit adoption and release-before-
+logging order are preserved.
+
+Keep every original fault and weak-root assertion. Additionally observe the
+mutation's copied identity string with a weak reference; exceptional fixtures
+start from a mutable identity so they do not confuse a constant NSString's
+permanent lifetime with a leak. Add four single-address faults covering first
+read, existing-IPv6 write, generated-IPv6 second-pass read and second-pass partial
+write. Assertions retain exception propagation, no mock commit, ownership release
+and provider-count policy. Both first/second callback constructions must release
+owner, identity, transaction and heap callback roots after the pool drains.
+This also detects a path-only capture leak that an owner-only workaround could
+otherwise hide. The production fragments stay exact extractions.
+
+The source gates now require each construction scope to close before callback
+invocation. Negative controls remove each of the seven individual construction boundaries;
+all must be rejected. New guards also retain the single-address test invocation,
+second-pass read fault and copied-identity weak-root assertion. Existing rootful/
+RootHide x plain ARC/ARC-EH recipes remain at -O0. Rootful is first in the matrix;
+its failure stops later configurations and does not establish a rootful-only bug.
+
+Local verification after the follow-up: artifact writer/preparation source gates,
+five fragment generators/exact methods/macro checks, seven construction-scope
+negative controls, source hardening, RootHide static/package controls (6/6) and
+diff checks pass. Full Windows regression remains 62/63 Python and 4/4 Node;
+the only failure is the existing Keychain retirement Git Bash permission issue.
+Native compiler/binary recipes were captured, not executed. The reported 43/47
+failure has not been rerun on this Windows host; macOS CI must confirm the fix.
+No package/bootstrap/hook/dependency/Makefile, source engine or lifecycle engine
+change, benchmark, commit or deployment is claimed.

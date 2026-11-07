@@ -690,6 +690,9 @@ def source_contracts():
     assert uptime.count('uptimeEpochIsCurrent:epoch') == 2 and 'PXUptimePreparedPacket(raw)' in uptime
     assert 'sourceWrite = nil; resolver = nil;' in uptime and 'profilePath = nil;' in uptime
     assert 'performSourceWrite:^' not in uptime and 'acquireWithIdentityResolver:^' not in uptime
+    from test_runtime_artifact_writers import callback_construction_scopes
+    assert callback_construction_scopes(uptime, 'resolver') == 1
+    assert callback_construction_scopes(uptime, 'sourceWrite') == 1
     current_epoch = identifier.method(uptime_source, '- (BOOL)uptimeEpochIsCurrent:(uint64_t)epoch')
     claim_epoch = identifier.method(uptime_source, '- (uint64_t)claimUptimeEpoch:(uint64_t)observed')
     assert '@synchronized (self)' in current_epoch and 'return epoch == _uptimeEpoch;' in current_epoch
