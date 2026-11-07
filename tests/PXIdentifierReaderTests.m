@@ -58,6 +58,13 @@ static PXIdentitySnapshot *PXFixtureCurrentIdentitySnapshot(void) { gCaptures++;
 - (NSString *)currentSSID;
 - (NSString *)currentBSSID;
 @end
+// The extracted storage helper is parsed before the controlled providers below.
+// Declarations only: legacy StorageManager must still lack the snapshot at runtime.
+@interface NSObject (PXStorageDisplayDeclarations)
+- (NSDictionary *)currentStorageInfo;
+- (NSString *)totalStorageCapacity;
+- (NSString *)freeStorageSpace;
+@end
 #include "PXReaderStatics.inc"
 
 @interface PXReaderProvider : NSObject

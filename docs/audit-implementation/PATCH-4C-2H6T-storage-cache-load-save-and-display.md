@@ -210,3 +210,36 @@ fix, rollout marker 4C.2H5S-partial and later audit stages remain unchanged. The
 scope changes add no I/O, provider, queue, notification or polling work; no
 benchmark improvement is claimed. macOS CI still must rerun the failed Storage
 native assertions and remaining matrix entries; no pass for this fix is claimed.
+
+## Native reader compile follow-up — selector declaration order (2026-11-07)
+
+Baseline a60f22f. User CI passes runtime identifier writers 484/484 three times,
+then the rootful plain-ARC reader compile fails inside PXReaderStatics.inc:
+currentStorageInfo, totalStorageCapacity and freeStorageSpace have no known
+instance-method declaration. The runtimeView warning is unrelated to these three
+compiler errors. Production IdentifierManager imports StorageManager.h before the
+static helper, but the standalone fixture extracts the helper without those
+imports. Its controlled Storage interfaces occur after the statics include, so
+ARC cannot see their selector return types when parsing that helper.
+
+Add an NSObject category interface containing those three declarations before
+PXReaderStatics.inc, following the fixture's existing WiFi declaration pattern.
+There is no category implementation and no runtime method installation. In
+particular, do not add currentStorageInfo to the legacy fake StorageManager:
+respondsToSelector must still distinguish legacy providers from the modern
+PXReaderSnapshotStorage implementation. No production source or generation body
+changes, warning suppression, typed-call cast or real manager header import is
+introduced. Shared fixture code covers rootful/RootHide and both ARC modes.
+
+A source guard now checks all six Storage/WiFi selector declarations in the prefix
+before the include and rejects runtime implementations of either declaration-only
+category. Eight negative controls remove each early declaration or add a category
+implementation and are detected. Existing modern/legacy/nil/malformed/throwing
+snapshot and single-observation tests remain unchanged. Five fragment generators,
+exact reader helper extraction, macro checks and the four existing reader compile/
+run recipes are verified locally; recipe capture does not execute clang/binaries.
+Full Windows regression remains 62/63 Python and 4/4 Node; only the established
+Keychain retirement Git Bash permission failure remains. Source hardening,
+RootHide static/metadata checks (6/6) and diff checks pass. Native Foundation/Theos
+builds remain unavailable locally and CI must confirm this compile fix. No iOS
+behavior, performance, bootstrap/package change or rollout advancement is claimed.

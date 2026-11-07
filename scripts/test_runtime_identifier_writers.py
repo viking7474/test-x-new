@@ -153,6 +153,17 @@ def source_contracts():
     assert 'generateStorageForCapacity:' not in storage_display and 'saveTo' not in storage_display
     assert read('tests/PXIdentifierReaderTests.m').count('TestStorageDisplaySnapshot(reader);') == 1
     assert 'malformed modern storage snapshot never mixes with separate legacy getters' in read('tests/PXIdentifierReaderTests.m')
+    reader_fixture = read('tests/PXIdentifierReaderTests.m')
+    reader_prefix = reader_fixture.split('#include "PXReaderStatics.inc"', 1)[0]
+    # ARC needs selector types before parsing the exact extracted helper, even
+    # though the controlled provider interfaces appear later in this fixture.
+    for signature in ('- (NSDictionary *)currentStorageInfo;', '- (NSString *)totalStorageCapacity;',
+                      '- (NSString *)freeStorageSpace;', '- (NSDictionary *)cachedWiFiDisplayInfo;',
+                      '- (NSString *)currentSSID;', '- (NSString *)currentBSSID;'):
+        assert signature in reader_prefix, 'reader helper selector must be declared before statics: ' + signature
+    for category in ('PXStorageDisplayDeclarations', 'PXWiFiDisplayDeclarations'):
+        assert '@interface NSObject (' + category + ')' in reader_prefix
+        assert '@implementation NSObject (' + category + ')' not in reader_fixture, 'compile declarations must not install runtime methods'
     wifi_display = method(manager, 'static NSString *PXIdentifierWiFiDisplay(id manager)')
     assert 'PXIdentifierWiFiDisplay(sharedManager)' in display
     assert manager.index('static NSString *PXIdentifierWiFiDisplay(id manager) {') < manager.index(READER_SIGNATURES[1] + ' {')
