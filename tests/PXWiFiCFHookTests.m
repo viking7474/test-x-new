@@ -225,6 +225,9 @@ static void TestPreparationLifetime(void) {
                   "network failed retain keeps the caller-owned original and never retries");
             if (result) CFRelease(result); gWiFi = nil;
         }
+        if (weakInfo || weakSSID || weakBSSID || gBridgeInput)
+            fprintf(stderr, "DETAIL: network preparation fault=%s info=%d ssid=%d bssid=%d builder=%d\n",
+                    fault == 0 ? "bridge-null" : "bridge-throw", weakInfo != nil, weakSSID != nil, weakBSSID != nil, gBridgeInput != nil);
         CHECK(!weakInfo && !weakSSID && !weakBSSID && !gBridgeInput,
               "network preparation failure releases provider root builder dictionary and mutable fields after pool drain");
     }
@@ -270,6 +273,34 @@ static void TestPreparationLifetime(void) {
               "interface denied or throwing scope preserves its original without synthesis");
         if (value) CFRelease(value);
     }
+}
+static void TestNetworkAdapterFieldOwnership(void) {
+    Reset(); __weak id weakInfo = nil, weakSSID = nil, weakBSSID = nil;
+    @autoreleasepool {
+        id ssid = [PXWiFiEncodingFailure new]; NSString *bssid = [@"02:11:22:33:44:55" mutableCopy];
+        gWiFi = [@{ @"ssid": ssid, @"bssid": bssid } mutableCopy];
+        weakInfo = gWiFi; weakSSID = ssid; weakBSSID = bssid;
+        CFDictionaryRef result = replaced_CNCopyCurrentNetworkInfo(CFSTR("en0"));
+        CHECK(result && (CFTypeRef)result == gLastOriginal && gOriginalCalls == 1 && gWiFiReads == 1 && !gBridgeCalls && !gSourceReleases,
+              "network adapter encoding failure preserves original ownership without retry or a replacement retain");
+        if (result) CFRelease(result); gWiFi = nil; ssid = nil; bssid = nil;
+    }
+    CHECK(!weakInfo && !weakSSID && !weakBSSID && !gBridgeInput,
+          "network adapter releases named accessor results after builder encoding unwind and pool drain");
+    Reset(); CFDictionaryRef result = NULL;
+    @autoreleasepool {
+        gWiFi = [@{ @"ssid": [@"caller-owned result" mutableCopy], @"bssid": [@"02:11:22:33:44:55" mutableCopy] } mutableCopy];
+        weakInfo = gWiFi; weakSSID = gWiFi[@"ssid"]; weakBSSID = gWiFi[@"bssid"];
+        result = replaced_CNCopyCurrentNetworkInfo(CFSTR("en0")); gWiFi = nil;
+    }
+    @autoreleasepool {
+        CHECK(result && !weakInfo && weakSSID && weakBSSID && gBridgeInput == (__bridge id)result &&
+              gOriginalCalls == 1 && gWiFiReads == 1 && gBridgeCalls == 1 && gSourceReleases == 1,
+              "network adapter result keeps mutable fields alive independently after provider and named caller cleanup");
+    } // Drain weak-load observations before dropping the caller's final CF owner.
+    if (result) CFRelease(result); result = NULL;
+    CHECK(!weakSSID && !weakBSSID && !gBridgeInput,
+          "network adapter mutable fields release after caller CF release with no stranded accessor temporary");
 }
 static void TestInterfaces(void) {
     for (int kind = 0; kind < 4; kind++) {
@@ -433,7 +464,7 @@ static void TestScan(void) {
 }
 int main(void) {
     @autoreleasepool {
-        @try { TestLifetimeOracle(); TestNetworkCopy(); TestPreparationLifetime(); TestInterfaces(); TestAppleOutput(); TestScan(); TestScanLifetime(); }
+        @try { TestLifetimeOracle(); TestNetworkCopy(); TestPreparationLifetime(); TestNetworkAdapterFieldOwnership(); TestInterfaces(); TestAppleOutput(); TestScan(); TestScanLifetime(); }
         @catch (NSException *exception) { gFailures++; fprintf(stderr, "FAIL: unexpected WiFi CF exception: %s\n", exception.description.UTF8String); }
         printf("WiFi CF boundaries: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);
         return gFailures ? 1 : 0;

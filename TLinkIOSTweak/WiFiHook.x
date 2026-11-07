@@ -337,16 +337,19 @@ static CFDictionaryRef replaced_CNCopyCurrentNetworkInfo(CFStringRef interfaceNa
     PX_RUNTIME_READ_OPERATION;
     CFDictionaryRef original = orig_CNCopyCurrentNetworkInfo ? orig_CNCopyCurrentNetworkInfo(interfaceName) : NULL;
     CFDictionaryRef replacement = NULL;
-    NSString *bundleID = nil;
+    NSString *bundleID = nil, *ssid = nil, *bssid = nil;
     NSDictionary *wifiInfo = nil;
     @try {
         bundleID = NSBundle.mainBundle.bundleIdentifier;
         if (!shouldSpoofForBundle(bundleID)) return original;
         wifiInfo = PXResolvedWiFiInfo();
-        if (PXWiFiInfoHasIdentity(wifiInfo))
-            replacement = PXCreateSpoofedNetworkInfoDict(wifiInfo[@"ssid"], wifiInfo[@"bssid"]);
+        if (PXWiFiInfoHasIdentity(wifiInfo)) {
+            // Complete accessor expressions before the builder can unwind.
+            ssid = wifiInfo[@"ssid"]; bssid = wifiInfo[@"bssid"];
+            replacement = PXCreateSpoofedNetworkInfoDict(ssid, bssid);
+        }
     } @catch (__unused NSException *exception) { return original; }
-      @finally { wifiInfo = nil; bundleID = nil; }
+      @finally { bssid = nil; ssid = nil; wifiInfo = nil; bundleID = nil; }
     return (CFDictionaryRef)PXWiFiReplaceOwnedCopy(original, replacement);
 }
 

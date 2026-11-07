@@ -113,3 +113,60 @@ real retained graph sizes are unmeasured.
 Foundation/xcrun/Logos/Theos and a device are unavailable on this Windows host.
 New native assertions, package builds and device behavior require macOS CI/device
 verification. No new native/build/device pass, commit, push or deployment is claimed.
+
+## Native follow-up — network builder argument accessors (2026-11-07)
+
+Baseline 26f28fd. The user log confirms Storage manager cache 57/57 and WiFi
+resolver/writer lifetime 109/109 in rootful plain ARC. CI then fails WiFi CF
+boundaries at 87/88: the provider/builder/mutable-field lifetime assertion in
+TestPreparationLifetime fails once. That loop includes NULL and throwing bridge
+outcomes; the old output does not identify which root or iteration survived.
+The new diagnostic prints bridge-null/bridge-throw plus provider/SSID/BSSID/builder
+weak states without changing the assertion.
+
+The adapter still passed wifiInfo[ssid] and wifiInfo[bssid] directly into
+PXCreateSpoofedNetworkInfoDict. Builder finally cleanup covers its own dictionary,
+data and parameter roots; adapter cleanup covers its provider root, but neither
+owns caller full-expression temporaries from those accessor results. A builder
+exception is caught by the adapter, and plain ARC does not guarantee their
+abnormal-exit cleanup. This is a concrete remaining boundary consistent with the
+failure, not a locally confirmed identification of the runner's exact retained
+object or instruction. See the [ARC exception contract](https://clang.llvm.org/docs/AutomaticReferenceCounting.html#exceptions).
+
+The adapter now assigns both fields to named strong locals before the C call and
+clears them in its existing finally. Each assignment completes before the builder
+can unwind. No copy, normalization or allocation is added for the fields; the
+same accessor values are passed once after the same identity guard. Builder body,
+CFBridgingRetain, original/provider calls, returned Copy +1 ownership, key aliases,
+UTF-8 encoding, fallback catches and PXWiFiReplaceOwnedCopy are unchanged. Cleanup
+of caller locals cannot consume the builder's independently retained CF result.
+
+Keep all existing assertions and both failed-retain iterations. Add a caller-level
+encoding exception with nonconstant field objects to verify adapter cleanup when
+the builder throws before bridging. A successful mutable-field adapter result
+must outlive provider-root and named-local cleanup, then release its descendants
+only after the caller drops the final CF owner. Weak-load observations are drained
+before that release so the test does not retain its own probes. Direct-builder
+encoding/ownership tests, the deliberately surviving-owner oracle and Apple/scan/
+interface coverage remain. Bridge stand-ins and production fragments are unchanged.
+
+Local source gates now require both named accessor assignments and releases, the
+named builder call, every original lifetime predicate and the new caller-level
+retained-result/released-result predicates. Ten negative controls remove each of
+these boundaries or controls and are rejected. Five fragment generators, exact
+CF body extraction, macro arity, four CF rootful/RootHide x plain ARC/ARC-EH recipe
+captures, source hardening, RootHide static/package checks (6/6) and diff checks
+pass. Full Windows regression: 62/63 Python and 4/4 Node; the remaining Keychain
+retirement failure is the established Git Bash permission issue (4 failures,
+1 error, 1 skip). Compiler/binary recipes are captured, not executed.
+
+Only replaced_CNCopyCurrentNetworkInfo changes in production. Its original/
+provider/builder/replacement calls and other hook text are preserved. Standard
+NEHotspot synthesis catches its own preparation exceptions; no broader change to
+that caller is inferred from this CF failure. Bootstrap, installation/ABI gates,
+constructors, package/Makefile/dependencies, captured runtime authority and the
+iOS 15.8.8/AIDA64 fix are untouched. Common hook code applies to both schemes;
+rootful is the first matrix entry, not evidence of a rootful-only defect. The
+scope is retained-reference cleanup, without a benchmark or claim of full source
+consistency. macOS CI must rerun the reported 87/88 failure; no native pass for
+this fix is claimed on Windows.

@@ -451,7 +451,9 @@ def source_contracts():
     assert 'interfaces = @[@"en0"];' in interfaces and 'CFBridgingRetain(interfaces)' in interfaces
     assert '@finally { interfaces = nil; bundleID = nil; }' in interfaces
     network = identifier.method(wifi_hooks, WIFI_CF_SIGNATURES[3])
-    assert '@finally { wifiInfo = nil; bundleID = nil; }' in network
+    assert '@finally { bssid = nil; ssid = nil; wifiInfo = nil; bundleID = nil; }' in network
+    assert network.index('ssid = wifiInfo[@"ssid"]; bssid = wifiInfo[@"bssid"];') < network.index('PXCreateSpoofedNetworkInfoDict(ssid, bssid)')
+    assert 'PXCreateSpoofedNetworkInfoDict(wifiInfo[' not in network
     assert network.index('orig_CNCopyCurrentNetworkInfo(interfaceName)') < network.index('@try')
     assert interfaces.index('orig_CNCopySupportedInterfaces()') < interfaces.index('@try')
     apple = identifier.method(wifi_hooks, WIFI_CF_SIGNATURES[5])
@@ -482,6 +484,18 @@ def source_contracts():
     assert '#define CFBridgingRetain(value) PXFixtureBridge((__bridge CFTypeRef)(value))' in cf_fixture
     assert cf_fixture.count('TestLifetimeOracle();') == 1
     assert cf_fixture.count('TestPreparationLifetime();') == 1
+    assert cf_fixture.count('TestNetworkAdapterFieldOwnership();') == 1
+    for case in ('network adapter releases named accessor results after builder encoding unwind and pool drain',
+                 'network adapter result keeps mutable fields alive independently after provider and named caller cleanup',
+                 'network adapter mutable fields release after caller CF release with no stranded accessor temporary'):
+        assert case in cf_fixture
+    assert 'fault == 0 ? "bridge-null" : "bridge-throw"' in cf_fixture
+    prep_lifetime = identifier.method(cf_fixture, 'static void TestPreparationLifetime(void)')
+    adapter_lifetime = identifier.method(cf_fixture, 'static void TestNetworkAdapterFieldOwnership(void)')
+    assert '!weakInfo && !weakSSID && !weakBSSID && !gBridgeInput' in prep_lifetime
+    assert '!weakInfo && !weakSSID && !weakBSSID && !gBridgeInput' in adapter_lifetime
+    assert 'result && !weakInfo && weakSSID && weakBSSID && gBridgeInput == (__bridge id)result' in adapter_lifetime
+    assert '!weakSSID && !weakBSSID && !gBridgeInput' in adapter_lifetime
     for case in ('network preparation failure releases provider root builder dictionary and mutable fields after pool drain',
                  'network builder encoding unwind releases its dictionary and both input parameters',
                  'network builder result keeps its independent CF owner after local cleanup',
