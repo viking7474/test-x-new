@@ -254,10 +254,12 @@ static void TestSourceAndPublicationOrdering(void) {
     CHECK(!gHeld, "storage source outcomes release lifecycle capability");
 }
 static void TestCopyAndLifetime(void) {
-    for (NSString *fault in @[@"acquire", @"copy", @"stage", @"stage-read", @"read", @"prepare", @"input-copy", @"save-acquire", @"save-copy", @"save-stage"]) {
+    for (NSString *fault in @[@"acquire", @"copy", @"stage", @"stage-read", @"read", @"prepare", @"input-copy", @"save-acquire", @"save-copy", @"save-stage", @"save-current-stage", @"setter-stage", @"display-no-filesystem-stage"]) {
         Reset(); __weak id weakManager = nil, weakToken = nil, weakTarget = nil;
         BOOL saving = [fault hasPrefix:@"save-"];
-        NSString *activeFault = saving ? [fault substringFromIndex:5] : fault;
+        BOOL currentSave = [fault isEqual:@"save-current-stage"], setter = [fault isEqual:@"setter-stage"];
+        BOOL noFilesystem = [fault isEqual:@"display-no-filesystem-stage"];
+        NSString *activeFault = currentSave || setter || noFilesystem ? @"stage" : (saving ? [fault substringFromIndex:5] : fault);
         gObserveResolver = saving;
         @autoreleasepool {
             PXStorageManagerFixture *manager = [PXStorageManagerFixture new]; weakManager = manager;
@@ -267,7 +269,9 @@ static void TestCopyAndLifetime(void) {
             if ([activeFault isEqual:@"copy"]) [manager installCopyProbe:root];
             gFault = activeFault; BOOL threw = NO;
             @try {
-                if (saving) {
+                if (currentSave) [manager saveToCurrentProfile];
+                else if (setter) [manager setTotalStorageCapacity:@"128"];
+                else if (saving) {
                     NSMutableString *target = [@"a" mutableCopy]; weakTarget = target;
                     @try { [manager saveToProfile:target]; } @finally { target = nil; }
                 } else if ([fault isEqual:@"read"] || [fault isEqual:@"prepare"]) [manager loadFromProfile:@"a"];
@@ -275,14 +279,35 @@ static void TestCopyAndLifetime(void) {
                     PXStorageInputRecord *input = [PXStorageInputRecord new]; input.record = root;
                     @try { [manager commitDisplayStorageInfo:(id)input updateFilesystem:YES error:NULL]; }
                     @finally { input = nil; }
-                } else [manager commitDisplayStorageInfo:Record(@"128", @"32") updateFilesystem:YES error:NULL];
+                } else [manager commitDisplayStorageInfo:Record(@"128", @"32") updateFilesystem:!noFilesystem error:NULL];
             } @catch (NSException *exception) { threw = [exception.name isEqual:@"fixture.storage"]; }
             CHECK(threw && !gHeld && !gWrites, "storage exceptional preparation keeps propagation and releases capability without writes");
+            if (setter) CHECK([[manager totalStorageCapacity] isEqual:@"128"], "storage setter stage exception preserves cache-first candidate policy");
             manager = nil; root = nil; token = nil; [gFiles removeAllObjects];
         }
         if (weakManager || weakToken || weakTarget || gMutationRoot || gTransactionRoot || gCallbackRoots.allObjects.count)
             fprintf(stderr, "DETAIL: storage fault=%s manager=%d token=%d target=%d mutation=%d tx=%d callbacks=%lu\n", fault.UTF8String, weakManager != nil, weakToken != nil, weakTarget != nil, gMutationRoot != nil, gTransactionRoot != nil, (unsigned long)gCallbackRoots.allObjects.count);
         CHECK(!weakManager && !weakToken && !weakTarget && !gMutationRoot && !gTransactionRoot && !gCallbackRoots.allObjects.count, "storage exceptional exit drops owner records and method argument block captures after pool drain");
+    }
+}
+static void TestSuccessfulCallbackLifetime(void) {
+    for (NSUInteger saving = 0; saving < 2; saving++) {
+        Reset(); gObserveResolver = saving != 0;
+        __weak id weakManager = nil, weakToken = nil;
+        @autoreleasepool {
+            PXStorageManagerFixture *manager = [PXStorageManagerFixture new]; weakManager = manager;
+            id token = [NSObject new]; weakToken = token;
+            NSDictionary *root = @{ @"TotalStorage": @"64", @"FreeStorage": @"16", @"keep": token };
+            [manager adoptCommittedStorageInfo:root];
+            if (saving) [manager saveToProfile:@"a"];
+            else CHECK([manager commitDisplayStorageInfo:Record(@"128", @"32") updateFilesystem:YES error:NULL],
+                       "storage callback success control preserves acknowledged display commit");
+            CHECK(gWrites == 1 && gSourceCalls == 1 && !gHeld,
+                  "storage callback construction scopes preserve single save and display source invocation");
+            [gFiles removeAllObjects]; manager = nil; root = nil; token = nil;
+        }
+        CHECK(!weakManager && !weakToken && !gMutationRoot && !gTransactionRoot && !gCallbackRoots.allObjects.count,
+              "storage successful callbacks release manager metadata capability and captured heap blocks after pool drain");
     }
 }
 static void TestMonitorBoundariesAndStress(void) {
@@ -325,7 +350,7 @@ static void TestMonitorBoundariesAndStress(void) {
 }
 int main(void) {
     @autoreleasepool {
-        @try { TestSnapshotsAndInputs(); TestLoadOrdering(); TestSourceAndPublicationOrdering(); TestCopyAndLifetime(); TestMonitorBoundariesAndStress(); }
+        @try { TestSnapshotsAndInputs(); TestLoadOrdering(); TestSourceAndPublicationOrdering(); TestCopyAndLifetime(); TestSuccessfulCallbackLifetime(); TestMonitorBoundariesAndStress(); }
         @catch (NSException *exception) { gFailures++; fprintf(stderr, "FAIL: unexpected storage exception: %s\n", exception.description.UTF8String); }
         printf("Storage manager cache: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);
         return gFailures ? 1 : 0;

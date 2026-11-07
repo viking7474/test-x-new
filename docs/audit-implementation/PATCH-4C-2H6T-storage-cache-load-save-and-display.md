@@ -139,3 +139,74 @@ Foundation/xcrun/Theos and an iOS device are unavailable on Windows. New native
 assertions, package builds and device behavior require macOS CI/device execution.
 No native/build/device pass, performance benchmark, commit, push or deployment
 is claimed for H6T.
+
+## Native follow-up — Storage stack capture scopes (2026-11-07)
+
+Baseline 2ff9b34. The user's attached log reaches rootful plain ARC with the real
+artifact preparation fixture passing 848/848 three times and Uptime boundaries
+passing 76/76. Storage manager cache fails at 42/45: stage, stage-read and
+save-stage retain manager=1 and metadata token=1 after pool drain, while target,
+mutation, transaction and heap callback roots are zero. The reported failure is
+a native lifetime assertion, after successful compilation. The warnings are not
+the process's failing assertions. No later package scheme/ARC entry is established
+by this log because the first failing configuration stops the script.
+
+The two affected methods are persistStorageRecord:revision:profileID:current:error:
+and commitDisplayStorageInfo:updateFilesystem:error:. Each already has a named
+strong writeBody slot and finally cleanup, but initializes its block literal in
+the same lexical try scope as the throwing source call. The source body captures
+self plus the prepared/candidate record. Its stack capture lifetime can survive
+an exceptional exit even after the named heap callback has been released, which
+matches the remaining manager/metadata graph. The same gap was addressed in
+Network/Uptime; applying only those files left the Storage sites uncovered.
+
+Clang's [block emission code](https://raw.githubusercontent.com/llvm/llvm-project/main/clang/lib/CodeGen/CGBlocks.cpp)
+tracks stack capture cleanup through the enclosing scope, while its
+[plain ARC exception contract](https://clang.llvm.org/docs/AutomaticReferenceCounting.html#exceptions)
+does not guarantee ordinary strong/full-expression releases on abnormal exits.
+The user log plus the source identify this remaining cleanup boundary; exact
+runner IR and the updated native outcome are not available on Windows. The real
+SourceStore usually catches body exceptions and returns failure instead of
+unwinding through these callers, so this does not establish a leak on every
+normal failed source transaction or a measured device leak.
+
+Both source callback literals now initialize their named slots inside separate
+lexical blocks that finish normally before performSourceWrite:. Their strong
+heap captures remain alive during the synchronous call, and the existing finally
+clears the slot on unwind. Both target resolver constructions use the same rule
+before acquisition (four sites total). No weak/unsafe self/record capture, byref
+ownership substitution, new exception catch or ARC build-flag change is added.
+Callback bodies, arguments, provider/source counts, source acknowledgement,
+revision checks, namespace proof, cache publication, lifecycle release and error
+propagation retain their order. Source/lifecycle engines and preference writer
+implementation are unchanged. Display's capture-free admission callback retains
+its existing global-block policy; explicitly marking tx read with (void)tx only
+removes the unused-but-set-parameter warning reported for the extracted method.
+
+Keep the ten original injected faults and every original weak-root assertion.
+Add current-save stage failure, setter autosave stage failure and display stage
+failure without filesystem update. The setter case also checks the existing
+cache-first candidate survives a persistence exception. Success controls for
+explicit save and display require one source invocation/commit, free lifecycle
+ownership and released manager/metadata/mutation/transaction/callback roots after
+pool drain and removal of mock file ownership. Capture-free display resolvers
+are still excluded from weak block-deallocation requirements. Production method
+fragments remain exact extractions in both the new fixture and real source tests.
+
+Local validation after this follow-up: 62/63 Python suites and 4/4 Node suites;
+the only failure remains Keychain retirement's established Git Bash permission
+issue (4 failures, 1 error, 1 skip). Artifact preparation/writer source gates,
+source hardening, RootHide metadata/static controls (6/6), macro arity, five
+fragment generators and byte-exact Storage methods pass. Eight negative source
+controls reject removal of each construction scope, success invocation, original
+weak-root predicate, success weak-root predicate or source-count assertion.
+Four storage-manager-cache rootful/RootHide x plain ARC/ARC-EH recipes at -O0
+were captured, not executed. A reversal check restores the entire production file
+to HEAD after removing only the new scopes/comments and (void)tx use.
+
+All common Storage changes apply to both schemes. Hooks/captured runtime paths,
+bootstrap/ctor/install policy, Makefile/package/dependencies, the iOS 15.8.8/AIDA64
+fix, rollout marker 4C.2H5S-partial and later audit stages remain unchanged. The
+scope changes add no I/O, provider, queue, notification or polling work; no
+benchmark improvement is claimed. macOS CI still must rerun the failed Storage
+native assertions and remaining matrix entries; no pass for this fix is claimed.

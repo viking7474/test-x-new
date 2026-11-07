@@ -219,14 +219,16 @@ static BOOL PXStorageSuperseded(NSError **error) {
     @try {
         if (![self storageCacheRevisionIsCurrent:revision]) return PXStorageSuperseded(error);
         explicitID = [PXValidatedProfileID(profileID) copy];
-        resolver = ^NSString *{
-            NSDictionary *selection = nil;
-            @try {
-                if (!current) return explicitID;
-                selection = [NSDictionary dictionaryWithContentsOfFile:PXCurrentProfileInfoPath()];
-                return PXValidatedProfileID(selection[@"ProfileId"]);
-            } @finally { selection = nil; }
-        };
+        {
+            resolver = ^NSString *{
+                NSDictionary *selection = nil;
+                @try {
+                    if (!current) return explicitID;
+                    selection = [NSDictionary dictionaryWithContentsOfFile:PXCurrentProfileInfoPath()];
+                    return PXValidatedProfileID(selection[@"ProfileId"]);
+                } @finally { selection = nil; }
+            };
+        }
         mutation = [PXProfileArtifactMutation acquireWithProfileIDResolver:resolver error:error];
         resolver = nil;
         @try {
@@ -236,12 +238,16 @@ static BOOL PXStorageSuperseded(NSError **error) {
             // Copy the retained entry record, never a newer cache root after lookup.
             prepared = [record copy];
             if (![self storageCacheRevisionIsCurrent:revision]) return PXStorageSuperseded(error);
-            writeBody = ^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
-                @try {
-                    if (![self storageCacheRevisionIsCurrent:revision]) return PXStorageSuperseded(writeError);
-                    return [tx setDictionary:prepared atPath:storagePath error:writeError];
-                } @finally { tx = nil; }
-            };
+            {
+                // Finish stack-literal capture cleanup before the source call can throw.
+                // The named heap callback stays strong until the enclosing finally.
+                writeBody = ^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+                    @try {
+                        if (![self storageCacheRevisionIsCurrent:revision]) return PXStorageSuperseded(writeError);
+                        return [tx setDictionary:prepared atPath:storagePath error:writeError];
+                    } @finally { tx = nil; }
+                };
+            }
             return [mutation performSourceWrite:writeBody error:error];
         } @finally { [mutation invalidate]; }
     } @finally { writeBody = nil; resolver = nil; prepared = nil; mutation = nil; storagePath = nil; explicitID = nil; record = nil; profileID = nil; }
@@ -539,16 +545,18 @@ static BOOL PXStorageSuperseded(NSError **error) {
         total = [rawTotal copy]; free = [rawFree copy];
         filesystem = updateFilesystem ? [rawFilesystem copy] : nil;
         if (!PXPerformStandaloneRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **admissionError) {
-            @try { (void)admissionError; return YES; } @finally { tx = nil; }
+            @try { (void)tx; (void)admissionError; return YES; } @finally { tx = nil; }
         }, error)) return NO;
         if (![self storageCacheRevisionIsCurrent:observed]) return PXStorageSuperseded(error);
-        resolver = ^NSString *{
-            NSDictionary *selection = nil;
-            @try {
-                selection = [NSDictionary dictionaryWithContentsOfFile:PXCurrentProfileInfoPath()];
-                return PXValidatedProfileID(selection[@"ProfileId"]);
-            } @finally { selection = nil; }
-        };
+        {
+            resolver = ^NSString *{
+                NSDictionary *selection = nil;
+                @try {
+                    selection = [NSDictionary dictionaryWithContentsOfFile:PXCurrentProfileInfoPath()];
+                    return PXValidatedProfileID(selection[@"ProfileId"]);
+                } @finally { selection = nil; }
+            };
+        }
         mutation = [PXProfileArtifactMutation acquireWithProfileIDResolver:resolver error:error];
         resolver = nil;
         @try {
@@ -565,17 +573,19 @@ static BOOL PXStorageSuperseded(NSError **error) {
             candidate[@"TotalStorage"] = total; candidate[@"FreeStorage"] = free;
             if (updateFilesystem) candidate[@"FilesystemType"] = filesystem;
             path = [mutation.profileDirectory stringByAppendingPathComponent:@"storage.plist"];
-            writeBody = ^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
-                NSDictionary *staged = nil;
-                @try {
-                    if (![self storageCacheRevisionIsCurrent:revision]) return PXStorageSuperseded(writeError);
-                    if (![tx setDictionary:candidate atPath:path error:writeError]) return NO;
-                    staged = [tx dictionaryAtPath:path error:writeError];
-                    if (!staged) return NO;
-                    adoptable = PXStorageFrozenRecord(staged);
-                    return adoptable != nil;
-                } @finally { staged = nil; tx = nil; }
-            };
+            {
+                writeBody = ^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+                    NSDictionary *staged = nil;
+                    @try {
+                        if (![self storageCacheRevisionIsCurrent:revision]) return PXStorageSuperseded(writeError);
+                        if (![tx setDictionary:candidate atPath:path error:writeError]) return NO;
+                        staged = [tx dictionaryAtPath:path error:writeError];
+                        if (!staged) return NO;
+                        adoptable = PXStorageFrozenRecord(staged);
+                        return adoptable != nil;
+                    } @finally { staged = nil; tx = nil; }
+                };
+            }
             BOOL committed = [mutation performSourceWrite:writeBody error:error];
             if (!committed) return NO;
             // A newer cache intent cannot be undone by this acknowledged commit.

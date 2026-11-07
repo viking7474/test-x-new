@@ -892,6 +892,7 @@ def source_contracts():
     assert display.index('storageCacheRevisionIsCurrent:revision') < display.index('[tx setDictionary:')
     assert 'writeBody = nil; resolver = nil; mutation = nil; adoptable = nil; candidate = nil;' in display
     assert 'performSourceWrite:^' not in display and 'acquireWithProfileIDResolver:^' not in display
+    assert callback_construction_scopes(display, 'resolver') == 1 and callback_construction_scopes(display, 'writeBody') == 1
     assert 'acknowledged display storage source commit never replaces a newer cache adoption' in read('tests/PXRuntimeArtifactPreparationTests.m')
     check_macro_arity(read('tests/PXRuntimeArtifactPreparationTests.m'), 'PXRuntimeArtifactPreparationTests.m')
     persist = identifier.method(storage, '- (BOOL)persistStorageRecord:(NSDictionary *)record revision:(uint64_t)revision profileID:(NSString *)profileID current:(BOOL)current error:(NSError **)error')
@@ -900,6 +901,17 @@ def source_contracts():
     assert '[mutation performSourceWrite:' in persist and '@finally { [mutation invalidate]; }' in persist
     assert persist.count('storageCacheRevisionIsCurrent:revision') == 4
     assert 'writeBody = nil; resolver = nil; prepared = nil; mutation = nil;' in persist
+    assert callback_construction_scopes(persist, 'resolver') == 1 and callback_construction_scopes(persist, 'writeBody') == 1
+    storage_lifetime = read('tests/PXStorageManagerCacheTests.m')
+    assert 'TestSuccessfulCallbackLifetime();' in storage_lifetime
+    for case in ('save-current-stage', 'setter-stage', 'display-no-filesystem-stage',
+                 'storage setter stage exception preserves cache-first candidate policy',
+                 'storage successful callbacks release manager metadata capability and captured heap blocks after pool drain'):
+        assert case in storage_lifetime
+    assert '!weakManager && !weakToken && !weakTarget && !gMutationRoot && !gTransactionRoot && !gCallbackRoots.allObjects.count' in storage_lifetime
+    storage_success = identifier.method(storage_lifetime, 'static void TestSuccessfulCallbackLifetime(void)')
+    assert '!weakManager && !weakToken && !gMutationRoot && !gTransactionRoot && !gCallbackRoots.allObjects.count' in storage_success
+    assert 'gWrites == 1 && gSourceCalls == 1 && !gHeld' in storage_success
     wrapper = identifier.method(storage, '- (BOOL)persistStorageToProfile:(NSString *)profileID current:(BOOL)current error:(NSError **)error')
     assert wrapper.index('captureStorageCache:&revision') < wrapper.index('persistStorageRecord:record revision:revision')
     assert 'PXActiveProfileID()' not in persist and 'PXLegacyActiveProfileInfoPath()' not in persist
