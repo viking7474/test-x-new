@@ -74,6 +74,9 @@ jobs:
       - name: Test native iOS reporting cache and original dispatch
         run: python3 scripts/test_ios_reporting_cache.py --native
 
+      - name: UA policy and main-thread WebView sync
+        run: python3 scripts/test_ua_policy_and_sync.py --native
+
       - name: Test native artifact preparation and manager wrappers
         run: python3 scripts/test_runtime_artifact_preparation.py --native
 

@@ -458,105 +458,159 @@ typedef struct {
     BOOL sensitiveHostExemptionsEnabled;
 } PXUADebugSettings;
 
-static PXUADebugSettings gUADebug;
-static BOOL gUADebugValid = NO;
-static NSTimeInterval gUADebugLastRead = 0;
+// One scalar packet: no Objective-C providers or releases while holding the lock.
+#pragma mark - UA policy packet
 
-static void PXUADebugInvalidate(void) {
-    gUADebugValid = NO;
+typedef struct {
+    PXUADebugSettings debug;
+    BOOL mobileBuild, syncEnabled, fileLog, applyAll, injectJS;
+} PXUAPolicyValues;
+
+static os_unfair_lock gUAPolicyLock = OS_UNFAIR_LOCK_INIT;
+static PXUAPolicyValues gUAPolicy;
+static double gUAPolicyLoadedAt;
+static BOOL gUAPolicyValid;
+static uint64_t gUAPolicyEpoch, gUAPolicyRevision;
+static __thread BOOL gUALoadingPolicy;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+static char kPXRuntimeUAPolicy;
+#endif
+
+static PXUAPolicyValues PXUADefaultPolicy(void) {
+    PXUAPolicyValues values = {0};
+    values.debug.scopeSafari = values.debug.scopeSafariViewService = values.debug.scopeWebKit = YES;
+    values.debug.hook_init = values.debug.hook_setCustomUserAgent = values.debug.hook_appNameUA = YES;
+    values.debug.hook_requestHeaderUA = values.debug.hook_sfUserAgentWithDomain = values.debug.hook_sfDefaultUA = YES;
+    values.debug.sensitiveHostExemptionsEnabled = YES;
+    values.fileLog = values.applyAll = values.injectJS = YES;
+    return values;
 }
 
+static uint64_t PXUASyncEpoch(void) {
+    os_unfair_lock_lock(&gUAPolicyLock);
+    uint64_t epoch = gUAPolicyEpoch;
+    os_unfair_lock_unlock(&gUAPolicyLock);
+    return epoch;
+}
+
+static void PXUAPolicyInvalidate(void) {
+    os_unfair_lock_lock(&gUAPolicyLock);
+    gUAPolicyEpoch++; gUAPolicyRevision++; gUAPolicyValid = NO;
+    os_unfair_lock_unlock(&gUAPolicyLock);
+}
+
+static BOOL PXUAPolicyBool(NSDictionary *settings, NSUserDefaults *defaults, NSString *key, BOOL fallback) {
+    id value = nil;
+    @try {
+        value = settings[key];
+        if (!value) value = [defaults objectForKey:key];
+        // A present malformed value uses the established default, not another authority.
+        return ([value isKindOfClass:NSNumber.class] || [value isKindOfClass:NSString.class]) ? [value boolValue] : fallback;
+    } @finally { value = nil; settings = nil; defaults = nil; key = nil; }
+}
+
+static PXUAPolicyValues PXUABuildPolicy(NSDictionary *settings, NSUserDefaults *defaults) {
+    PXUAPolicyValues values = PXUADefaultPolicy();
+    @try {
+        values.debug.masterEnabled = PXUAPolicyBool(settings, defaults, @"debugSafariUAMasterEnabled", NO);
+        values.debug.traceEnabled = PXUAPolicyBool(settings, defaults, @"debugSafariUATraceEnabled", NO);
+        values.debug.scopeSafari = PXUAPolicyBool(settings, defaults, @"debugSafariUAScope_applySafari", YES);
+        values.debug.scopeSafariViewService = PXUAPolicyBool(settings, defaults, @"debugSafariUAScope_applySafariViewService", YES);
+        values.debug.scopeWebKit = PXUAPolicyBool(settings, defaults, @"debugSafariUAScope_applyWebKit", YES);
+        values.debug.hook_init = PXUAPolicyBool(settings, defaults, @"debugSafariUA_WKWebView_init", YES);
+        values.debug.hook_setCustomUserAgent = PXUAPolicyBool(settings, defaults, @"debugSafariUA_WKWebView_setCustomUserAgent", YES);
+        values.debug.hook_appNameUA = PXUAPolicyBool(settings, defaults, @"debugSafariUA_WKWebViewConfiguration_appNameUA", YES);
+        values.debug.hook_requestHeaderUA = PXUAPolicyBool(settings, defaults, @"debugSafariUA_NSURLRequest_setHeaderUA", YES);
+        values.debug.hook_sfUserAgentWithDomain = PXUAPolicyBool(settings, defaults, @"debugSafariUA_SFUserAgentController_userAgentWithDomain", YES);
+        values.debug.hook_sfDefaultUA = PXUAPolicyBool(settings, defaults, @"debugSafariUA_SFUserAgentController_defaultUA", YES);
+        values.debug.sensitiveHostExemptionsEnabled = PXUAPolicyBool(settings, defaults, @"debugSafariUA_SensitiveHostExemptionsEnabled", YES);
+        values.mobileBuild = PXUAPolicyBool(settings, defaults, @"uaSpoofMobileBuildEnabled", NO);
+        BOOL syncBoth = PXUAPolicyBool(settings, defaults, @"uaSyncHeaderAndJS", NO);
+        BOOL syncJSOnly = PXUAPolicyBool(settings, defaults, @"uaSyncJSOnlyFromRequests", NO);
+        values.syncEnabled = syncBoth || syncJSOnly;
+        values.fileLog = PXUAPolicyBool(settings, defaults, @"debugSafariUA_LogFileEnabled", YES);
+        values.applyAll = PXUAPolicyBool(settings, defaults, @"uaSyncApplyAllWebViews", YES);
+        values.injectJS = PXUAPolicyBool(settings, defaults, @"uaSyncInjectJS", YES);
+        return values;
+    } @finally { settings = nil; defaults = nil; }
+}
+
+#if !defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
 static NSDictionary *PXReadSecuritySettingsDict(void) {
-    NSArray<NSString *> *paths = @[
-        @"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist",
-        @"/private/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist"
-    ];
-    for (NSString *p in paths) {
-        NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:p];
-        if ([d isKindOfClass:[NSDictionary class]]) return d;
+    NSDictionary *settings = nil;
+    @try {
+        settings = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist"];
+        if ([settings isKindOfClass:NSDictionary.class]) return settings;
+        settings = [NSDictionary dictionaryWithContentsOfFile:@"/private/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist"];
+        return [settings isKindOfClass:NSDictionary.class] ? settings : nil;
+    } @finally { settings = nil; }
+}
+#endif
+
+static PXUAPolicyValues PXUACurrentPolicy(void) {
+    PXUAPolicyValues values = PXUADefaultPolicy();
+    if (gUALoadingPolicy) return values;
+    gUALoadingPolicy = YES;
+    NSDictionary *settings = nil;
+    NSUserDefaults *defaults = nil;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    PXRuntimeReadSnapshot *view = nil;
+    NSValue *boxed = nil;
+#endif
+    @try {
+        PX_RUNTIME_READ_OPERATION;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+        view = PXCaptureRuntimeSnapshot();
+        boxed = objc_getAssociatedObject(view, &kPXRuntimeUAPolicy);
+        if (boxed) { [boxed getValue:&values size:sizeof(values)]; return values; }
+        settings = view.valid ? view.securitySettings : nil;
+        values = PXUABuildPolicy(settings, nil);
+        if (view) {
+            boxed = [NSValue valueWithBytes:&values objCType:@encode(PXUAPolicyValues)];
+            objc_setAssociatedObject(view, &kPXRuntimeUAPolicy, boxed, OBJC_ASSOCIATION_RETAIN);
+        }
+#else
+        double now = PXIOSVersionCacheTime();
+        os_unfair_lock_lock(&gUAPolicyLock);
+        uint64_t epoch = gUAPolicyEpoch, revision = gUAPolicyRevision;
+        BOOL hit = PXIOSVersionTimeIsFresh(now, gUAPolicyLoadedAt, gUAPolicyValid, 1.0);
+        if (hit) values = gUAPolicy;
+        os_unfair_lock_unlock(&gUAPolicyLock);
+        if (hit) return values;
+        settings = PXReadSecuritySettingsDict();
+        defaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
+        values = PXUABuildPolicy(settings, defaults);
+        os_unfair_lock_lock(&gUAPolicyLock);
+        if (epoch != gUAPolicyEpoch) {
+            values = PXUADefaultPolicy();
+        } else if (revision == gUAPolicyRevision) {
+            gUAPolicy = values; gUAPolicyLoadedAt = now;
+            gUAPolicyValid = isfinite(now); gUAPolicyRevision++;
+        } else {
+            values = gUAPolicy;
+        }
+        os_unfair_lock_unlock(&gUAPolicyLock);
+#endif
+        return values;
+    } @finally {
+        settings = nil; defaults = nil;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+        view = nil; boxed = nil;
+#endif
+        gUALoadingPolicy = NO;
     }
-    return nil;
 }
 
-static id PXSecuritySettingObject(NSString *key) {
-    NSDictionary *d = PXReadSecuritySettingsDict();
-    if ([d isKindOfClass:[NSDictionary class]] && d[key] != nil) {
-        return d[key];
-    }
-    NSUserDefaults *ud = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
-    return [ud objectForKey:key];
-}
+#pragma mark - End UA policy packet
 
-static BOOL PXSecuritySettingBoolDefault(NSString *key, BOOL def) {
-    id v = PXSecuritySettingObject(key);
-    return v ? [v boolValue] : def;
-}
-
-static void PXUADebugEnsure(void) {
-    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
-    if (gUADebugValid && (now - gUADebugLastRead) < 1.0) {
-        return;
-    }
-    gUADebugLastRead = now;
-
-    // Default: master OFF (no behavior change)
-    BOOL master = PXSecuritySettingBoolDefault(@"debugSafariUAMasterEnabled", NO);
-    gUADebug.masterEnabled = master;
-    gUADebug.traceEnabled = PXSecuritySettingBoolDefault(@"debugSafariUATraceEnabled", NO);
-
-    // Defaults when master ON: everything enabled
-    gUADebug.scopeSafari = PXSecuritySettingBoolDefault(@"debugSafariUAScope_applySafari", YES);
-    gUADebug.scopeSafariViewService = PXSecuritySettingBoolDefault(@"debugSafariUAScope_applySafariViewService", YES);
-    gUADebug.scopeWebKit = PXSecuritySettingBoolDefault(@"debugSafariUAScope_applyWebKit", YES);
-
-    gUADebug.hook_init = PXSecuritySettingBoolDefault(@"debugSafariUA_WKWebView_init", YES);
-    gUADebug.hook_setCustomUserAgent = PXSecuritySettingBoolDefault(@"debugSafariUA_WKWebView_setCustomUserAgent", YES);
-    gUADebug.hook_appNameUA = PXSecuritySettingBoolDefault(@"debugSafariUA_WKWebViewConfiguration_appNameUA", YES);
-    gUADebug.hook_requestHeaderUA = PXSecuritySettingBoolDefault(@"debugSafariUA_NSURLRequest_setHeaderUA", YES);
-    gUADebug.hook_sfUserAgentWithDomain = PXSecuritySettingBoolDefault(@"debugSafariUA_SFUserAgentController_userAgentWithDomain", YES);
-    gUADebug.hook_sfDefaultUA = PXSecuritySettingBoolDefault(@"debugSafariUA_SFUserAgentController_defaultUA", YES);
-
-    // Defaults: exemptions ON
-    gUADebug.sensitiveHostExemptionsEnabled = PXSecuritySettingBoolDefault(@"debugSafariUA_SensitiveHostExemptionsEnabled", YES);
-
-    gUADebugValid = YES;
-}
-
-static BOOL PXUADebugMasterEnabled(void) {
-    PXUADebugEnsure();
-    return gUADebug.masterEnabled;
-}
-
-static BOOL PXUADebugTraceEnabled(void) {
-    PXUADebugEnsure();
-    return gUADebug.traceEnabled;
-}
-
-// Whether to spoof the UA Mobile/<build> token. Default OFF.
-// On older iOS/WebKit builds, changing the Mobile build token can create an impossible UA
-// and break sensitive sites (e.g. Google login flows).
-static BOOL gUAMobileBuildCached = NO;
-static BOOL gUAMobileBuildValid = NO;
-static NSTimeInterval gUAMobileBuildLastRead = 0;
-
-static BOOL PXUAShouldSpoofMobileBuildToken(void) {
-    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
-    if (gUAMobileBuildValid && (now - gUAMobileBuildLastRead) < 1.0) {
-        return gUAMobileBuildCached;
-    }
-    gUAMobileBuildLastRead = now;
-    gUAMobileBuildCached = PXSecuritySettingBoolDefault(@"uaSpoofMobileBuildEnabled", NO);
-    gUAMobileBuildValid = YES;
-    return gUAMobileBuildCached;
-}
-
-static void PXUAMobileBuildTokenInvalidate(void) {
-    gUAMobileBuildValid = NO;
-}
+static BOOL PXUADebugMasterEnabled(void) { return PXUACurrentPolicy().debug.masterEnabled; }
+static BOOL PXUADebugTraceEnabled(void) { return PXUACurrentPolicy().debug.traceEnabled; }
+// Default OFF: older WebKit builds can reject impossible Mobile/<build> tokens.
+static BOOL PXUAShouldSpoofMobileBuildToken(void) { return PXUACurrentPolicy().mobileBuild; }
 
 static BOOL PXUADebugScopeAllows(NSString *bundleID, NSString *processName) {
-    PXUADebugEnsure();
-    if (!gUADebug.masterEnabled) return YES;
+    PXUADebugSettings debug = PXUACurrentPolicy().debug;
+    if (!debug.masterEnabled) return YES;
 
     BOOL isSafari = PXIsSafariBrowserBundleIdentifier(bundleID);
     BOOL isSafariViewService = [bundleID isEqualToString:@"com.apple.SafariViewService"] ||
@@ -564,9 +618,9 @@ static BOOL PXUADebugScopeAllows(NSString *bundleID, NSString *processName) {
     BOOL isWebKit = ([bundleID hasPrefix:@"com.apple.WebKit"] ||
                      ([processName isKindOfClass:[NSString class]] && [processName containsString:@"WebKit"]));
 
-    if (isSafari) return gUADebug.scopeSafari;
-    if (isSafariViewService) return gUADebug.scopeSafariViewService;
-    if (isWebKit) return gUADebug.scopeWebKit;
+    if (isSafari) return debug.scopeSafari;
+    if (isSafariViewService) return debug.scopeSafariViewService;
+    if (isWebKit) return debug.scopeWebKit;
     return YES;
 }
 
@@ -580,8 +634,8 @@ static BOOL PXUAHostIsSensitive(NSString *hostOrDomain) {
         return NO;
     }
 
-    PXUADebugEnsure();
-    if (gUADebug.masterEnabled && !gUADebug.sensitiveHostExemptionsEnabled) {
+    PXUADebugSettings debug = PXUACurrentPolicy().debug;
+    if (debug.masterEnabled && !debug.sensitiveHostExemptionsEnabled) {
         return NO;
     }
     return PXIsSensitiveAuthHost(hostOrDomain);
@@ -605,7 +659,7 @@ static void PXUADebugTrace(NSString *hookName,
         logQueue = dispatch_queue_create("com.hydra.tlinkios.uadebuglog", DISPATCH_QUEUE_SERIAL);
     });
 
-    BOOL fileLogEnabled = PXSecuritySettingBoolDefault(@"debugSafariUA_LogFileEnabled", YES);
+    BOOL fileLogEnabled = PXUACurrentPolicy().fileLog;
     NSString *logPath = @"/var/mobile/Documents/WeaponX_UADebug.log";
     NSString *h = host.length ? host : @"(nil)";
     NSString *b = bundleID.length ? bundleID : @"(nil)";
@@ -659,131 +713,113 @@ static void PXUADebugTrace(NSString *hookName,
     }
 }
 
-// ---- UA Sync Test: keep HTTP header UA and JS UA aligned ----
-// Enable via com.weaponx.securitySettings.plist key: uaSyncHeaderAndJS (default NO)
-static BOOL gUASyncEnabledCached = NO;
-static BOOL gUASyncEnabledValid = NO;
-static NSTimeInterval gUASyncEnabledLastRead = 0;
+// ---- UA Sync: weak registry and all WebKit access are main-thread owned ----
+#pragma mark - UA sync pipeline
 
-static BOOL PXUASyncHeaderAndJSEnabled(void) {
-    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
-    if (gUASyncEnabledValid && (now - gUASyncEnabledLastRead) < 1.0) {
-        return gUASyncEnabledCached;
-    }
-    gUASyncEnabledLastRead = now;
-    // uaSyncHeaderAndJS: sync both layers when UA is modified
-    // uaSyncJSOnlyFromRequests: allow syncing JS UA even if header UA modification is disabled via debug toggle
-    BOOL syncBoth = PXSecuritySettingBoolDefault(@"uaSyncHeaderAndJS", NO);
-    BOOL syncJSOnly = PXSecuritySettingBoolDefault(@"uaSyncJSOnlyFromRequests", NO);
-    gUASyncEnabledCached = (syncBoth || syncJSOnly);
-    gUASyncEnabledValid = YES;
-    return gUASyncEnabledCached;
-}
-
-static void PXUASyncInvalidate(void) {
-    gUASyncEnabledValid = NO;
-}
-
-static dispatch_queue_t gWKWebViewsQueue;
-static NSPointerArray *gWKWebViews; // weak
-static NSMutableDictionary<NSString *, NSString *> *gUAByHost;
-static NSString *gUASyncLastUA;
-static __thread BOOL gUASyncApplying = NO;
-
-static void PXUASyncInitIfNeeded(void) {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        gWKWebViewsQueue = dispatch_queue_create("com.hydra.tlinkios.wkwebviews", DISPATCH_QUEUE_SERIAL);
-        gWKWebViews = [NSPointerArray weakObjectsPointerArray];
-        gUAByHost = [NSMutableDictionary dictionary];
-    });
-}
+static BOOL PXUASyncHeaderAndJSEnabled(void) { return PXUACurrentPolicy().syncEnabled; }
+static NSHashTable<WKWebView *> *gWKWebViews;
+static __thread BOOL gUASyncApplying;
 
 static void PXUASyncRegisterWKWebView(WKWebView *webView) {
-    if (!webView) return;
-    PXUASyncInitIfNeeded();
-    dispatch_async(gWKWebViewsQueue, ^{
-        [gWKWebViews addPointer:(__bridge void *)webView];
-        [gWKWebViews compact];
-    });
-}
-
-static void PXUASyncUnregisterWKWebView(WKWebView *webView) {
-    if (!webView) return;
-    PXUASyncInitIfNeeded();
-    dispatch_async(gWKWebViewsQueue, ^{
-        for (NSUInteger i = 0; i < gWKWebViews.count; i++) {
-            id obj = [gWKWebViews pointerAtIndex:i] ? (__bridge id)[gWKWebViews pointerAtIndex:i] : nil;
-            if (obj == webView) {
-                [gWKWebViews removePointerAtIndex:i];
-                break;
-            }
-        }
-        [gWKWebViews compact];
-    });
-}
-
-static void PXUASyncRememberHostUA(NSString *host, NSString *ua) {
-    if (!host.length || !ua.length) return;
-    PXUASyncInitIfNeeded();
-    dispatch_async(gWKWebViewsQueue, ^{
-        gUAByHost[host.lowercaseString] = ua;
-        gUASyncLastUA = ua;
-    });
-}
-
-static NSString *PXUASyncLookupHostUA(NSString *host) {
-    if (!host.length) return nil;
-    PXUASyncInitIfNeeded();
-    __block NSString *ua = nil;
-    dispatch_sync(gWKWebViewsQueue, ^{
-        ua = gUAByHost[host.lowercaseString];
-    });
-    return ua;
-}
-
-static void PXUASyncApplyToWebViewsForHost(NSString *host, NSString *ua) {
-    if (!host.length || !ua.length) return;
-    PXUASyncInitIfNeeded();
-    dispatch_async(gWKWebViewsQueue, ^{
-        [gWKWebViews compact];
-
-        BOOL applyAll = PXSecuritySettingBoolDefault(@"uaSyncApplyAllWebViews", YES);
-        BOOL injectJS = PXSecuritySettingBoolDefault(@"uaSyncInjectJS", YES);
-
-        for (NSUInteger i = 0; i < gWKWebViews.count; i++) {
-            WKWebView *wv = [gWKWebViews pointerAtIndex:i] ? (__bridge WKWebView *)[gWKWebViews pointerAtIndex:i] : nil;
-            if (!wv) continue;
-            NSString *h = wv.URL.host;
-
-            if (!applyAll) {
-                if (!h.length) continue;
-                if (![h.lowercaseString isEqualToString:host.lowercaseString]) continue;
-            }
-
-            // WKWebView APIs must be called on main thread.
-            dispatch_async(dispatch_get_main_queue(), ^{
-                gUASyncApplying = YES;
+    __weak WKWebView *weakView = webView;
+    dispatch_block_t operation = nil;
+    @try {
+        if (!webView) return;
+        {
+            operation = ^{
+                WKWebView *owner = nil;
                 @try {
-                    if ([wv respondsToSelector:@selector(setCustomUserAgent:)]) {
-                        [wv setCustomUserAgent:ua];
-                    }
-
-                    if (injectJS && [wv respondsToSelector:@selector(evaluateJavaScript:completionHandler:)]) {
-                        NSString *escaped = [[ua stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"]
-                                             stringByReplacingOccurrencesOfString:@"'" withString:@"\\'"];
-                        NSString *js = [NSString stringWithFormat:
-                                        @"(function(){try{Object.defineProperty(navigator,'userAgent',{get:function(){return '%@';},configurable:true});}catch(e){}})();",
-                                        escaped];
-                        [wv evaluateJavaScript:js completionHandler:nil];
-                    }
-                } @catch (__unused NSException *e) {
-                }
-                gUASyncApplying = NO;
-            });
+                    owner = weakView;
+                    if (!owner) return;
+                    if (!gWKWebViews) gWKWebViews = [[NSHashTable alloc]
+                        initWithOptions:NSPointerFunctionsWeakMemory | NSPointerFunctionsObjectPointerPersonality capacity:0];
+                    [gWKWebViews addObject:owner];
+                } @catch (__unused NSException *exception) {
+                } @finally { owner = nil; }
+            };
         }
-    });
+        if ([NSThread isMainThread]) operation();
+        else dispatch_async(dispatch_get_main_queue(), operation);
+    } @finally { webView = nil; operation = nil; }
 }
+
+static NSString *PXUASyncScript(NSString *ua) {
+    NSArray *packet = nil;
+    NSData *data = nil;
+    NSString *arrayJSON = nil, *literal = nil, *script = nil;
+    @try {
+        packet = @[ua];
+        data = [NSJSONSerialization dataWithJSONObject:packet options:0 error:nil];
+        if (!data) return nil;
+        arrayJSON = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        if (arrayJSON.length < 2) return nil;
+        literal = [arrayJSON substringWithRange:NSMakeRange(1, arrayJSON.length - 2)];
+        literal = [literal stringByReplacingOccurrencesOfString:@"\u2028" withString:@"\\u2028"];
+        literal = [literal stringByReplacingOccurrencesOfString:@"\u2029" withString:@"\\u2029"];
+        script = [NSString stringWithFormat:
+            @"(function(){try{var value=%@;Object.defineProperty(navigator,'userAgent',{get:function(){return value;},configurable:true});}catch(e){}})();", literal];
+        return script;
+    } @finally { ua = nil; packet = nil; data = nil; arrayJSON = nil; literal = nil; script = nil; }
+}
+
+static BOOL PXUASyncViewMatches(WKWebView *view, NSString *host, BOOL applyAll) {
+    NSURL *url = nil;
+    NSString *viewHost = nil, *canonicalHost = nil;
+    @try {
+        if (applyAll) return YES;
+        url = view.URL; viewHost = url.host; canonicalHost = viewHost.lowercaseString;
+        return canonicalHost.length && [canonicalHost isEqualToString:host];
+    } @finally { view = nil; host = nil; url = nil; viewHost = nil; canonicalHost = nil; }
+}
+
+static void PXUASyncApplyToView(WKWebView *view, NSString *host, NSString *ua, PXUAPolicyValues policy, uint64_t epoch) {
+    NSString *script = nil;
+    BOOL previous = gUASyncApplying;
+    @try {
+        if (![NSThread isMainThread] || epoch != PXUASyncEpoch()) return;
+        if (!PXUASyncViewMatches(view, host, policy.applyAll)) return;
+        gUASyncApplying = YES;
+        if ([view respondsToSelector:@selector(setCustomUserAgent:)]) [view setCustomUserAgent:ua];
+        // A setter may synchronously navigate or deliver a settings notification.
+        if (epoch != PXUASyncEpoch() || !PXUASyncViewMatches(view, host, policy.applyAll)) return;
+        if (policy.injectJS && [view respondsToSelector:@selector(evaluateJavaScript:completionHandler:)]) {
+            script = PXUASyncScript(ua);
+            if (script && epoch == PXUASyncEpoch()) [view evaluateJavaScript:script completionHandler:nil];
+        }
+    } @finally { gUASyncApplying = previous; view = nil; host = nil; ua = nil; script = nil; }
+}
+
+static void PXUASyncApplyToWebViewsForHost(NSString *host, NSString *ua, uint64_t epoch) {
+    NSString *lowerHost = nil, *frozenHost = nil, *frozenUA = nil;
+    dispatch_block_t operation = nil;
+    @try {
+        if (!host.length || !ua.length) return;
+        lowerHost = host.lowercaseString; frozenHost = [lowerHost copy]; frozenUA = [ua copy];
+        {
+            operation = ^{
+                NSArray<WKWebView *> *targets = nil;
+                @try {
+                    PX_RUNTIME_READ_OPERATION;
+                    if (epoch != PXUASyncEpoch()) return;
+                    PXUAPolicyValues policy = PXUACurrentPolicy();
+                    if (!policy.syncEnabled || epoch != PXUASyncEpoch()) return;
+                    targets = gWKWebViews.allObjects;
+                    for (WKWebView *view in targets) {
+                        if (epoch != PXUASyncEpoch()) break;
+                        @try { PXUASyncApplyToView(view, frozenHost, frozenUA, policy, epoch); }
+                        @catch (__unused NSException *exception) { }
+                    }
+                } @catch (__unused NSException *exception) {
+                    // Optional sync must not turn a policy/provider failure into a main-queue crash.
+                } @finally { targets = nil; }
+            };
+        }
+        // Preserve asynchronous application even for a request made on main.
+        dispatch_async(dispatch_get_main_queue(), operation);
+    } @finally { host = nil; ua = nil; lowerHost = nil; frozenHost = nil; frozenUA = nil; operation = nil; }
+}
+
+#pragma mark - End UA sync pipeline
 
 // Compatibility wrapper: every UA surface delegates to the central normalizer.
 static void modifyUserAgentString(NSString **userAgentString, NSString *originalVersion, NSString *spoofedVersion) {
@@ -899,6 +935,7 @@ static NSString *PXUAModifiedUserAgent(NSString *baseUserAgent, WKWebViewConfigu
 
 static void PXUASetExactCustomUserAgent(WKWebView *webView, NSString *userAgent, BOOL owned) {
     if (!webView) return;
+    BOOL previous = gUACanonicalApplying;
     gUACanonicalApplying = YES;
     @try {
         [webView setCustomUserAgent:userAgent];
@@ -907,7 +944,7 @@ static void PXUASetExactCustomUserAgent(WKWebView *webView, NSString *userAgent,
                                  @(owned),
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     } @finally {
-        gUACanonicalApplying = NO;
+        gUACanonicalApplying = previous;
     }
 }
 
@@ -924,7 +961,7 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
         PXUADebugTrace(hookName, bundleID, processName, host, @"skip", @"reason=scope", nil, nil);
         return;
     }
-    if (PXUADebugMasterEnabled() && !gUADebug.hook_init) {
+    if (PXUADebugMasterEnabled() && !PXUACurrentPolicy().debug.hook_init) {
         PXUADebugTrace(hookName, bundleID, processName, host, @"skip", @"reason=toggle", nil, nil);
         return;
     }
@@ -1102,9 +1139,8 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
                              @NO,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
-    if (PXUASyncHeaderAndJSEnabled()) {
-        PXUASyncRegisterWKWebView(webView);
-    }
+    // Track weakly while disabled too, so a later enable reaches existing views.
+    PXUASyncRegisterWKWebView(webView);
 
     PXUAEnsureCanonicalUserAgent(webView, configuration, nil, @"WKWebView.init");
     return webView;
@@ -1162,7 +1198,7 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
             %orig(customUserAgent);
             return;
         }
-        if (PXUADebugMasterEnabled() && !gUADebug.hook_setCustomUserAgent) {
+        if (PXUADebugMasterEnabled() && !PXUACurrentPolicy().debug.hook_setCustomUserAgent) {
             PXUADebugTrace(@"WKWebView.setCustomUserAgent", bundleID, processName, host, @"skip", @"reason=toggle", customUserAgent, nil);
             %orig(customUserAgent);
             return;
@@ -1204,7 +1240,7 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
             %orig;
             return;
         }
-        if (PXUADebugMasterEnabled() && !gUADebug.hook_appNameUA) {
+        if (PXUADebugMasterEnabled() && !PXUACurrentPolicy().debug.hook_appNameUA) {
             PXUADebugTrace(@"WKWebViewConfiguration.setApplicationNameForUserAgent", bundleID, proc, nil, @"skip", @"reason=toggle", applicationNameForUserAgent, nil);
             %orig;
             return;
@@ -1267,6 +1303,7 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
             }
         }
         if ([field isEqualToString:@"User-Agent"] && value) {
+            uint64_t syncEpoch = PXUASyncEpoch();
             NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
             NSString *proc = [NSProcessInfo processInfo].processName;
             if (PXUADebugMasterEnabled() && !PXUADebugScopeAllows(bundleID, proc)) {
@@ -1274,7 +1311,7 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
                 %orig;
                 return;
             }
-            BOOL headerModifyEnabled = !(PXUADebugMasterEnabled() && !gUADebug.hook_requestHeaderUA);
+            BOOL headerModifyEnabled = !(PXUADebugMasterEnabled() && !PXUACurrentPolicy().debug.hook_requestHeaderUA);
             BOOL syncEnabled = PXUASyncHeaderAndJSEnabled();
             if (!headerModifyEnabled && !syncEnabled) {
                 PXUADebugTrace(@"NSMutableURLRequest.setValue(User-Agent)", bundleID, proc, self.URL.host, @"skip", @"reason=toggle", value, nil);
@@ -1299,8 +1336,7 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
                         // If syncing is enabled, always push the UA into JS layer (customUserAgent + optional JS patch)
                         // even when header UA modification is disabled (for mismatch testing).
                         if (syncEnabled && host.length) {
-                            PXUASyncRememberHostUA(host, modifiedValue);
-                            PXUASyncApplyToWebViewsForHost(host, modifiedValue);
+                            PXUASyncApplyToWebViewsForHost(host, modifiedValue, syncEpoch);
                             PXUADebugTrace(@"UASync.remember", bundleID, proc, host, @"modify", headerModifyEnabled ? @"" : @"reason=jsOnly", value, modifiedValue);
                         }
 
@@ -1343,7 +1379,7 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
             PXUADebugTrace(@"SFUserAgentController.userAgentWithDomain", bundleID, proc, domain, @"skip", @"reason=scope", originalUA, nil);
             return originalUA;
         }
-        if (PXUADebugMasterEnabled() && !gUADebug.hook_sfUserAgentWithDomain) {
+        if (PXUADebugMasterEnabled() && !PXUACurrentPolicy().debug.hook_sfUserAgentWithDomain) {
             PXUADebugTrace(@"SFUserAgentController.userAgentWithDomain", bundleID, proc, domain, @"skip", @"reason=toggle", originalUA, nil);
             return originalUA;
         }
@@ -1384,7 +1420,7 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
             PXUADebugTrace(@"SFUserAgentController.defaultUserAgentString", bundleID, proc, nil, @"skip", @"reason=scope", originalUA, nil);
             return originalUA;
         }
-        if (PXUADebugMasterEnabled() && !gUADebug.hook_sfDefaultUA) {
+        if (PXUADebugMasterEnabled() && !PXUACurrentPolicy().debug.hook_sfDefaultUA) {
             PXUADebugTrace(@"SFUserAgentController.defaultUserAgentString", bundleID, proc, nil, @"skip", @"reason=toggle", originalUA, nil);
             return originalUA;
         }
@@ -1813,25 +1849,9 @@ static void settingsChanged(CFNotificationCenterRef center, void *observer, CFSt
     PXInvalidateScopeDecisionCache();
     PXIOSVersionInvalidateCache();
 
-    // Clear UA debug cache (runtime toggles)
-    PXUADebugInvalidate();
-
-    // Clear UA Mobile/<build> toggle cache
-    PXUAMobileBuildTokenInvalidate();
-
-    // Clear UA sync toggle cache
-    PXUASyncInvalidate();
-
-    // Clear app version spoof cache
+    // Revoke queued UA jobs as well as scalar policy cache publication.
+    PXUAPolicyInvalidate();
     PXAppVersionHooksInvalidateCache();
-
-    // Clear sync mapping (avoid stale UA across tests)
-    PXUASyncInitIfNeeded();
-    dispatch_async(gWKWebViewsQueue, ^{
-        [gUAByHost removeAllObjects];
-        gUASyncLastUA = nil;
-        [gWKWebViews compact];
-    });
 }
 
 // Safe check if a bundle ID is a critical system process
