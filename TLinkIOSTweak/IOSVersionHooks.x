@@ -22,6 +22,9 @@
 #import "IdentifierManager.h"
 #import "PXFileDebug.h"
 #import <os/lock.h>
+#import <time.h>
+#import <math.h>
+#import <stdint.h>
 
 #import "AppVersionHooks.h"
 
@@ -60,54 +63,133 @@ static NSData* (*original_NSData_dataWithContentsOfFile)(Class self, SEL _cmd, N
 static NSDictionary* (*original_NSDictionary_dictionaryWithContentsOfFile)(Class self, SEL _cmd, NSString *path);
 static id (*original_NSString_stringWithContentsOfFile)(Class self, SEL _cmd, NSString *path, NSStringEncoding enc, NSError **error);
 
-// Version cache: immutable dictionary and timestamp are one lock-owned unit.
-static const NSTimeInterval kIOSVersionCacheValidPeriod = 1800.0; // 30 minutes
-static os_unfair_lock gIOSVersionCacheLock = OS_UNFAIR_LOCK_INIT;
-static NSDictionary *versionCache = nil;
-static NSTimeInterval lastVersionLoad = 0;
-static char kPXRuntimeIOSInfo;
+#pragma mark - Reporting cache state
 
-static NSDictionary *PXIOSVersionCachedInfo(NSTimeInterval now) {
-    PX_RUNTIME_READ_OPERATION;
-#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    return objc_getAssociatedObject(PXCaptureRuntimeSnapshot(), &kPXRuntimeIOSInfo);
-#else
-    os_unfair_lock_lock(&gIOSVersionCacheLock);
-    NSDictionary *cached = (versionCache && (now - lastVersionLoad < kIOSVersionCacheValidPeriod))
-        ? versionCache
-        : nil;
-    os_unfair_lock_unlock(&gIOSVersionCacheLock);
-    return cached;
-#endif
+static const NSTimeInterval kIOSVersionCacheValidPeriod = 1800.0;
+static const NSTimeInterval kIOSSystemVersionCacheValidPeriod = 0.1;
+static os_unfair_lock gIOSVersionCacheLock = OS_UNFAIR_LOCK_INIT;
+static NSDictionary *versionCache;
+static PXIdentitySnapshot *gIOSVersionIdentity;
+static NSString *gIOSSystemResult, *gIOSSystemBundle;
+static NSDictionary *gIOSSystemInfo;
+static double lastVersionLoad, gIOSSystemLoadedAt;
+static BOOL gIOSInfoHasTime, gIOSSystemHasTime;
+static uint64_t gIOSInfoRevision, gIOSSystemRevision;
+static char kPXRuntimeIOSInfo;
+static __thread BOOL gPXInsideIOSReportingHook;
+static __thread BOOL gPXInsideIOSVersionInfo;
+
+static double PXIOSVersionCacheTime(void) {
+    struct timespec instant;
+    if (clock_gettime(CLOCK_MONOTONIC, &instant) != 0) return NAN;
+    return (double)instant.tv_sec + (double)instant.tv_nsec / 1000000000.0;
 }
 
-static NSDictionary *PXIOSVersionPublishInfo(NSDictionary *info, NSTimeInterval loadedAt) {
-    PX_RUNTIME_READ_OPERATION;
-    NSDictionary *immutableInfo = [info isKindOfClass:[NSDictionary class]] ? [info copy] : nil;
-#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    PXRuntimeReadSnapshot *view = PXCaptureRuntimeSnapshot();
-    if (view) objc_setAssociatedObject(view, &kPXRuntimeIOSInfo, immutableInfo, OBJC_ASSOCIATION_RETAIN);
-    return immutableInfo;
-#else
+static BOOL PXIOSVersionTimeIsFresh(double now, double loadedAt, BOOL valid, double ttl) {
+    return valid && isfinite(now) && isfinite(loadedAt) && now >= loadedAt && now - loadedAt < ttl;
+}
+
+static uint64_t PXIOSVersionInfoEpoch(void) {
     os_unfair_lock_lock(&gIOSVersionCacheLock);
-    versionCache = immutableInfo;
-    lastVersionLoad = immutableInfo ? loadedAt : 0;
-    NSDictionary *published = versionCache;
+    uint64_t revision = gIOSInfoRevision;
     os_unfair_lock_unlock(&gIOSVersionCacheLock);
-    return published;
-#endif
+    return revision;
+}
+
+static uint64_t PXIOSVersionSystemEpoch(void) {
+    os_unfair_lock_lock(&gIOSVersionCacheLock);
+    uint64_t revision = gIOSSystemRevision;
+    os_unfair_lock_unlock(&gIOSVersionCacheLock);
+    return revision;
+}
+
+static NSDictionary *PXIOSVersionCachedInfo(PXIdentitySnapshot *identity, double now, uint64_t *revision) {
+    NSDictionary *result = nil;
+    os_unfair_lock_lock(&gIOSVersionCacheLock);
+    if (revision) *revision = gIOSInfoRevision;
+    if (identity && gIOSVersionIdentity == identity &&
+        PXIOSVersionTimeIsFresh(now, lastVersionLoad, gIOSInfoHasTime, kIOSVersionCacheValidPeriod)) result = versionCache;
+    os_unfair_lock_unlock(&gIOSVersionCacheLock);
+    return result;
+}
+
+static BOOL PXIOSVersionPublishInfo(NSDictionary *info, PXIdentitySnapshot *identity, double now, uint64_t revision) {
+    __attribute__((objc_precise_lifetime)) NSDictionary *oldInfo = nil;
+    __attribute__((objc_precise_lifetime)) PXIdentitySnapshot *oldIdentity = nil;
+    BOOL published = NO;
+    @try {
+        os_unfair_lock_lock(&gIOSVersionCacheLock);
+        if (identity && gIOSInfoRevision == revision) {
+            oldInfo = versionCache; oldIdentity = gIOSVersionIdentity;
+            versionCache = info; gIOSVersionIdentity = identity;
+            lastVersionLoad = now; gIOSInfoHasTime = isfinite(now);
+            gIOSInfoRevision++; published = YES;
+        }
+        os_unfair_lock_unlock(&gIOSVersionCacheLock);
+        return published;
+    } @finally { oldInfo = nil; oldIdentity = nil; info = nil; identity = nil; }
+}
+
+static NSString *PXIOSSystemCachedResult(NSDictionary *info, NSString *bundle, double now, uint64_t revision) {
+    NSString *result = nil, *storedBundle = nil;
+    NSDictionary *storedInfo = nil;
+    BOOL fresh = NO;
+    @try {
+        os_unfair_lock_lock(&gIOSVersionCacheLock);
+        result = gIOSSystemResult; storedBundle = gIOSSystemBundle; storedInfo = gIOSSystemInfo;
+        fresh = gIOSSystemRevision == revision &&
+            PXIOSVersionTimeIsFresh(now, gIOSSystemLoadedAt, gIOSSystemHasTime, kIOSSystemVersionCacheValidPeriod);
+        os_unfair_lock_unlock(&gIOSVersionCacheLock);
+        // String equality can execute foreign code; evaluate it after unlock.
+        return fresh && info && storedInfo == info && [storedBundle isEqualToString:bundle] ? result : nil;
+    } @finally { result = nil; storedBundle = nil; storedInfo = nil; info = nil; bundle = nil; }
+}
+
+static BOOL PXIOSSystemPublishResult(NSString *value, NSDictionary *info, NSString *bundle, double now, uint64_t revision) {
+    NSString *frozenValue = nil, *frozenBundle = nil;
+    __attribute__((objc_precise_lifetime)) NSString *oldValue = nil;
+    __attribute__((objc_precise_lifetime)) NSString *oldBundle = nil;
+    __attribute__((objc_precise_lifetime)) NSDictionary *oldInfo = nil;
+    BOOL published = NO;
+    @try {
+        frozenValue = [value copy]; frozenBundle = [bundle copy];
+        if (!frozenValue.length || !info || !frozenBundle.length) return NO;
+        os_unfair_lock_lock(&gIOSVersionCacheLock);
+        if (gIOSSystemRevision == revision) {
+            oldValue = gIOSSystemResult; oldInfo = gIOSSystemInfo; oldBundle = gIOSSystemBundle;
+            gIOSSystemResult = frozenValue; gIOSSystemInfo = info; gIOSSystemBundle = frozenBundle;
+            gIOSSystemLoadedAt = now; gIOSSystemHasTime = isfinite(now);
+            gIOSSystemRevision++; published = YES;
+        }
+        os_unfair_lock_unlock(&gIOSVersionCacheLock);
+        return published;
+    } @finally {
+        frozenValue = nil; frozenBundle = nil; oldValue = nil; oldBundle = nil; oldInfo = nil;
+        value = nil; info = nil; bundle = nil;
+    }
 }
 
 static void PXIOSVersionInvalidateCache(void) {
-    os_unfair_lock_lock(&gIOSVersionCacheLock);
-    versionCache = nil;
-    lastVersionLoad = 0;
-    os_unfair_lock_unlock(&gIOSVersionCacheLock);
+    __attribute__((objc_precise_lifetime)) NSDictionary *oldInfo = nil;
+    __attribute__((objc_precise_lifetime)) PXIdentitySnapshot *oldIdentity = nil;
+    __attribute__((objc_precise_lifetime)) NSString *oldResult = nil;
+    __attribute__((objc_precise_lifetime)) NSString *oldBundle = nil;
+    __attribute__((objc_precise_lifetime)) NSDictionary *oldSystemInfo = nil;
+    @try {
+        os_unfair_lock_lock(&gIOSVersionCacheLock);
+        oldInfo = versionCache; oldIdentity = gIOSVersionIdentity;
+        oldResult = gIOSSystemResult; oldBundle = gIOSSystemBundle; oldSystemInfo = gIOSSystemInfo;
+        versionCache = nil; gIOSVersionIdentity = nil;
+        gIOSSystemResult = nil; gIOSSystemBundle = nil; gIOSSystemInfo = nil;
+        gIOSInfoHasTime = NO; gIOSSystemHasTime = NO;
+        gIOSInfoRevision++; gIOSSystemRevision++;
+        os_unfair_lock_unlock(&gIOSVersionCacheLock);
+    } @finally {
+        oldInfo = nil; oldIdentity = nil; oldResult = nil; oldBundle = nil; oldSystemInfo = nil;
+    }
 }
 
-// Throttling variables to prevent excessive function calls
-static uint64_t lastSystemVersionCallTime = 0;
-static NSString *cachedSystemVersionResult = nil;
+#pragma mark - End reporting cache state
 
 // NSBundle identity used by Info.plist hooks. Capture this before %init so hook
 // bodies never need to call -bundleIdentifier and re-enter -infoDictionary.
@@ -219,63 +301,102 @@ static BOOL shouldSpoofForBundle(NSString *bundleID) {
     }
 }
 
-// Get the current iOS version information from the profile
+// Typed, immutable fields retain the original five-field completeness contract.
+// Preserve optional fallback metadata while isolating mutable required strings.
+static NSDictionary *PXIOSVersionFreezeInfo(id raw) {
+    NSMutableDictionary *packet = nil;
+    NSString *field = nil, *frozen = nil;
+    @try {
+        if (![raw isKindOfClass:NSDictionary.class]) return nil;
+        packet = [raw mutableCopy];
+        for (NSString *key in @[@"version", @"build", @"darwin", @"xnu", @"kernel_version"]) {
+            field = packet[key];
+            if (![field isKindOfClass:NSString.class] || !field.length) return nil;
+            frozen = [field copy]; packet[key] = frozen;
+        }
+        return [packet copy];
+    } @finally { packet = nil; field = nil; frozen = nil; raw = nil; }
+}
+
+// Scope/toggle must be checked BEFORE any systemVersion throttle hit. This is the
+// same admission policy as shouldSpoofForBundle, without per-query success logs.
+static BOOL PXIOSVersionReportingAllowedForBundle(NSString *bundleID) {
+    IdentifierManager *manager = nil;
+    NSString *process = nil;
+    @try {
+        if (!bundleID.length) return NO;
+        process = [NSProcessInfo processInfo].processName;
+        if (!PXProcessIsAllowedForSpoofing(bundleID, process, PXScopeOptionAllowSafariAuthStack)) return NO;
+        manager = [IdentifierManager sharedManager];
+        return manager && [manager isIdentifierEnabled:@"IOSVersion"];
+    } @finally { manager = nil; process = nil; bundleID = nil; }
+}
+
+// RootHide memoizes only on its captured view. Rootful ties its 30-minute cache
+// to the retained identity object and revokes in-flight writes on notification.
 static NSDictionary *getIOSVersionInfo() {
     PX_RUNTIME_READ_OPERATION;
-    static dispatch_once_t sourceLogOnce;
-    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
-    NSDictionary *cached = PXIOSVersionCachedInfo(now);
-    if (cached) return cached;
-
-    PXIdentitySnapshot *identitySnapshot = PXCurrentIdentitySnapshot();
-    NSDictionary *deviceIds = identitySnapshot.valid ? identitySnapshot.deviceIDs : nil;
-    NSString *formattedVersion = [deviceIds[@"IOSVersion"] isKindOfClass:[NSString class]]
-        ? deviceIds[@"IOSVersion"]
-        : nil;
-
-    if (deviceIds.count > 0) {
-        NSString *version = nil;
-        NSString *build = [deviceIds[@"IOSBuild"] isKindOfClass:[NSString class]] ? deviceIds[@"IOSBuild"] : nil;
-        if ([formattedVersion containsString:@"("]) {
-            NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"([0-9.]+)\\s*\\(([^)]+)\\)" options:0 error:nil];
-            NSTextCheckingResult *match = [regex firstMatchInString:formattedVersion options:0 range:NSMakeRange(0, formattedVersion.length)];
-            if (match && match.numberOfRanges == 3) {
-                version = [formattedVersion substringWithRange:[match rangeAtIndex:1]];
-                if (!build.length) build = [formattedVersion substringWithRange:[match rangeAtIndex:2]];
+    if (gPXInsideIOSVersionInfo) return nil;
+    gPXInsideIOSVersionInfo = YES;
+    PXIdentitySnapshot *identity = nil, *currentIdentity = nil;
+    NSDictionary *deviceIds = nil, *raw = nil, *result = nil;
+    NSString *formatted = nil, *version = nil, *build = nil, *darwin = nil, *xnu = nil, *kernel = nil;
+    NSTextCheckingResult *match = nil;
+    NSRegularExpression *regex = nil;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    PXRuntimeReadSnapshot *view = PXCaptureRuntimeSnapshot();
+#else
+    double now = PXIOSVersionCacheTime();
+    uint64_t revision = PXIOSVersionInfoEpoch();
+#endif
+    @try {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+        result = objc_getAssociatedObject(view, &kPXRuntimeIOSInfo);
+        if (result) return result;
+#endif
+        identity = PXCurrentIdentitySnapshot();
+#if !defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+        result = PXIOSVersionCachedInfo(identity, now, NULL);
+        if (result) return result;
+#endif
+        deviceIds = identity.valid ? identity.deviceIDs : nil;
+        formatted = [deviceIds[@"IOSVersion"] isKindOfClass:NSString.class] ? deviceIds[@"IOSVersion"] : nil;
+        build = [deviceIds[@"IOSBuild"] isKindOfClass:NSString.class] ? deviceIds[@"IOSBuild"] : nil;
+        if ([formatted containsString:@"("]) {
+            regex = [NSRegularExpression regularExpressionWithPattern:@"([0-9.]+)\\s*\\(([^)]+)\\)" options:0 error:nil];
+            match = [regex firstMatchInString:formatted options:0 range:NSMakeRange(0, formatted.length)];
+            if (match.numberOfRanges == 3) {
+                version = [formatted substringWithRange:[match rangeAtIndex:1]];
+                if (!build.length) build = [formatted substringWithRange:[match rangeAtIndex:2]];
             }
         }
-        if (!version.length && formattedVersion.length) version = formattedVersion;
-
-        NSString *darwin = [deviceIds[@"Darwin"] isKindOfClass:[NSString class]] ? deviceIds[@"Darwin"] : nil;
-        NSString *xnu = [deviceIds[@"XNU"] isKindOfClass:[NSString class]] ? deviceIds[@"XNU"] : nil;
-        NSString *kernel = [deviceIds[@"KernelVersion"] isKindOfClass:[NSString class]] ? deviceIds[@"KernelVersion"] : nil;
+        if (!version.length && formatted.length) version = formatted;
+        darwin = [deviceIds[@"Darwin"] isKindOfClass:NSString.class] ? deviceIds[@"Darwin"] : nil;
+        xnu = [deviceIds[@"XNU"] isKindOfClass:NSString.class] ? deviceIds[@"XNU"] : nil;
+        kernel = [deviceIds[@"KernelVersion"] isKindOfClass:NSString.class] ? deviceIds[@"KernelVersion"] : nil;
         if (version.length && build.length && darwin.length && xnu.length && kernel.length) {
-            NSDictionary *published = PXIOSVersionPublishInfo(@{
-                @"version": version,
-                @"build": build,
-                @"darwin": darwin,
-                @"xnu": xnu,
-                @"kernel_version": kernel
-            }, now);
-            dispatch_once(&sourceLogOnce, ^{
-                IOSVERSION_LOG(@"Using iOS version from device_ids: %@ (%@)", version, build);
-            });
-            return published;
+            raw = @{ @"version": version, @"build": build, @"darwin": darwin, @"xnu": xnu, @"kernel_version": kernel };
         }
 #if !defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-        IOSVERSION_LOG(@"device_ids.plist missing required iOS fields (version/build/darwin/xnu/kernel)");
+        if (!raw) raw = [[IOSVersionInfo sharedManager] currentIOSVersionInfo];
 #endif
-    }
-
+        result = PXIOSVersionFreezeInfo(raw);
+        if (!result) return nil;
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    return nil;
+        if (view) objc_setAssociatedObject(view, &kPXRuntimeIOSInfo, result, OBJC_ASSOCIATION_RETAIN);
 #else
-    NSDictionary *current = [[IOSVersionInfo sharedManager] currentIOSVersionInfo];
-    if (current[@"version"] && current[@"build"] && current[@"darwin"] && current[@"xnu"] && current[@"kernel_version"]) {
-        return PXIOSVersionPublishInfo(current, now);
-    }
-    return nil;
+        currentIdentity = PXCurrentIdentitySnapshot();
+        if (currentIdentity == identity) PXIOSVersionPublishInfo(result, identity, now, revision);
 #endif
+        return result;
+    } @finally {
+        identity = nil; currentIdentity = nil; deviceIds = nil; raw = nil; result = nil;
+        formatted = nil; version = nil; build = nil; darwin = nil; xnu = nil; kernel = nil; match = nil; regex = nil;
+        gPXInsideIOSVersionInfo = NO;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+        view = nil;
+#endif
+    }
 }
 
 // Extract just the version number from the full version info
@@ -852,57 +973,45 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
 // Hook the systemVersion method to return our spoofed version
 - (NSString *)systemVersion {
     PX_RUNTIME_READ_OPERATION;
-#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    NSString *originalVersion = %orig;
-    NSString *bundleID = NSBundle.mainBundle.bundleIdentifier;
-    if (shouldSpoofForBundle(bundleID)) {
-        NSDictionary *versionInfo = getIOSVersionInfo();
-        NSString *reported = nil;
-        if (PXReportingIOSVersionBuildForBundle(versionInfo[@"version"], versionInfo[@"build"], bundleID, &reported, NULL)) return reported;
-    }
-    return originalVersion;
-#else
-    @try {
-        // Rate limiting - don't call this function too frequently
-        uint64_t currentTime = mach_absolute_time();
-        if (cachedSystemVersionResult != nil && 
-            (currentTime - lastSystemVersionCallTime) < THROTTLE_INTERVAL_NSEC) {
-            return cachedSystemVersionResult;
-        }
-        
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (shouldSpoofForBundle(bundleID)) {
-            NSDictionary *versionInfo = getIOSVersionInfo();
-            NSString *configuredVersion = versionInfo[@"version"];
-            NSString *configuredBuild = versionInfo[@"build"];
-            NSString *reportedVersion = nil;
-            NSString *reportedBuild = nil;
-            if (PXReportingIOSVersionBuildForBundle(configuredVersion, configuredBuild, bundleID, &reportedVersion, &reportedBuild)) {
-                NSString *originalVersion = %orig;
-
-                // Reporting surfaces always preserve the configured profile.
-                // Legacy Fix Version only bypasses kern.osproductversion in Tweak.x.
-                if (lastSystemVersionCallTime == 0 || (currentTime - lastSystemVersionCallTime) > THROTTLE_INTERVAL_NSEC * 10) {
-                    IOSVERSION_LOG(@"UIDevice.systemVersion: %@ → %@ (configured=%@)", originalVersion, reportedVersion, configuredVersion);
-                }
-
-                lastSystemVersionCallTime = currentTime;
-                cachedSystemVersionResult = reportedVersion;
-                return reportedVersion;
-            }
-        }
-        
-        // Cache the original result too
-        NSString *originalResult = %orig;
-        lastSystemVersionCallTime = currentTime;
-        cachedSystemVersionResult = originalResult;
-        return originalResult;
-    } @catch (NSException *e) {
-        IOSVERSION_LOG(@"❌ Error in systemVersion hook: %@", e);
-    }
-    
-    return %orig;
+    if (gPXInsideIOSReportingHook) return %orig;
+    gPXInsideIOSReportingHook = YES;
+    NSString *bundleID = nil, *reportedVersion = nil, *originalVersion = nil;
+    NSDictionary *versionInfo = nil;
+#if !defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    double now = PXIOSVersionCacheTime();
+    uint64_t revision = PXIOSVersionSystemEpoch();
 #endif
+    @try {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+        originalVersion = %orig;
+#endif
+        @try {
+            bundleID = getCurrentBundleID();
+            if (PXIOSVersionReportingAllowedForBundle(bundleID)) {
+                versionInfo = getIOSVersionInfo();
+#if !defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+                reportedVersion = PXIOSSystemCachedResult(versionInfo, bundleID, now, revision);
+                if (reportedVersion) return reportedVersion;
+#endif
+                if (!PXReportingIOSVersionBuildForBundle(versionInfo[@"version"], versionInfo[@"build"], bundleID, &reportedVersion, NULL)) reportedVersion = nil;
+            }
+        } @catch (NSException *exception) {
+            reportedVersion = nil;
+            IOSVERSION_LOG(@"❌ Error in systemVersion projection: %@", exception);
+        }
+#if !defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+        // Outside projection catch: an original exception must not call it twice.
+        originalVersion = %orig;
+        @try {
+            if (reportedVersion.length) PXIOSSystemPublishResult(reportedVersion, versionInfo, bundleID, now, revision);
+        } @catch (__unused NSException *exception) { reportedVersion = nil; }
+#endif
+        if (reportedVersion.length) return reportedVersion;
+        return originalVersion;
+    } @finally {
+        bundleID = nil; reportedVersion = nil; originalVersion = nil; versionInfo = nil;
+        gPXInsideIOSReportingHook = NO;
+    }
 }
 
 %end
@@ -914,32 +1023,31 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
 // Hook operatingSystemVersion to return our spoofed version
 - (NSOperatingSystemVersion)operatingSystemVersion {
     PX_RUNTIME_READ_OPERATION;
+    if (gPXInsideIOSReportingHook) return %orig;
+    gPXInsideIOSReportingHook = YES;
+    NSString *bundleID = nil, *reportedVersion = nil, *reportedBuild = nil;
+    NSDictionary *versionInfo = nil;
     @try {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (shouldSpoofForBundle(bundleID)) {
-            NSDictionary *versionInfo = getIOSVersionInfo();
-            NSString *reportedVersion = nil;
-            NSString *reportedBuild = nil;
-            if (PXReportingIOSVersionBuildForBundle(versionInfo[@"version"], versionInfo[@"build"], bundleID, &reportedVersion, &reportedBuild)) {
-                NSOperatingSystemVersion originalVersion = %orig;
-                NSOperatingSystemVersion reportedStructVersion = getOperatingSystemVersion(reportedVersion);
-
-                NSLog(@"[iosversion] NSProcessInfo.operatingSystemVersion: %ld.%ld.%ld → %ld.%ld.%ld (configured=%@)",
-                      (long)originalVersion.majorVersion,
-                      (long)originalVersion.minorVersion,
-                      (long)originalVersion.patchVersion,
-                      (long)reportedStructVersion.majorVersion,
-                      (long)reportedStructVersion.minorVersion,
-                      (long)reportedStructVersion.patchVersion,
-                      versionInfo[@"version"]);
-
-                return reportedStructVersion;
+        NSOperatingSystemVersion originalVersion = %orig;
+        @try {
+            bundleID = getCurrentBundleID();
+            if (PXIOSVersionReportingAllowedForBundle(bundleID)) {
+                versionInfo = getIOSVersionInfo();
+                if (PXReportingIOSVersionBuildForBundle(versionInfo[@"version"], versionInfo[@"build"], bundleID, &reportedVersion, &reportedBuild)) {
+                    NSOperatingSystemVersion reportedStructVersion = getOperatingSystemVersion(reportedVersion);
+                    NSLog(@"[iosversion] NSProcessInfo.operatingSystemVersion: %ld.%ld.%ld → %ld.%ld.%ld (configured=%@)",
+                          (long)originalVersion.majorVersion, (long)originalVersion.minorVersion, (long)originalVersion.patchVersion,
+                          (long)reportedStructVersion.majorVersion, (long)reportedStructVersion.minorVersion, (long)reportedStructVersion.patchVersion,
+                          versionInfo[@"version"]);
+                    return reportedStructVersion;
+                }
             }
-        }
-    } @catch (NSException *e) {
-        NSLog(@"[iosversion] Error in operatingSystemVersion hook: %@", e);
+        } @catch (NSException *exception) { IOSVERSION_LOG(@"❌ Error in operatingSystemVersion projection: %@", exception); }
+        return originalVersion;
+    } @finally {
+        bundleID = nil; reportedVersion = nil; reportedBuild = nil; versionInfo = nil;
+        gPXInsideIOSReportingHook = NO;
     }
-    return %orig;
 }
 
 // Availability/capability checks are intentionally not hooked. Reporting getters
@@ -949,27 +1057,26 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
 // Additional method to hook for getting raw operating system version string
 - (NSString *)operatingSystemVersionString {
     PX_RUNTIME_READ_OPERATION;
+    if (gPXInsideIOSReportingHook) return %orig;
+    gPXInsideIOSReportingHook = YES;
+    NSString *bundleID = nil, *reportedVersion = nil, *reportedBuild = nil, *originalVersion = nil;
+    NSDictionary *versionInfo = nil;
     @try {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (shouldSpoofForBundle(bundleID)) {
-            NSDictionary *versionInfo = getIOSVersionInfo();
-            NSString *reportedVersion = nil;
-            NSString *reportedBuild = nil;
-            if (PXReportingIOSVersionBuildForBundle(versionInfo[@"version"], versionInfo[@"build"], bundleID, &reportedVersion, &reportedBuild)) {
-                NSString *originalVersion = %orig;
-                NSString *nativeVersionString = [NSString stringWithFormat:@"Version %@ (Build %@)", reportedVersion, reportedBuild];
-
-                IOSVERSION_LOG(@"NSProcessInfo.operatingSystemVersionString: %@ → %@ (configured=%@/%@)",
-                      originalVersion, nativeVersionString, versionInfo[@"version"], versionInfo[@"build"]);
-
-                return nativeVersionString;
+        originalVersion = %orig;
+        @try {
+            bundleID = getCurrentBundleID();
+            if (PXIOSVersionReportingAllowedForBundle(bundleID)) {
+                versionInfo = getIOSVersionInfo();
+                if (PXReportingIOSVersionBuildForBundle(versionInfo[@"version"], versionInfo[@"build"], bundleID, &reportedVersion, &reportedBuild)) {
+                    return [NSString stringWithFormat:@"Version %@ (Build %@)", reportedVersion, reportedBuild];
+                }
             }
-        }
-    } @catch (NSException *e) {
-        IOSVERSION_LOG(@"❌ Error in operatingSystemVersionString hook: %@", e);
+        } @catch (NSException *exception) { IOSVERSION_LOG(@"❌ Error in operatingSystemVersionString projection: %@", exception); }
+        return originalVersion;
+    } @finally {
+        bundleID = nil; reportedVersion = nil; reportedBuild = nil; originalVersion = nil; versionInfo = nil;
+        gPXInsideIOSReportingHook = NO;
     }
-    
-    return %orig;
 }
 
 %end
@@ -1771,7 +1878,6 @@ static BOOL isCriticalSystemProcess(NSString *bundleID) {
 
 // Cleanup function to be called on process termination.
 %dtor {
-    cachedSystemVersionResult = nil;
     PXIOSVersionInvalidateCache();
 }
 
