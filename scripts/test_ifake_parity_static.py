@@ -54,7 +54,7 @@ COVERED = {
         r"%hook CLHeading",
         r"headingAccuracy",
         r"trueHeading",
-        r"%hook CLRegion",
+        r"%hook CLCircularRegion",
         r"containsCoordinate:",
         r"%hook CMAccelerometerData",
         r"%hook CMGyroData",

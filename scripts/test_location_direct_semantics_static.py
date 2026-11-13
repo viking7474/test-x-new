@@ -13,6 +13,7 @@ TWEAK = (ROOT / "TLinkIOSTweak" / "Tweak.x").read_text(encoding="utf-8")
 HEADER = (ROOT / "common" / "LocationSpoofingManager.h").read_text(encoding="utf-8")
 MANAGER = (ROOT / "common" / "LocationSpoofingManager.m").read_text(encoding="utf-8")
 ADAPTER = (ROOT / "TLinkIOSTweak" / "PXLocationDelegateHooks.m").read_text(encoding="utf-8")
+PROJECTION = (ROOT / "common" / "PXLocationProjection.m").read_text(encoding="utf-8")
 
 
 def require(condition: bool, message: str) -> None:
@@ -31,7 +32,7 @@ for token in (
     "- (CLLocationDirection)magneticHeading",
     "- (CLLocationDirection)headingAccuracy",
     "- (CLLocationDirection)trueHeading",
-    "%hook CLRegion",
+    "%hook CLCircularRegion",
     "- (CLLocationCoordinate2D)center",
     "- (BOOL)containsCoordinate:(CLLocationCoordinate2D)coordinate",
 ):
@@ -48,7 +49,7 @@ for token in (
     "PXLocationOriginalSpeed",
     "PXLocationOriginalCourse",
 ):
-    require(token in HEADER and token in MANAGER, f"snapshot contract missing: {token}")
+    require(token in HEADER and token in (MANAGER + PROJECTION), f"snapshot contract missing: {token}")
 
 require("snapshot.generation = ++self.locationSpoofGeneration" in MANAGER,
         "snapshot generation is not monotonic")
@@ -96,7 +97,7 @@ require("delegate] != receiver" in ADAPTER,
         "replaced/nil delegate callbacks must not advance current projection")
 require(not any(token in ADAPTER for token in ("dispatch_async", "dispatch_after", "NSMutableArray", "objc_setAssociatedObject")),
         "adapter must not redispatch/copy arrays or retain manager/delegate in associations")
-require("OBJC_ASSOCIATION_RETAIN_NONATOMIC" not in MANAGER,
+require("OBJC_ASSOCIATION_RETAIN_NONATOMIC" not in (MANAGER + PROJECTION),
         "concurrent snapshot association readers must retain the value during replacement")
 
 require("PXLocationSpoofSnapshot *currentSnapshot = PXActiveLocationSnapshot(NO);" in TWEAK,

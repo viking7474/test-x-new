@@ -28,6 +28,13 @@ FOUNDATION_EXPORT CLLocationCoordinate2D PXLocationOriginalCoordinate(CLLocation
 FOUNDATION_EXPORT CLLocationSpeed PXLocationOriginalSpeed(CLLocation *location);
 FOUNDATION_EXPORT CLLocationDirection PXLocationOriginalCourse(CLLocation *location);
 
+// Circular projection uses native CoreLocation hit testing, never a separate
+// distance approximation. Unknown classes retain their original capabilities.
+FOUNDATION_EXPORT BOOL PXLocationIsKnownCircularRegion(id region);
+FOUNDATION_EXPORT BOOL PXLocationCircularRegionMethodsMatch(Class cls);
+FOUNDATION_EXPORT BOOL PXLocationProjectedCircularContains(CLRegion *region,
+    CLLocationCoordinate2D projectedCenter, CLLocationCoordinate2D query, BOOL *contains);
+
 @interface LocationSpoofingManager : NSObject
 
 @property (nonatomic, strong) NSMutableDictionary *cachedScopedApps;

@@ -30,57 +30,6 @@ NSDate *lastCacheRefreshTime = nil;  // Shared between shouldSpoofApp and refres
 @implementation PXLocationSpoofSnapshot
 @end
 
-static const void *kPXLocationSpoofSnapshotAssociationKey = &kPXLocationSpoofSnapshotAssociationKey;
-static __thread NSUInteger gPXLocationProjectionBypassDepth = 0;
-
-void PXAttachLocationSpoofSnapshot(id object, PXLocationSpoofSnapshot *snapshot) {
-    if (!object || !snapshot) return;
-    objc_setAssociatedObject(object,
-                             kPXLocationSpoofSnapshotAssociationKey,
-                             snapshot,
-                             OBJC_ASSOCIATION_RETAIN);
-}
-
-PXLocationSpoofSnapshot *PXLocationSpoofSnapshotForObject(id object) {
-    if (!object) return nil;
-    id value = objc_getAssociatedObject(object, kPXLocationSpoofSnapshotAssociationKey);
-    return [value isKindOfClass:[PXLocationSpoofSnapshot class]] ? value : nil;
-}
-
-BOOL PXLocationProjectionBypassActive(void) {
-    return gPXLocationProjectionBypassDepth > 0;
-}
-
-CLLocationCoordinate2D PXLocationOriginalCoordinate(CLLocation *location) {
-    if (!location) return kCLLocationCoordinate2DInvalid;
-    gPXLocationProjectionBypassDepth += 1;
-    @try {
-        return location.coordinate;
-    } @finally {
-        gPXLocationProjectionBypassDepth -= 1;
-    }
-}
-
-CLLocationSpeed PXLocationOriginalSpeed(CLLocation *location) {
-    if (!location) return -1.0;
-    gPXLocationProjectionBypassDepth += 1;
-    @try {
-        return location.speed;
-    } @finally {
-        gPXLocationProjectionBypassDepth -= 1;
-    }
-}
-
-CLLocationDirection PXLocationOriginalCourse(CLLocation *location) {
-    if (!location) return -1.0;
-    gPXLocationProjectionBypassDepth += 1;
-    @try {
-        return location.course;
-    } @finally {
-        gPXLocationProjectionBypassDepth -= 1;
-    }
-}
-
 @interface LocationSpoofingManager ()
 @property (nonatomic, assign) BOOL spoofingEnabled;
 @property (nonatomic, assign) double latitude;

@@ -53,13 +53,6 @@
 #import <os/lock.h>
 #import <CoreFoundation/CoreFoundation.h>
 
-// These selectors are implemented by CoreLocation runtime classes even though
-// older public SDK headers expose them only on concrete subclasses.
-@interface CLRegion (PXP0LocationDirectSurface)
-- (CLLocationCoordinate2D)center;
-- (BOOL)containsCoordinate:(CLLocationCoordinate2D)coordinate;
-@end
-
 __attribute__((constructor(101))) static void PXTLinkIOSTweakEarlyLoadMarker(void) {
     PXFileDebugSignalTweakLoaded();
     PXFileDebugLoadMarker("TLinkIOSTweak.early");
@@ -2469,12 +2462,14 @@ static void PXLocationDelegateAttachSnapshot(id object, id snapshot) {
 - (BOOL)isSimulatedBySoftware {
     PX_RUNTIME_READ_OPERATION;
     BOOL originalValue = %orig;
+    if (PXLocationProjectionBypassActive()) return originalValue;
     return PXActiveLocationSnapshot(NO) ? NO : originalValue;
 }
 
 - (BOOL)isProducedByAccessory {
     PX_RUNTIME_READ_OPERATION;
     BOOL originalValue = %orig;
+    if (PXLocationProjectionBypassActive()) return originalValue;
     return PXActiveLocationSnapshot(NO) ? NO : originalValue;
 }
 
@@ -2486,6 +2481,7 @@ static void PXLocationDelegateAttachSnapshot(id object, id snapshot) {
 - (CLLocationDirection)magneticHeading {
     PX_RUNTIME_READ_OPERATION;
     CLLocationDirection originalHeading = %orig;
+    if (PXLocationProjectionBypassActive()) return originalHeading;
     PXLocationSpoofSnapshot *currentSnapshot = PXActiveLocationSnapshot(NO);
     if (!currentSnapshot) return originalHeading;
     PXLocationSpoofSnapshot *snapshot = PXLocationSpoofSnapshotForObject(self);
@@ -2493,17 +2489,15 @@ static void PXLocationDelegateAttachSnapshot(id object, id snapshot) {
 }
 
 - (CLLocationDirection)headingAccuracy {
-    PX_RUNTIME_READ_OPERATION;
-    CLLocationDirection originalAccuracy = %orig;
-    PXLocationSpoofSnapshot *currentSnapshot = PXActiveLocationSnapshot(NO);
-    if (!currentSnapshot) return originalAccuracy;
-    PXLocationSpoofSnapshot *snapshot = PXLocationSpoofSnapshotForObject(self);
-    return (snapshot ?: currentSnapshot).heading;
+    // Accuracy is an angular uncertainty, not the projected heading angle.
+    // There is no independent accuracy model; preserve native sentinels too.
+    return %orig;
 }
 
 - (CLLocationDirection)trueHeading {
     PX_RUNTIME_READ_OPERATION;
     CLLocationDirection originalHeading = %orig;
+    if (PXLocationProjectionBypassActive()) return originalHeading;
     PXLocationSpoofSnapshot *currentSnapshot = PXActiveLocationSnapshot(NO);
     if (!currentSnapshot) return originalHeading;
     PXLocationSpoofSnapshot *snapshot = PXLocationSpoofSnapshotForObject(self);
@@ -2512,25 +2506,6 @@ static void PXLocationDelegateAttachSnapshot(id object, id snapshot) {
 
 %end
 
-
-%hook CLRegion
-
-- (CLLocationCoordinate2D)center {
-    PX_RUNTIME_READ_OPERATION;
-    CLLocationCoordinate2D originalCenter = %orig;
-    PXLocationSpoofSnapshot *snapshot = PXActiveLocationSnapshot(NO);
-    return snapshot ? snapshot.coordinate : originalCenter;
-}
-
-- (BOOL)containsCoordinate:(CLLocationCoordinate2D)coordinate {
-    PX_RUNTIME_READ_OPERATION;
-    BOOL originalContains = %orig;
-    // Preserve the caller's argument and evaluate the real implementation
-    // first. In active mode, containment follows the projected region center.
-    return PXActiveLocationSnapshot(NO) ? YES : originalContains;
-}
-
-%end
 
 // Hook for MKMapView to handle map-specific location display
 %hook MKMapView
@@ -2573,6 +2548,7 @@ static void PXLocationDelegateAttachSnapshot(id object, id snapshot) {
 - (CLLocationCoordinate2D)coordinate {
     PX_RUNTIME_READ_OPERATION;
     CLLocationCoordinate2D originalCoordinate = %orig;
+    if (PXLocationProjectionBypassActive()) return originalCoordinate;
     PXLocationSpoofSnapshot *snapshot = PXActiveLocationSnapshot(NO);
     return snapshot ? snapshot.coordinate : originalCoordinate;
 }
@@ -2584,75 +2560,106 @@ static void PXLocationDelegateAttachSnapshot(id object, id snapshot) {
 
 - (void)reverseGeocodeLocation:(CLLocation *)location completionHandler:(void (^)(NSArray<CLPlacemark *> *placemarks, NSError *error))completionHandler {
     PX_RUNTIME_READ_OPERATION;
+    LocationSpoofingManager *manager = nil;
+    NSString *bundleID = nil;
+    CLLocation *effectiveLocation = nil;
+    void (^effectiveCompletion)(NSArray<CLPlacemark *> *, NSError *) = nil;
     @try {
-        LocationSpoofingManager *manager = [LocationSpoofingManager sharedManager];
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        
-        if (!PXLocationManagerShouldSpoof(manager, bundleID) || !location || !completionHandler) {
-            %orig;
-            return;
+        effectiveLocation = location; effectiveCompletion = completionHandler;
+        @try {
+            manager = [LocationSpoofingManager sharedManager];
+            bundleID = [[NSBundle mainBundle] bundleIdentifier];
+            if (PXLocationManagerShouldSpoof(manager, bundleID) && location && completionHandler) {
+                effectiveLocation = [manager modifySpoofedLocation:location] ?: location;
+                effectiveCompletion = [completionHandler copy];
+                PXLog(@"[WeaponX] App %@ requested reverse geocoding, using spoofed location", bundleID);
+            }
+        } @catch (NSException *exception) {
+            PXLog(@"[WeaponX] Exception preparing reverseGeocodeLocation: %@", exception);
+            effectiveLocation = location; effectiveCompletion = completionHandler;
         }
-        
-        // Create a spoofed location
-        CLLocation *spoofedLocation = [manager modifySpoofedLocation:location];
-        if (!spoofedLocation) {
-            %orig;
-            return;
-        }
-        
-        // Log the reverseGeocoding request
-        PXLog(@"[WeaponX] App %@ requested reverse geocoding, using spoofed location", bundleID);
-        
-        // Create a copy of the completion handler to ensure it stays alive
-        void (^wrappedHandler)(NSArray<CLPlacemark *> *, NSError *) = [completionHandler copy];
-        
-        // Call original with our spoofed location and copied handler
-        %orig(spoofedLocation, wrappedHandler);
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] Exception in reverseGeocodeLocation: %@", exception);
-        %orig;
+        // Original and synchronous client exceptions propagate without retry.
+        %orig(effectiveLocation, effectiveCompletion);
+    } @finally {
+        manager = nil; bundleID = nil; effectiveLocation = nil; effectiveCompletion = nil;
+        location = nil; completionHandler = nil;
     }
 }
 
-// Add forward geocoding method
 - (void)geocodeAddressString:(NSString *)addressString completionHandler:(void (^)(NSArray<CLPlacemark *> *placemarks, NSError *error))completionHandler {
     PX_RUNTIME_READ_OPERATION;
+    LocationSpoofingManager *manager = nil;
+    NSString *bundleID = nil;
+    void (^clientCompletion)(NSArray<CLPlacemark *> *, NSError *) = nil;
+    void (^effectiveCompletion)(NSArray<CLPlacemark *> *, NSError *) = nil;
     @try {
-        LocationSpoofingManager *manager = [LocationSpoofingManager sharedManager];
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        
-        if (!PXLocationManagerShouldSpoof(manager, bundleID) || !addressString || !completionHandler) {
-            %orig;
-            return;
-        }
-        
-        // Log the forward geocoding request
-        PXLog(@"[WeaponX] App %@ requested forward geocoding for address: %@", bundleID, addressString);
-        
-        // Create a copy of the completion handler to ensure it stays alive
-        void (^wrappedHandler)(NSArray<CLPlacemark *> *, NSError *) = [completionHandler copy];
-        
-        // Use a simpler implementation to avoid syntax errors
-        void (^monitorBlock)(NSArray<CLPlacemark *> *, NSError *) = ^(NSArray<CLPlacemark *> *placemarks, NSError *error) {
-            if (placemarks.count > 0) {
-                PXLog(@"[WeaponX] Forward geocoding returned %lu placemarks for %@", 
-                      (unsigned long)placemarks.count, addressString);
+        effectiveCompletion = completionHandler;
+        @try {
+            manager = [LocationSpoofingManager sharedManager];
+            bundleID = [[NSBundle mainBundle] bundleIdentifier];
+            if (PXLocationManagerShouldSpoof(manager, bundleID) && addressString && completionHandler) {
+                PXLog(@"[WeaponX] App %@ requested forward geocoding for address: %@", bundleID, addressString);
+                clientCompletion = [completionHandler copy];
+                // End the stack literal's capture scope before the throwing
+                // original call, while the native geocoder owns the heap block.
+                {
+                    effectiveCompletion = ^(NSArray<CLPlacemark *> *placemarks, NSError *error) {
+                        void (^delivery)(NSArray<CLPlacemark *> *, NSError *) = nil;
+                        @try {
+                            delivery = clientCompletion;
+                            if (placemarks.count > 0) PXLog(@"[WeaponX] Forward geocoding returned %lu placemarks for %@", (unsigned long)placemarks.count, addressString);
+                            delivery(placemarks, error);
+                        } @finally { delivery = nil; placemarks = nil; error = nil; }
+                    };
+                }
             }
-            
-            // Call original completion handler
-            wrappedHandler(placemarks, error);
-        };
-        
-        %orig(addressString, monitorBlock);
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] Exception in geocodeAddressString: %@", exception);
-        %orig;
+        } @catch (NSException *exception) {
+            PXLog(@"[WeaponX] Exception preparing geocodeAddressString: %@", exception);
+            effectiveCompletion = completionHandler;
+        }
+        %orig(addressString, effectiveCompletion);
+    } @finally {
+        manager = nil; bundleID = nil; clientCompletion = nil; effectiveCompletion = nil;
+        addressString = nil; completionHandler = nil;
     }
 }
 
 %end
 
 %end // End of LocationSpoofing group
+
+%group CircularRegionProjection
+%hook CLCircularRegion
+
+- (CLLocationCoordinate2D)center {
+    PX_RUNTIME_READ_OPERATION;
+    CLLocationCoordinate2D originalCenter = %orig;
+    if (PXLocationProjectionBypassActive() || !PXLocationIsKnownCircularRegion(self)) return originalCenter;
+    PXLocationSpoofSnapshot *snapshot = nil;
+    @try {
+        snapshot = PXActiveLocationSnapshot(NO);
+        return snapshot ? snapshot.coordinate : originalCenter;
+    } @finally { snapshot = nil; }
+}
+
+- (BOOL)containsCoordinate:(CLLocationCoordinate2D)coordinate {
+    PX_RUNTIME_READ_OPERATION;
+    BOOL originalContains = %orig;
+    if (PXLocationProjectionBypassActive() || !PXLocationIsKnownCircularRegion(self)) return originalContains;
+    PXLocationSpoofSnapshot *snapshot = nil;
+    @try {
+        snapshot = PXActiveLocationSnapshot(NO);
+        BOOL contains = originalContains;
+        if (snapshot && PXLocationProjectedCircularContains(self, snapshot.coordinate, coordinate, &contains)) return contains;
+    } @catch (__unused NSException *exception) {
+        // Invalid/changed native geometry keeps the already-computed result.
+    } @finally { snapshot = nil; }
+    return originalContains;
+}
+
+%end
+%end
+
 
 #pragma mark - Sensor transform pipeline (P1: async coverage, no-KVC, no-alloc)
 
@@ -4809,6 +4816,11 @@ static char* hook_GSSystemGetSerialNo(void) {
     // Initialize the location spoofing hooks
     PXFileDebugAIDA64Log("[Tweak.ctor] before init LocationSpoofing");
     %init(LocationSpoofing);
+    // Validate only the public circular surface; never add geometric selectors
+    // to CLRegion/CLBeaconRegion or an unknown runtime shape.
+    if (PXLocationCircularRegionMethodsMatch(objc_getClass("CLCircularRegion"))) {
+        %init(CircularRegionProjection);
+    }
     PXFileDebugAIDA64Log("[Tweak.ctor] after init LocationSpoofing");
     
     // Initialize sensor data spoofing hooks

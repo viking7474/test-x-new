@@ -41,6 +41,9 @@ jobs:
       - name: Test native concrete location delegate interception
         run: python3 scripts/test_location_direct_semantics_static.py --native
 
+      - name: Test native location projection geometry and geocoder dispatch
+        run: python3 scripts/test_location_projection_semantics.py --native
+
       - name: Test native captured runtime snapshot reader
         run: python3 scripts/test_runtime_snapshot_reader.py --native
 
