@@ -1543,24 +1543,29 @@ static CFDictionaryRef (*original_CFCopySystemVersionDictionary)(void);
 CFDictionaryRef replaced_CFCopySystemVersionDictionary(void) {
     PX_RUNTIME_READ_OPERATION;
     CFDictionaryRef original = original_CFCopySystemVersionDictionary ? original_CFCopySystemVersionDictionary() : NULL;
+    if (PXSystemVersionProjectionActive()) return original;
     @autoreleasepool {
+        NSString *bundleID = nil;
+        IdentifierManager *manager = nil;
+        PXSystemVersionProjection *projection = nil;
+        NSDictionary *base = nil, *transformed = nil;
+        BOOL previous = PXSystemVersionProjectionEnter();
         @try {
-            NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-            IdentifierManager *manager = [IdentifierManager sharedManager];
+            bundleID = [[NSBundle mainBundle] bundleIdentifier]; manager = [IdentifierManager sharedManager];
             if (!shouldSpoofForBundle(bundleID) || ![manager isIdentifierEnabled:@"IOSVersion"]) return original;
-
-            PXSystemVersionProjection *projection = PXCurrentReportingSystemVersionProjectionForBundle(bundleID);
+            projection = PXCurrentReportingSystemVersionProjectionForBundle(bundleID);
             if (!projection) return original;
-            NSDictionary *base = original ? (__bridge NSDictionary *)original : @{};
-            NSDictionary *transformed = PXTransformSystemVersionDictionary(base, projection);
+            base = original ? (__bridge NSDictionary *)original : @{};
+            transformed = PXTransformSystemVersionDictionary(base, projection);
             if (transformed == base) return original;
-
             CFDictionaryRef result = CFBridgingRetain(transformed);
-            if (original) CFRelease(original);
-            return result;
-        } @catch (NSException *exception) {
-            IOSVERSION_LOG(@"Error in unified SystemVersion transformer: %@", exception);
+            CFDictionaryRef retired = original; original = result;
+            if (retired) CFRelease(retired);
             return original;
+        } @catch (__unused NSException *exception) { return original; }
+        @finally {
+            PXSystemVersionProjectionLeave(previous);
+            bundleID = nil; manager = nil; projection = nil; base = nil; transformed = nil;
         }
     }
 }
@@ -1776,45 +1781,37 @@ int hooked_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *new
 %hook NSBundle
 
 - (id)objectForInfoDictionaryKey:(NSString *)key {
-    PX_RUNTIME_READ_OPERATION;
-    // Never resolve bundleIdentifier from an Info.plist hook: Foundation may implement
-    // bundleIdentifier through infoDictionary/objectForInfoDictionaryKey and recurse.
-    if (gPXInsideIOSVersionBundleInfoHook || self != [NSBundle mainBundle]) {
-        return %orig;
-    }
-
-    gPXInsideIOSVersionBundleInfoHook = YES;
+    __attribute__((objc_precise_lifetime)) id receiver = self;
     id projectedValue = nil;
-    BOOL hasProjectedValue = NO;
+    NSString *mainBundleID = nil;
+    NSString *__autoreleasing spoofVer = nil;
+    NSString *__autoreleasing spoofBuild = nil;
+    BOOL previous = gPXInsideIOSVersionBundleInfoHook;
     @try {
-        NSString *mainBundleID = gPXIOSVersionMainBundleID;
-        if (mainBundleID.length && shouldSpoofForBundle(mainBundleID)) {
-            // App-specific version/build spoofing is only valid for the main bundle.
-            if ([key isEqualToString:@"CFBundleShortVersionString"] || [key isEqualToString:@"CFBundleVersion"]) {
-                NSString *spoofVer = nil;
-                NSString *spoofBuild = nil;
-                if (PXGetSpoofedAppVersionForBundle(mainBundleID, &spoofVer, &spoofBuild)) {
-                    if ([key isEqualToString:@"CFBundleShortVersionString"] && spoofVer.length) {
-                        projectedValue = spoofVer;
-                        hasProjectedValue = YES;
-                    } else if ([key isEqualToString:@"CFBundleVersion"] && spoofBuild.length) {
-                        projectedValue = spoofBuild;
-                        hasProjectedValue = YES;
-                    }
-                }
+        BOOL relevant = NO;
+        @try { relevant = [key isKindOfClass:NSString.class] &&
+            ([key isEqualToString:@"CFBundleShortVersionString"] || [key isEqualToString:@"CFBundleVersion"]); }
+        @catch (__unused NSException *exception) { }
+        // MinimumOSVersion / DTPlatformVersion / DTSDKName describe the app binary.
+        // Only the two app version/build keys may enter projection.
+        if (!relevant || previous || gPXInsideIOSVersionCFBundleInfoHook || self != [NSBundle mainBundle]) return %orig(key);
+        PX_RUNTIME_READ_OPERATION;
+        gPXInsideIOSVersionBundleInfoHook = YES;
+        @try {
+            mainBundleID = gPXIOSVersionMainBundleID;
+            if (mainBundleID.length && shouldSpoofForBundle(mainBundleID) &&
+                PXGetSpoofedAppVersionForBundle(mainBundleID, &spoofVer, &spoofBuild)) {
+                if ([key isEqualToString:@"CFBundleShortVersionString"] && [spoofVer isKindOfClass:NSString.class] && spoofVer.length) projectedValue = spoofVer;
+                else if ([key isEqualToString:@"CFBundleVersion"] && [spoofBuild isKindOfClass:NSString.class] && spoofBuild.length) projectedValue = spoofBuild;
             }
-            // MinimumOSVersion / DTPlatformVersion / DTSDKName intentionally fall
-            // through to %orig; they describe the app binary rather than runtime identity.
-        }
-    } @catch (__unused NSException *e) {
-        hasProjectedValue = NO;
-        projectedValue = nil;
+        } @catch (__unused NSException *exception) { projectedValue = nil; }
+        @finally { gPXInsideIOSVersionBundleInfoHook = previous; }
+        if (projectedValue) return projectedValue;
+        return %orig(key);
     } @finally {
-        gPXInsideIOSVersionBundleInfoHook = NO;
+        gPXInsideIOSVersionBundleInfoHook = previous;
+        receiver = nil; key = nil; projectedValue = nil; mainBundleID = nil; spoofVer = nil; spoofBuild = nil;
     }
-
-    if (hasProjectedValue) return projectedValue;
-    return %orig;
 }
 
 %end
@@ -1822,105 +1819,93 @@ int hooked_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *new
 // Original function pointer for CFBundleGetValueForInfoDictionaryKey
 static CFTypeRef (*original_CFBundleGetValueForInfoDictionaryKey)(CFBundleRef bundle, CFStringRef key);
 
-// CFBundleGetValueForInfoDictionaryKey is a "Get" API: the caller does NOT own
-// the returned reference and must not CFRelease it. Returning a freshly
-// CFStringCreate...'d object here leaked on every call (P1 CF lifetime). Vend
-// process-lifetime CFStrings from a retained cache instead, so the borrowed
-// pointer stays valid for the life of the process with no per-call allocation.
+// Borrowed Get results retain process lifetime. Publish immutable dictionary snapshots;
+// every string/dictionary method and retired-root destruction runs outside the lock.
+static os_unfair_lock gPXBorrowedInfoLock = OS_UNFAIR_LOCK_INIT;
+static NSDictionary<NSString *, NSString *> *gPXBorrowedInfoStrings;
+static __thread BOOL gPXInterningInfoString;
+
 static CFStringRef PXIOSVersionBorrowedInfoString(NSString *value) {
-    if (![value isKindOfClass:[NSString class]] || value.length == 0) return NULL;
-    static NSMutableDictionary<NSString *, NSString *> *cache = nil;
-    static os_unfair_lock cacheLock = OS_UNFAIR_LOCK_INIT;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        cache = [NSMutableDictionary dictionary];
-    });
-    os_unfair_lock_lock(&cacheLock);
-    NSString *stored = cache[value];
-    if (!stored) {
-        stored = [value copy];
-        cache[value] = stored;
+    NSString *frozen = nil, *stored = nil;
+    NSDictionary *basis = nil, *candidate = nil;
+    NSMutableDictionary *working = nil;
+    __attribute__((objc_precise_lifetime)) NSDictionary *retired = nil;
+    BOOL previous = gPXInterningInfoString;
+    @try {
+        if (previous || ![value isKindOfClass:NSString.class] || !value.length) return NULL;
+        gPXInterningInfoString = YES;
+        frozen = [value copy];
+        for (;;) {
+            os_unfair_lock_lock(&gPXBorrowedInfoLock);
+            basis = gPXBorrowedInfoStrings;
+            os_unfair_lock_unlock(&gPXBorrowedInfoLock);
+            stored = basis[frozen];
+            if (stored) return (__bridge CFStringRef)stored;
+            working = basis ? [basis mutableCopy] : [NSMutableDictionary dictionary];
+            working[frozen] = frozen; candidate = [working copy]; working = nil;
+            BOOL published = NO;
+            os_unfair_lock_lock(&gPXBorrowedInfoLock);
+            if (gPXBorrowedInfoStrings == basis) {
+                retired = gPXBorrowedInfoStrings; gPXBorrowedInfoStrings = candidate; published = YES;
+            }
+            os_unfair_lock_unlock(&gPXBorrowedInfoLock);
+            retired = nil;
+            if (published) return (__bridge CFStringRef)frozen;
+            basis = nil; candidate = nil;
+        }
+    } @finally {
+        gPXInterningInfoString = previous;
+        value = nil; frozen = nil; stored = nil; basis = nil; candidate = nil; working = nil; retired = nil;
     }
-    os_unfair_lock_unlock(&cacheLock);
-    return (__bridge CFStringRef)stored;
 }
 
 // Replacement function for CFBundleGetValueForInfoDictionaryKey
 CFTypeRef replaced_CFBundleGetValueForInfoDictionaryKey(CFBundleRef bundle, CFStringRef key) {
-    PX_RUNTIME_READ_OPERATION;
-    if (!bundle || !key) return NULL;
-    if (gPXInsideIOSVersionCFBundleInfoHook) {
-        return original_CFBundleGetValueForInfoDictionaryKey
-            ? original_CFBundleGetValueForInfoDictionaryKey(bundle, key)
-            : NULL;
-    }
-
-    gPXInsideIOSVersionCFBundleInfoHook = YES;
+    NSString *nsBundleID = nil, *mainBundleID = nil, *actualVersion = nil;
+    NSString *__autoreleasing spoofVer = nil;
+    NSString *__autoreleasing spoofBuild = nil;
+    CFTypeRef projectedValue = NULL;
+    __attribute__((objc_precise_lifetime)) id retainedKey = nil;
+    BOOL previous = gPXInsideIOSVersionCFBundleInfoHook;
     @try {
-        // App-version projection is only defined for the process main bundle.
-        // Never call CFBundleGetIdentifier here: it may refresh through infoDictionary.
-        if (bundle != CFBundleGetMainBundle()) {
-            gPXInsideIOSVersionCFBundleInfoHook = NO;
-            return original_CFBundleGetValueForInfoDictionaryKey
-                ? original_CFBundleGetValueForInfoDictionaryKey(bundle, key)
-                : NULL;
+        if (!bundle || !key) return NULL;
+        if (previous || gPXInsideIOSVersionBundleInfoHook || bundle != CFBundleGetMainBundle()) {
+            return original_CFBundleGetValueForInfoDictionaryKey ? original_CFBundleGetValueForInfoDictionaryKey(bundle, key) : NULL;
         }
-        NSString *nsBundleID = gPXIOSVersionMainBundleID;
-        
-        if (shouldSpoofForBundle(nsBundleID)) {
-            // App-specific version/build spoofing (only for main bundle)
-            if (CFEqual(key, CFSTR("CFBundleShortVersionString")) || CFEqual(key, CFSTR("CFBundleVersion"))) {
-                NSString *mainBundleID = getCurrentBundleID();
-                if (mainBundleID.length && [nsBundleID isEqualToString:mainBundleID]) {
-                    NSString *spoofVer = nil;
-                    NSString *spoofBuild = nil;
-                    if (PXGetSpoofedAppVersionForBundle(mainBundleID, &spoofVer, &spoofBuild)) {
-                        if (CFEqual(key, CFSTR("CFBundleShortVersionString")) && spoofVer.length) {
-                            CFTypeRef value = PXIOSVersionBorrowedInfoString(spoofVer);
-                            gPXInsideIOSVersionCFBundleInfoHook = NO;
-                            return value;
-                        }
-                        if (CFEqual(key, CFSTR("CFBundleVersion")) && spoofBuild.length) {
-                            CFTypeRef value = PXIOSVersionBorrowedInfoString(spoofBuild);
-                            gPXInsideIOSVersionCFBundleInfoHook = NO;
-                            return value;
-                        }
+        BOOL relevant = NO;
+        @try { relevant = CFEqual(key, CFSTR("CFBundleShortVersionString")) || CFEqual(key, CFSTR("CFBundleVersion")); }
+        @catch (__unused NSException *exception) { }
+        if (relevant) {
+            retainedKey = (__bridge id)key;
+            PX_RUNTIME_READ_OPERATION;
+            gPXInsideIOSVersionCFBundleInfoHook = YES;
+            @try {
+                nsBundleID = gPXIOSVersionMainBundleID;
+                if (shouldSpoofForBundle(nsBundleID)) {
+                    mainBundleID = getCurrentBundleID();
+                    if (mainBundleID.length && [nsBundleID isEqualToString:mainBundleID] &&
+                        PXGetSpoofedAppVersionForBundle(mainBundleID, &spoofVer, &spoofBuild)) {
+                        if (CFEqual(key, CFSTR("CFBundleShortVersionString")) && [spoofVer isKindOfClass:NSString.class] && spoofVer.length) projectedValue = PXIOSVersionBorrowedInfoString(spoofVer);
+                        else if (CFEqual(key, CFSTR("CFBundleVersion")) && [spoofBuild isKindOfClass:NSString.class] && spoofBuild.length) projectedValue = PXIOSVersionBorrowedInfoString(spoofBuild);
                     }
                 }
-            }
-
-            // App build metadata is not a device identity surface. Preserve the
-            // binary's real deployment/SDK contract so legacy runtimes do not enter
-            // newer-framework paths based on spoofed profile data.
-            if (CFEqual(key, CFSTR("MinimumOSVersion")) ||
-                CFEqual(key, CFSTR("DTPlatformVersion")) ||
-                CFEqual(key, CFSTR("DTSDKName"))) {
-                gPXInsideIOSVersionCFBundleInfoHook = NO;
-                return original_CFBundleGetValueForInfoDictionaryKey
-                    ? original_CFBundleGetValueForInfoDictionaryKey(bundle, key)
-                    : NULL;
-            }
+            } @catch (__unused NSException *exception) { projectedValue = NULL; }
+            @finally { gPXInsideIOSVersionCFBundleInfoHook = previous; }
+            if (projectedValue) return projectedValue;
         }
-    } @catch (NSException *e) {
-        NSLog(@"[iosversion] ❌ Error in CFBundleGetValueForInfoDictionaryKey hook: %@", e);
-    }
-
-    gPXInsideIOSVersionCFBundleInfoHook = NO;
-
-    // Call original function if available, otherwise return NULL
-    if (original_CFBundleGetValueForInfoDictionaryKey) {
-        return original_CFBundleGetValueForInfoDictionaryKey(bundle, key);
-    } else {
-        // For some keys, provide default values
-        if (key && (CFEqual(key, CFSTR("MinimumOSVersion")))) {
-            // Fallback only when the original symbol is unavailable. Use the
-            // low-level physical runtime reader, never the hooked UIDevice surface.
-            NSString *actualVersion = PXRealRuntimeIOSVersion();
-            return actualVersion.length ? PXIOSVersionBorrowedInfoString(actualVersion) : NULL;
-        }
-        
-        NSLog(@"[iosversion] ℹ️ No original function for CFBundleGetValueForInfoDictionaryKey, returning NULL");
+        // Original is outside projection catches: exceptions must never replay it.
+        if (original_CFBundleGetValueForInfoDictionaryKey) return original_CFBundleGetValueForInfoDictionaryKey(bundle, key);
+        // Physical fallback applies uniformly to main-bundle MinimumOSVersion when the symbol is absent.
+        @try {
+            if (CFEqual(key, CFSTR("MinimumOSVersion"))) {
+                actualVersion = PXRealRuntimeIOSVersion();
+                return actualVersion.length ? PXIOSVersionBorrowedInfoString(actualVersion) : NULL;
+            }
+        } @catch (__unused NSException *exception) { }
         return NULL;
+    } @finally {
+        gPXInsideIOSVersionCFBundleInfoHook = previous;
+        nsBundleID = nil; mainBundleID = nil; actualVersion = nil; spoofVer = nil; spoofBuild = nil; retainedKey = nil;
     }
 }
 
@@ -2206,45 +2191,72 @@ static BOOL isSystemVersionFile(NSString *path) {
 
 static PXSystemVersionProjection *PXScopedSystemVersionProjection(void) {
     PX_RUNTIME_READ_OPERATION;
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    IdentifierManager *manager = [IdentifierManager sharedManager];
-    if (!shouldSpoofForBundle(bundleID) || ![manager isIdentifierEnabled:@"IOSVersion"]) return nil;
-    return PXCurrentReportingSystemVersionProjectionForBundle(bundleID);
+    NSString *bundleID = nil;
+    IdentifierManager *manager = nil;
+    @try {
+        bundleID = [[NSBundle mainBundle] bundleIdentifier]; manager = [IdentifierManager sharedManager];
+        if (!shouldSpoofForBundle(bundleID) || ![manager isIdentifierEnabled:@"IOSVersion"]) return nil;
+        return PXCurrentReportingSystemVersionProjectionForBundle(bundleID);
+    } @finally { bundleID = nil; manager = nil; }
 }
 
 static NSDictionary *spoofSystemVersionPlist(NSDictionary *originalPlist) {
     PX_RUNTIME_READ_OPERATION;
-    if (!originalPlist) return nil;
-    PXSystemVersionProjection *projection = PXScopedSystemVersionProjection();
-    return projection ? PXTransformSystemVersionDictionary(originalPlist, projection) : originalPlist;
+    PXSystemVersionProjection *projection = nil;
+    @try {
+        if (!originalPlist) return nil;
+        projection = PXScopedSystemVersionProjection();
+        return projection ? PXTransformSystemVersionDictionary(originalPlist, projection) : originalPlist;
+    } @finally { originalPlist = nil; projection = nil; }
 }
 
 NSData *replaced_NSData_dataWithContentsOfFile(Class self, SEL _cmd, NSString *path) {
     PX_RUNTIME_READ_OPERATION;
-    NSData *originalData = original_NSData_dataWithContentsOfFile
-        ? original_NSData_dataWithContentsOfFile(self, _cmd, path)
-        : nil;
-    if (!originalData || !isSystemVersionFile(path)) return originalData;
-    PXSystemVersionProjection *projection = PXScopedSystemVersionProjection();
-    return projection ? PXTransformSystemVersionData(originalData, projection) : originalData;
+    NSData *originalData = nil;
+    PXSystemVersionProjection *projection = nil;
+    @try {
+        originalData = original_NSData_dataWithContentsOfFile ? original_NSData_dataWithContentsOfFile(self, _cmd, path) : nil;
+        if (!originalData || PXSystemVersionProjectionActive()) return originalData;
+        BOOL previous = PXSystemVersionProjectionEnter();
+        @try {
+            if (!isSystemVersionFile(path)) return originalData;
+            projection = PXScopedSystemVersionProjection();
+            return projection ? PXTransformSystemVersionData(originalData, projection) : originalData;
+        } @catch (__unused NSException *exception) { return originalData; }
+        @finally { PXSystemVersionProjectionLeave(previous); }
+    } @finally { path = nil; originalData = nil; projection = nil; }
 }
 
 NSDictionary *replaced_NSDictionary_dictionaryWithContentsOfFile(Class self, SEL _cmd, NSString *path) {
     PX_RUNTIME_READ_OPERATION;
-    NSDictionary *originalDictionary = original_NSDictionary_dictionaryWithContentsOfFile
-        ? original_NSDictionary_dictionaryWithContentsOfFile(self, _cmd, path)
-        : nil;
-    if (!originalDictionary || !isSystemVersionFile(path)) return originalDictionary;
-    return spoofSystemVersionPlist(originalDictionary);
+    NSDictionary *originalDictionary = nil;
+    PXSystemVersionProjection *projection = nil;
+    @try {
+        originalDictionary = original_NSDictionary_dictionaryWithContentsOfFile ? original_NSDictionary_dictionaryWithContentsOfFile(self, _cmd, path) : nil;
+        if (!originalDictionary || PXSystemVersionProjectionActive()) return originalDictionary;
+        BOOL previous = PXSystemVersionProjectionEnter();
+        @try {
+            if (!isSystemVersionFile(path)) return originalDictionary;
+            return spoofSystemVersionPlist(originalDictionary);
+        } @catch (__unused NSException *exception) { return originalDictionary; }
+        @finally { PXSystemVersionProjectionLeave(previous); }
+    } @finally { path = nil; originalDictionary = nil; projection = nil; }
 }
 
 id replaced_NSString_stringWithContentsOfFile(Class self, SEL _cmd, NSString *path,
                                                NSStringEncoding encoding, NSError **error) {
     PX_RUNTIME_READ_OPERATION;
-    NSString *originalString = original_NSString_stringWithContentsOfFile
-        ? original_NSString_stringWithContentsOfFile(self, _cmd, path, encoding, error)
-        : nil;
-    if (!originalString || !isSystemVersionFile(path)) return originalString;
-    PXSystemVersionProjection *projection = PXScopedSystemVersionProjection();
-    return projection ? PXTransformSystemVersionString(originalString, encoding, projection) : originalString;
+    NSString *originalString = nil;
+    PXSystemVersionProjection *projection = nil;
+    @try {
+        originalString = original_NSString_stringWithContentsOfFile ? original_NSString_stringWithContentsOfFile(self, _cmd, path, encoding, error) : nil;
+        if (!originalString || PXSystemVersionProjectionActive()) return originalString;
+        BOOL previous = PXSystemVersionProjectionEnter();
+        @try {
+            if (!isSystemVersionFile(path)) return originalString;
+            projection = PXScopedSystemVersionProjection();
+            return projection ? PXTransformSystemVersionString(originalString, encoding, projection) : originalString;
+        } @catch (__unused NSException *exception) { return originalString; }
+        @finally { PXSystemVersionProjectionLeave(previous); }
+    } @finally { path = nil; originalString = nil; projection = nil; }
 }

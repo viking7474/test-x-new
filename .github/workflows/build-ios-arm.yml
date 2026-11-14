@@ -80,6 +80,9 @@ jobs:
       - name: Test native UA hook delegation and request fast path
         run: python3 scripts/test_ua_hook_dispatch.py --native
 
+      - name: Test native SystemVersion file CF and bundle boundaries
+        run: python3 scripts/test_system_version_boundaries.py --native
+
       - name: Test native artifact preparation and manager wrappers
         run: python3 scripts/test_runtime_artifact_preparation.py --native
 

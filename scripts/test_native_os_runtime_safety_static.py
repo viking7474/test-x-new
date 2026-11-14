@@ -148,7 +148,7 @@ require("PXKernelIOSProfileMayExposeTupleForBundle(deviceIDs[@\"IOSVersion\"], d
 nsbundle_body = body(ios, "%hook NSBundle", 5200)
 for key in ("MinimumOSVersion", "DTPlatformVersion", "DTSDKName"):
     require(key in nsbundle_body, f"NSBundle explicitly recognizes {key} as build metadata")
-require("return %orig;" in nsbundle_body,
+require("return %orig(key);" in nsbundle_body and "if (!relevant" in nsbundle_body,
         "NSBundle build metadata stays original instead of following spoofed OS")
 require("return original_CFBundleGetValueForInfoDictionaryKey" in ios,
         "CFBundle build metadata stays original instead of following spoofed OS")

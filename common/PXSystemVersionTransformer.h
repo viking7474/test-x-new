@@ -4,6 +4,12 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+/// Projection-only recursion guard shared by the file and both CF entry points.
+/// Pair Enter/Leave in finally; native reads themselves are not suppressed.
+FOUNDATION_EXPORT BOOL PXSystemVersionProjectionActive(void);
+FOUNDATION_EXPORT BOOL PXSystemVersionProjectionEnter(void);
+FOUNDATION_EXPORT void PXSystemVersionProjectionLeave(BOOL previous);
+
 /// Immutable version/build projection captured from one identity snapshot generation.
 @interface PXSystemVersionProjection : NSObject
 @property (nonatomic, copy, readonly) NSString *productVersion;

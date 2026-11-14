@@ -931,35 +931,37 @@ static CFDictionaryRef CFCopySystemVersionDictionary_hook(void) {
                                         PXHookDiagnosticResultSuccess);
     });
     CFDictionaryRef original = CFCopySystemVersionDictionary_orig ? CFCopySystemVersionDictionary_orig() : NULL;
+    if (PXSystemVersionProjectionActive()) return original;
     @autoreleasepool {
+        IdentifierManager *manager = nil;
+        NSString *bundleID = nil, *processName = nil, *signature = nil;
+        PXSystemVersionProjection *projection = nil;
+        NSDictionary *base = nil, *transformed = nil;
+        BOOL previous = PXSystemVersionProjectionEnter();
         @try {
             if (!%c(IdentifierManager)) return original;
-            IdentifierManager *manager = [%c(IdentifierManager) sharedManager];
-            NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-            NSString *processName = [NSProcessInfo processInfo].processName;
+            manager = [%c(IdentifierManager) sharedManager];
+            bundleID = [[NSBundle mainBundle] bundleIdentifier]; processName = [NSProcessInfo processInfo].processName;
             if (!manager || !bundleID || ![manager isIdentifierEnabled:@"IOSVersion"] ||
-                !PXProcessIsAllowedForSpoofing(bundleID, processName, PXScopeOptionAllowSafariAuthStack)) {
-                return original;
-            }
-
-            PXSystemVersionProjection *projection = PXCurrentReportingSystemVersionProjectionForBundle(bundleID);
+                !PXProcessIsAllowedForSpoofing(bundleID, processName, PXScopeOptionAllowSafariAuthStack)) return original;
+            projection = PXCurrentReportingSystemVersionProjectionForBundle(bundleID);
             if (!projection) return original;
-            NSDictionary *base = original ? (__bridge NSDictionary *)original : @{};
-            NSDictionary *transformed = PXTransformSystemVersionDictionary(base, projection);
+            base = original ? (__bridge NSDictionary *)original : @{};
+            transformed = PXTransformSystemVersionDictionary(base, projection);
             if (transformed == base) return original;
-
-            NSString *signature = [NSString stringWithFormat:@"%@|%@", projection.profileID ?: @"", projection.generation];
+            signature = [NSString stringWithFormat:@"%@|%@", projection.profileID ?: @"", projection.generation];
             if (PXLogOnceClaim(@"Tweak.SystemVersion", signature)) {
                 PXLog(@"[WeaponX] SystemVersion transformed profile=%@ gen=%@ version=%@ build=%@",
-                      projection.profileID ?: @"", projection.generation,
-                      projection.productVersion, projection.productBuildVersion);
+                      projection.profileID ?: @"", projection.generation, projection.productVersion, projection.productBuildVersion);
             }
             CFDictionaryRef result = CFBridgingRetain(transformed);
-            if (original) CFRelease(original);
-            return result;
-        } @catch (NSException *exception) {
-            PXLog(@"[WeaponX] SystemVersion transformer exception: %@", exception);
+            CFDictionaryRef retired = original; original = result;
+            if (retired) CFRelease(retired);
             return original;
+        } @catch (__unused NSException *exception) { return original; }
+        @finally {
+            PXSystemVersionProjectionLeave(previous);
+            manager = nil; bundleID = nil; processName = nil; signature = nil; projection = nil; base = nil; transformed = nil;
         }
     }
 }

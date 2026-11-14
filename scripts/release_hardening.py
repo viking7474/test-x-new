@@ -51,6 +51,7 @@ EXTENDED_PYTHON_TESTS = [
     "scripts/test_ios_reporting_cache.py",
     "scripts/test_ua_policy_and_sync.py",
     "scripts/test_ua_hook_dispatch.py",
+    "scripts/test_system_version_boundaries.py",
     "scripts/test_runtime_artifact_preparation.py",
     "scripts/test_runtime_identity_preparation.py",
     "scripts/test_runtime_source_transactions.py",

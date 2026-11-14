@@ -58,7 +58,8 @@ for token in (
 # same owner rather than introducing a second policy.
 for token in (
     "NSData *replaced_NSData_dataWithContentsOfFile",
-    "if (!originalData || !isSystemVersionFile(path)) return originalData;",
+    "if (!originalData || PXSystemVersionProjectionActive()) return originalData;",
+    "if (!isSystemVersionFile(path)) return originalData;",
     "return projection ? PXTransformSystemVersionData(originalData, projection) : originalData;",
     "NSDictionary *replaced_NSDictionary_dictionaryWithContentsOfFile",
     "return spoofSystemVersionPlist(originalDictionary);",
@@ -73,7 +74,8 @@ for token in (
     "static CFDictionaryRef CFCopySystemVersionDictionary_hook(void)",
     "PXTransformSystemVersionDictionary(base, projection)",
     "CFDictionaryRef result = CFBridgingRetain(transformed);",
-    "if (original) CFRelease(original);",
+    "CFDictionaryRef retired = original; original = result;",
+    "if (retired) CFRelease(retired);",
     'registerCFCopySystemVersionDictionaryProvider:@"tweak.cf.systemversion"',
 ):
     require(token in tweak, f"C-02 direct CF SystemVersion coverage drifted: {token}")
