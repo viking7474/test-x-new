@@ -36,7 +36,7 @@ getifaddrs_end = coordinator.index("static int PXCoord_statfs", getifaddrs_start
 getifaddrs_body = coordinator[getifaddrs_start:getifaddrs_end]
 require("BOOL handled = NO" in getifaddrs_body,
         "getifaddrs dispatcher does not track terminal pre-provider handling")
-require(getifaddrs_body.index("if (!handled)") < getifaddrs_body.index("PXGetifaddrsPostBlock post"),
+require(getifaddrs_body.index("if (!handled)") < getifaddrs_body.index("PXGetifaddrsPostBlock __unsafe_unretained post"),
         "getifaddrs post sanitizers must run after either original or terminal pre result")
 
 timezone = read("TLinkIOSTweak/LocaleTimeZoneHooks.x")

@@ -85,7 +85,9 @@ typedef BOOL (^PXGethostuuidPreBlock)(uuid_t _Nonnull uuid, const struct timespe
 
 + (instancetype)sharedCoordinator;
 
-/// Register a provider. Returns NO if providerID already registered for that symbol.
+/// Register a provider. Returns NO if providerID is already registered for any symbol.
+/// Late registration is supported; an in-flight dispatch keeps its original list.
+/// Equal priorities sort by providerID. Blocks must match the typed registrar ABI.
 - (BOOL)registerProviderID:(NSString *)providerID
                 symbolName:(NSString *)symbolName
                   priority:(NSInteger)priority
