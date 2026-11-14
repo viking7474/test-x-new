@@ -61,6 +61,7 @@ EXTENDED_PYTHON_TESTS = [
     "scripts/test_location_direct_semantics_static.py",
     "scripts/test_location_projection_semantics.py",
     "scripts/test_domain_task_lifecycle.py",
+    "scripts/test_domain_transport_boundaries.py",
     "scripts/test_keychain_bridge_retirement.py",
     "scripts/test_bootstrap_policy.py",
     "scripts/test_bootstrap_topology.py",

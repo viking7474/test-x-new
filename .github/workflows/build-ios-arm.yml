@@ -38,6 +38,9 @@ jobs:
       - name: Test native NSURLSession domain-blocking lifecycle
         run: python3 scripts/test_domain_task_lifecycle.py --native
 
+      - name: Test native domain DNS and legacy transport boundaries
+        run: python3 scripts/test_domain_transport_boundaries.py --native
+
       - name: Test native concrete location delegate interception
         run: python3 scripts/test_location_direct_semantics_static.py --native
 

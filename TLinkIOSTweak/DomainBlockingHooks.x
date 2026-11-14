@@ -1,5 +1,8 @@
 #import "DomainBlockingSettings.h"
 #import <Foundation/Foundation.h>
+#import <CFNetwork/CFNetwork.h>
+#import <errno.h>
+#import <string.h>
 #import <sys/socket.h>
 #import <netdb.h>
 #import <arpa/inet.h>
@@ -15,15 +18,14 @@
 
 
 
-// Function pointers for original C functions (DNS level)
-static struct hostent* (*original_gethostbyname)(const char *name);
-static int (*original_getaddrinfo)(const char *hostname, const char *servname, const struct addrinfo *hints, struct addrinfo **res);
-static int (*original_getnameinfo)(const struct sockaddr *sa, socklen_t salen, char *host, size_t hostlen, char *serv, size_t servlen, int flags);
+// Use the active SDK's resolver types, including Darwin socklen_t buffer lengths.
+static __typeof__(&gethostbyname) original_gethostbyname;
+static __typeof__(&getaddrinfo) original_getaddrinfo;
+static __typeof__(&getnameinfo) original_getnameinfo;
+static __thread BOOL gPXDomainEvaluating;
+static __thread BOOL gPXDomainRedirecting;
 
-// Forward declarations
 static NSString *getCurrentBundleID(void);
-static NSDictionary *loadScopedApps(void);
-static BOOL isInScopedAppsList(void);
 static BOOL shouldBlockDomain(NSString *host);
 
 static void domainBlockingSettingsChanged(CFNotificationCenterRef center,
@@ -31,149 +33,148 @@ static void domainBlockingSettingsChanged(CFNotificationCenterRef center,
                                           CFStringRef name,
                                           const void *object,
                                           CFDictionaryRef userInfo) {
+    (void)center; (void)observer; (void)name; (void)object; (void)userInfo;
     @autoreleasepool {
-        [[DomainBlockingSettings sharedSettings] loadSettings];
+        DomainBlockingSettings *settings = nil;
+        @try { settings = [DomainBlockingSettings sharedSettings]; [settings loadSettings]; }
+        @catch (__unused NSException *exception) { }
+        @finally { settings = nil; }
     }
 }
 
 #pragma mark - Scoped Apps Helper Functions (Unified)
 
-// Get the current bundle ID
+// Capture identity/scope once per decision. Keep the existing entry.enabled policy.
 static NSString *getCurrentBundleID(void) {
-    @try {
-        NSBundle *mainBundle = [NSBundle mainBundle];
-        if (!mainBundle) {
-            return nil;
-        }
-        return [mainBundle bundleIdentifier];
-    } @catch (NSException *e) {
-        return nil;
-    }
+    NSBundle *bundle = nil;
+    @try { bundle = [NSBundle mainBundle]; return bundle.bundleIdentifier; }
+    @catch (__unused NSException *exception) { return nil; }
+    @finally { bundle = nil; }
 }
 
-// Load scoped apps from the plist file
-static NSDictionary *loadScopedApps(void) {
-    return PXScopedAppsSnapshot();
-}
-
-// Check if the current app is in the scoped apps list
-static BOOL isInScopedAppsList(void) {
-    @try {
-        NSString *bundleID = getCurrentBundleID();
-        if (!bundleID || [bundleID length] == 0) {
-            return NO;
-        }
-        
-        NSDictionary *scopedApps = loadScopedApps();
-        if (!scopedApps || scopedApps.count == 0) {
-            return NO;
-        }
-        
-        // Check if this bundle ID is in the scoped apps dictionary
-        id appEntry = scopedApps[bundleID];
-        if (!appEntry || ![appEntry isKindOfClass:[NSDictionary class]]) {
-            return NO;
-        }
-        
-        // Check if the app is enabled - STEALTH: no logging
-        BOOL isEnabled = [appEntry[@"enabled"] boolValue];
-        return isEnabled;
-        
-    } @catch (NSException *e) {
-        // STEALTH: Silent exception handling
-        return NO;
-    }
-}
-
-#pragma mark - Unified Domain Blocking Logic
-
-// UNIFIED: Helper function to check if domain blocking should occur (works for both DNS and HTTP)
 static BOOL shouldBlockDomain(NSString *host) {
-    if (!host) {
-        return NO;
-    }
-    
+    NSString *bundleID = nil;
+    NSDictionary *scope = nil, *entry = nil;
+    id flag = nil;
+    DomainBlockingSettings *settings = nil;
+    BOOL previous = gPXDomainEvaluating;
     @autoreleasepool {
-        DomainBlockingSettings *settings = [DomainBlockingSettings sharedSettings];
-
-        // Get current bundle ID for scoped app check
-        NSString *bundleID = getCurrentBundleID();
-        
-        if (!bundleID) {
-            // STEALTH: No logging - avoid detection
-            return NO;
+        @try {
+            if (previous) return NO;
+            gPXDomainEvaluating = YES;
+            if (![host isKindOfClass:NSString.class] || !host.length) return NO;
+            bundleID = getCurrentBundleID();
+            if (!bundleID.length) return NO;
+            scope = PXScopedAppsSnapshot();
+            if (![scope isKindOfClass:NSDictionary.class]) return NO;
+            entry = scope[bundleID];
+            if (![entry isKindOfClass:NSDictionary.class]) return NO;
+            flag = entry[@"enabled"];
+            if (!([flag isKindOfClass:NSNumber.class] || [flag isKindOfClass:NSString.class]) || ![flag boolValue]) return NO;
+            settings = [DomainBlockingSettings sharedSettings];
+            return [settings isDomainBlocked:host];
+        } @catch (__unused NSException *exception) { return NO; }
+        @finally {
+            gPXDomainEvaluating = previous;
+            host = nil; bundleID = nil; scope = nil; entry = nil; flag = nil; settings = nil;
         }
-        
-        // Only check scoped apps if globally enabled
-        BOOL isScoped = isInScopedAppsList();
-        
-        if (!isScoped) {
-            // STEALTH: No logging - avoid detection
-            return NO;
-        }
-        
-        // Check if domain is blocked (domain names only, no IP blocking)
-        BOOL shouldBlock = [settings isDomainBlocked:host];
-        
-        // STEALTH: No logging - avoid detection
-        return shouldBlock;
     }
 }
 
-// Helper for C string domain checking (DNS level)
 static BOOL shouldBlockHostname(const char *hostname) {
-    if (!hostname) return NO;
-    
     @autoreleasepool {
-        NSString *host = [NSString stringWithUTF8String:hostname];
-        return shouldBlockDomain(host);
+        NSString *host = nil;
+        @try {
+            if (!hostname) return NO;
+            host = [NSString stringWithUTF8String:hostname];
+            return shouldBlockDomain(host);
+        } @catch (__unused NSException *exception) { return NO; }
+        @finally { host = nil; }
     }
+}
+
+// Reverse lookup output has an explicit bound; do not scan beyond it on a bad native result.
+static BOOL PXDomainBlockResolvedHost(const char *hostname, socklen_t length) {
+    @autoreleasepool {
+        NSString *host = nil;
+        @try {
+            if (!hostname || !length) return NO;
+            const char *end = memchr(hostname, 0, (size_t)length);
+            if (!end) return NO;
+            host = [[NSString alloc] initWithBytes:hostname length:(NSUInteger)(end - hostname) encoding:NSUTF8StringEncoding];
+            return shouldBlockDomain(host);
+        } @catch (__unused NSException *exception) { return NO; }
+        @finally { host = nil; }
+    }
+}
+
+// Both helper and adapter callers own named roots across policy failures.
+static BOOL PXDomainBlocksRequest(NSURLRequest *request) {
+    @autoreleasepool {
+        NSURL *url = nil;
+        NSString *host = nil;
+        @try { url = request.URL; host = url.host; return shouldBlockDomain(host); }
+        @catch (__unused NSException *exception) { return NO; }
+        @finally { request = nil; url = nil; host = nil; }
+    }
+}
+static BOOL PXDomainBlocksURL(NSURL *url) {
+    @autoreleasepool {
+        NSString *host = nil;
+        @try { host = url.host; return shouldBlockDomain(host); }
+        @catch (__unused NSException *exception) { return NO; }
+        @finally { url = nil; host = nil; }
+    }
+}
+
+// Only the adapter's exact internal target bypasses its nested message check.
+// Other requests made by a callback still receive normal domain policy.
+static BOOL PXDomainIsInternalRedirect(NSURL *url) {
+    NSString *text = nil;
+    @try {
+        if (!gPXDomainRedirecting) return NO;
+        text = url.absoluteString;
+        return [text isEqualToString:@"https://127.0.0.1:1"];
+    } @catch (__unused NSException *exception) { return NO; }
+    @finally { url = nil; text = nil; }
 }
 
 #pragma mark - DNS Level Blocking (C Functions)
 
 // Enhanced gethostbyname hook
 static struct hostent* hooked_gethostbyname(const char *name) {
-    if (shouldBlockHostname(name)) {
-        // STEALTH: No logging - apps can detect NSLog
-        // Set h_errno to indicate host not found
-        h_errno = HOST_NOT_FOUND;
-        return NULL;
-    }
-    
+    int savedErrno = errno, savedHostError = h_errno;
+    BOOL blocked = shouldBlockHostname(name);
+    errno = savedErrno; h_errno = savedHostError;
+    if (blocked) { h_errno = HOST_NOT_FOUND; return NULL; }
+    if (!original_gethostbyname) { errno = ENOSYS; h_errno = NO_RECOVERY; return NULL; }
     return original_gethostbyname(name);
 }
 
 // Enhanced getaddrinfo hook
 static int hooked_getaddrinfo(const char *hostname, const char *servname, const struct addrinfo *hints, struct addrinfo **res) {
-    if (shouldBlockHostname(hostname)) {
-        // STEALTH: No logging - silent blocking
-        // Return EAI_NONAME to indicate name resolution failure
-        return EAI_NONAME;
-    }
-    
+    int savedErrno = errno, savedHostError = h_errno;
+    BOOL blocked = shouldBlockHostname(hostname);
+    errno = savedErrno; h_errno = savedHostError;
+    if (blocked) { if (res) *res = NULL; return EAI_NONAME; }
+    if (!original_getaddrinfo) { if (res) *res = NULL; errno = ENOSYS; return EAI_SYSTEM; }
     return original_getaddrinfo(hostname, servname, hints, res);
 }
 
 // Enhanced getnameinfo hook (reverse DNS)
-static int hooked_getnameinfo(const struct sockaddr *sa, socklen_t salen, char *host, size_t hostlen, char *serv, size_t servlen, int flags) {
-    // Call original first to get the hostname
+static int hooked_getnameinfo(const struct sockaddr *sa, socklen_t salen, char *host, socklen_t hostlen, char *serv, socklen_t servlen, int flags) {
+    if (!original_getnameinfo) { errno = ENOSYS; return EAI_SYSTEM; }
     int result = original_getnameinfo(sa, salen, host, hostlen, serv, servlen, flags);
-    
-    // If successful and we got a hostname, check if we should block it
-    if (result == 0 && host && hostlen > 0) {
-        if (shouldBlockHostname(host)) {
-            // STEALTH: No logging - silent reverse DNS blocking
-            // Clear the hostname to indicate no result
-            if (hostlen > 0) {
-                host[0] = '\0';
-            }
-            return EAI_NONAME;
-        }
-    }
-    
+    if (result != 0 || !host || !hostlen) return result;
+    int savedErrno = errno, savedHostError = h_errno;
+    BOOL blocked = PXDomainBlockResolvedHost(host, hostlen);
+    errno = savedErrno; h_errno = savedHostError;
+    if (blocked) { host[0] = 0; return EAI_NONAME; }
     return result;
 }
+
+// Catch prototype drift in the real SDK at build time, not after injection.
+_Static_assert(__builtin_types_compatible_p(__typeof__(&hooked_getnameinfo), __typeof__(&getnameinfo)), "getnameinfo ABI mismatch");
 
 #pragma mark - Foundation Level DNS Blocking
 
@@ -181,16 +182,12 @@ static int hooked_getnameinfo(const struct sockaddr *sa, socklen_t salen, char *
 %hook CFHost
 
 + (CFHostRef)createWithName:(CFStringRef)hostname {
-    if (hostname) {
-        @autoreleasepool {
-            NSString *hostStr = (__bridge NSString *)hostname;
-            if (shouldBlockDomain(hostStr)) {
-                // STEALTH: No logging - silent CFHost blocking
-                return NULL;
-            }
-        }
-    }
-    return %orig;
+    NSString *host = nil;
+    @try {
+        @try { host = (__bridge NSString *)hostname; if (shouldBlockDomain(host)) return NULL; }
+        @catch (__unused NSException *exception) { }
+        return %orig;
+    } @finally { host = nil; }
 }
 
 %end
@@ -199,11 +196,8 @@ static int hooked_getnameinfo(const struct sockaddr *sa, socklen_t salen, char *
 %hook NSHost
 
 + (NSHost *)hostWithName:(NSString *)name {
-    if (shouldBlockDomain(name)) {
-        // STEALTH: No logging - silent NSHost blocking
-        return nil;
-    }
-    return %orig;
+    @try { if (shouldBlockDomain(name)) return nil; return %orig; }
+    @finally { name = nil; }
 }
 
 + (NSHost *)hostWithAddress:(NSString *)address {
@@ -219,11 +213,8 @@ static int hooked_getnameinfo(const struct sockaddr *sa, socklen_t salen, char *
 %hook NWEndpoint
 
 + (instancetype)endpointWithHost:(NSString *)hostname port:(NSString *)port {
-    if (shouldBlockDomain(hostname)) {
-        // STEALTH: No logging - silent Network.framework blocking
-        return nil;
-    }
-    return %orig;
+    @try { if (shouldBlockDomain(hostname)) return nil; return %orig; }
+    @finally { hostname = nil; port = nil; }
 }
 
 %end
@@ -236,82 +227,106 @@ static int hooked_getnameinfo(const struct sockaddr *sa, socklen_t salen, char *
 // localhost hid the real host before session policy could inspect it. Legacy
 // NSURLConnection/CFNetwork/WebKit entry points retain their existing adapters.
 static NSURLSession *PXDomainObservedSession(NSURLSession *session) {
-    PXDomainObserveURLSession(session, ^BOOL(NSString *host) {
-        return shouldBlockDomain(host);
-    });
-    return session;
+    @try {
+        @try {
+            PXDomainObserveURLSession(session, ^BOOL(NSString *host) { return shouldBlockDomain(host); });
+        } @catch (__unused NSException *exception) { }
+        return session;
+    } @finally { session = nil; }
 }
 
 %hook NSURLSession
 
 + (NSURLSession *)sharedSession {
-    NSURLSession *session = %orig;
-    return PXDomainObservedSession(session);
+    NSURLSession *session = nil;
+    @try { session = %orig; return PXDomainObservedSession(session); }
+    @finally { session = nil;  }
 }
 
 + (NSURLSession *)sessionWithConfiguration:(NSURLSessionConfiguration *)configuration {
-    NSURLSession *session = %orig;
-    return PXDomainObservedSession(session);
+    NSURLSession *session = nil;
+    @try { session = %orig; return PXDomainObservedSession(session); }
+    @finally { session = nil; configuration = nil; }
 }
 
 + (NSURLSession *)sessionWithConfiguration:(NSURLSessionConfiguration *)configuration
                                 delegate:(id<NSURLSessionDelegate>)delegate
                            delegateQueue:(NSOperationQueue *)queue {
-    NSURLSession *session = %orig;
-    return PXDomainObservedSession(session);
+    NSURLSession *session = nil;
+    @try { session = %orig; return PXDomainObservedSession(session); }
+    @finally { session = nil; configuration = nil; delegate = nil; queue = nil; }
 }
 
 %end
 
 #pragma mark - NSURLConnection Legacy Support
 
+static void PXDomainDeliverBlockedAsync(NSOperationQueue *queue, void (^handler)(NSURLResponse *, NSData *, NSError *)) {
+    NSOperationQueue *targetQueue = nil;
+    void (^client)(NSURLResponse *, NSData *, NSError *) = nil;
+    NSError *error = nil;
+    dispatch_block_t delivery = nil, delayed = nil;
+    @try {
+        if (!handler) return;
+        targetQueue = queue ?: [NSOperationQueue mainQueue]; client = [handler copy];
+        error = [NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorDNSLookupFailed
+            userInfo:@{NSLocalizedDescriptionKey: @"The host name could not be resolved."}];
+        {
+            delivery = ^{
+                void (^completion)(NSURLResponse *, NSData *, NSError *) = nil;
+                NSError *failure = nil;
+                @try { completion = client; failure = error; completion(nil, nil, failure); }
+                @finally { completion = nil; failure = nil; }
+            };
+        }
+        {
+            delayed = ^{
+                NSOperationQueue *target = nil;
+                dispatch_block_t callback = nil;
+                @try { target = targetQueue; callback = delivery; [target addOperationWithBlock:callback]; }
+                @finally { target = nil; callback = nil; }
+            };
+        }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), delayed);
+    } @finally { queue = nil; handler = nil; targetQueue = nil; client = nil; error = nil; delivery = nil; delayed = nil; }
+}
+
 %hook NSURLConnection
 
 + (NSData *)sendSynchronousRequest:(NSURLRequest *)request returningResponse:(NSURLResponse **)response error:(NSError **)error {
-    if (shouldBlockDomain(request.URL.host) && request.URL && request.URL.host) {
-        // STEALTH: Simulate realistic DNS failure
-        if (error) {
-            *error = [NSError errorWithDomain:NSURLErrorDomain 
-                                         code:NSURLErrorCannotFindHost 
-                                     userInfo:@{NSLocalizedDescriptionKey: @"A server with the specified hostname could not be found."}];
+    @try {
+        if (PXDomainBlocksRequest(request)) {
+            if (error) *error = [NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorCannotFindHost
+                userInfo:@{NSLocalizedDescriptionKey: @"A server with the specified hostname could not be found."}];
+            if (response) *response = nil;
+            return nil;
         }
-        if (response) *response = nil;
-        return nil;
-    }
-    return %orig;
+        return %orig;
+    } @finally { request = nil; }
 }
 
 + (void)sendAsynchronousRequest:(NSURLRequest *)request queue:(NSOperationQueue *)queue completionHandler:(void (^)(NSURLResponse *, NSData *, NSError *))handler {
-    if (shouldBlockDomain(request.URL.host) && request.URL && request.URL.host) {
-        // STEALTH: Realistic async failure with delay
-        if (handler) {
-            // P1 FIX (callback sai queue): +sendAsynchronousRequest:queue:completionHandler: must
-            // deliver its completion handler on the caller-provided NSOperationQueue (Apple's
-            // contract), not on a global GCD queue. Wrong-queue delivery breaks callers that
-            // expect the handler on their own queue (e.g. main-thread UI updates).
-            NSOperationQueue *targetQueue = queue ?: [NSOperationQueue mainQueue];
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-                NSError *error = [NSError errorWithDomain:NSURLErrorDomain 
-                                                     code:NSURLErrorDNSLookupFailed 
-                                                 userInfo:@{NSLocalizedDescriptionKey: @"The host name could not be resolved."}];
-                [targetQueue addOperationWithBlock:^{
-                    handler(nil, nil, error);
-                }];
-            });
-        }
-        return;
-    }
-    %orig;
+    @try {
+        if (PXDomainBlocksRequest(request)) { PXDomainDeliverBlockedAsync(queue, handler); return; }
+        %orig;
+    } @finally { request = nil; queue = nil; handler = nil; }
 }
 
 - (id)initWithRequest:(NSURLRequest *)request delegate:(id)delegate {
-    if (shouldBlockDomain(request.URL.host) && request.URL && request.URL.host) {
-        // STEALTH: Initialize with localhost that will fail
-        NSMutableURLRequest *blockRequest = [request mutableCopy];
-        [blockRequest setURL:[NSURL URLWithString:@"https://127.0.0.1:1"]];
-        return %orig(blockRequest, delegate);
-    }
-    return %orig;
+    NSMutableURLRequest *blockRequest = nil;
+    NSURL *blockURL = nil;
+    BOOL blocked = NO;
+    @try {
+        blocked = PXDomainBlocksRequest(request);
+        if (blocked) {
+            @try {
+                blockRequest = [request mutableCopy]; blockURL = [NSURL URLWithString:@"https://127.0.0.1:1"];
+                if (!blockRequest || !blockURL) return nil;
+                [blockRequest setURL:blockURL];
+            } @catch (__unused NSException *exception) { return nil; }
+        }
+        return %orig(blocked ? blockRequest : request, delegate);
+    } @finally { request = nil; delegate = nil; blockRequest = nil; blockURL = nil; }
 }
 
 %end
@@ -321,48 +336,60 @@ static NSURLSession *PXDomainObservedSession(NSURLSession *session) {
 %group ScopedApps
 
 %hookf(CFReadStreamRef, CFReadStreamCreateForHTTPRequest, CFAllocatorRef alloc, CFHTTPMessageRef request) {
-    // P1 FIX (CF lifetime / UAF): CFHTTPMessageCopyRequestURL returns a +1 CF object; own it in
-    // one variable and release it exactly once on every path.
-    CFURLRef requestURL = CFHTTPMessageCopyRequestURL(request);
-    NSURL *url = (__bridge NSURL *)requestURL;
-    if (url.host && shouldBlockDomain(url.host)) {
-        // STEALTH: No logging, create stream with localhost that will fail naturally.
-        if (requestURL) CFRelease(requestURL);
-        // CFHTTPMessageCopyRequestMethod / CFHTTPMessageCopyVersion each return a +1 copy; capture
-        // them so they are released instead of leaked into CFHTTPMessageCreateRequest, and
-        // NULL-guard every created object before use.
-        CFURLRef blockURL = CFURLCreateWithString(alloc, CFSTR("https://127.0.0.1:1"), NULL);
-        CFStringRef method = CFHTTPMessageCopyRequestMethod(request);
-        CFStringRef version = CFHTTPMessageCopyVersion(request);
-        CFReadStreamRef stream = NULL;
-        if (blockURL) {
-            CFHTTPMessageRef blockRequest = CFHTTPMessageCreateRequest(alloc, method, blockURL, version);
-            if (blockRequest) {
-                stream = %orig(alloc, blockRequest);
-                CFRelease(blockRequest);
+    CFURLRef requestURL = NULL, blockURL = NULL;
+    CFStringRef method = NULL, version = NULL;
+    CFHTTPMessageRef blockRequest = NULL;
+    CFHTTPMessageRef heldRequest = request ? (CFHTTPMessageRef)CFRetain(request) : NULL;
+    CFAllocatorRef heldAllocator = alloc ? (CFAllocatorRef)CFRetain(alloc) : NULL;
+    NSURL *url = nil;
+    BOOL blocked = NO, previous = gPXDomainRedirecting;
+    @try {
+        @try {
+            if (request) {
+                requestURL = CFHTTPMessageCopyRequestURL(request); url = (__bridge NSURL *)requestURL;
+                blocked = !PXDomainIsInternalRedirect(url) && PXDomainBlocksURL(url);
+                if (blocked) {
+                    blockURL = CFURLCreateWithString(alloc, CFSTR("https://127.0.0.1:1"), NULL);
+                    method = CFHTTPMessageCopyRequestMethod(request); version = CFHTTPMessageCopyVersion(request);
+                    if (!blockURL || !method || !version) return NULL;
+                    gPXDomainRedirecting = YES;
+                    blockRequest = CFHTTPMessageCreateRequest(alloc, method, blockURL, version);
+                    if (!blockRequest) return NULL;
+                }
             }
-        }
-        if (method) CFRelease(method);
-        if (version) CFRelease(version);
-        if (blockURL) CFRelease(blockURL);
-        return stream;
+        } @catch (__unused NSException *exception) { if (blocked) return NULL; }
+        @finally { gPXDomainRedirecting = previous; }
+        return %orig(alloc, blocked ? blockRequest : request);
+    } @finally {
+        gPXDomainRedirecting = previous; url = nil;
+        if (requestURL) CFRelease(requestURL); if (blockURL) CFRelease(blockURL);
+        if (method) CFRelease(method); if (version) CFRelease(version); if (blockRequest) CFRelease(blockRequest);
+        if (heldRequest) CFRelease(heldRequest); if (heldAllocator) CFRelease(heldAllocator);
     }
-    if (requestURL) CFRelease(requestURL);
-    return %orig;
 }
 
 %hookf(CFHTTPMessageRef, CFHTTPMessageCreateRequest, CFAllocatorRef alloc, CFStringRef requestMethod, CFURLRef url, CFStringRef httpVersion) {
-    if (url) {
-        NSURL *nsURL = (__bridge NSURL *)url;
-        if (shouldBlockDomain(nsURL.host)) {
-            // STEALTH: No logging, create request with localhost that will fail
-            CFURLRef blockURL = CFURLCreateWithString(alloc, CFSTR("https://127.0.0.1:1"), NULL);
-            CFHTTPMessageRef result = %orig(alloc, requestMethod, blockURL, httpVersion);
-            CFRelease(blockURL);
-            return result;
-        }
+    CFURLRef blockURL = NULL, heldURL = url ? (CFURLRef)CFRetain(url) : NULL;
+    CFStringRef heldMethod = requestMethod ? (CFStringRef)CFRetain(requestMethod) : NULL;
+    CFStringRef heldVersion = httpVersion ? (CFStringRef)CFRetain(httpVersion) : NULL;
+    CFAllocatorRef heldAllocator = alloc ? (CFAllocatorRef)CFRetain(alloc) : NULL;
+    NSURL *nsURL = nil;
+    BOOL blocked = NO;
+    @try {
+        @try {
+            if (url) {
+                nsURL = (__bridge NSURL *)url; blocked = !PXDomainIsInternalRedirect(nsURL) && PXDomainBlocksURL(nsURL);
+                if (blocked) {
+                    blockURL = CFURLCreateWithString(alloc, CFSTR("https://127.0.0.1:1"), NULL);
+                    if (!blockURL) return NULL;
+                }
+            }
+        } @catch (__unused NSException *exception) { if (blocked) return NULL; }
+        return %orig(alloc, requestMethod, blocked ? blockURL : url, httpVersion);
+    } @finally {
+        nsURL = nil; if (blockURL) CFRelease(blockURL); if (heldURL) CFRelease(heldURL);
+        if (heldMethod) CFRelease(heldMethod); if (heldVersion) CFRelease(heldVersion); if (heldAllocator) CFRelease(heldAllocator);
     }
-    return %orig;
 }
 
 %end
@@ -372,31 +399,48 @@ static NSURLSession *PXDomainObservedSession(NSURLSession *session) {
 %hook WKWebView
 
 - (WKNavigation *)loadRequest:(NSURLRequest *)request {
-    if (shouldBlockDomain(request.URL.host) && request.URL && request.URL.host) {
-        // STEALTH: Load blank page instead of showing error
-        // WebKit has its own network process; keep its dedicated adapter.
-        NSURLRequest *blockRequest = [NSURLRequest requestWithURL:[NSURL URLWithString:@"about:blank"]];
-        return %orig(blockRequest);
-    }
-    return %orig;
+    __attribute__((objc_precise_lifetime)) id receiver = self;
+    NSURL *blockURL = nil;
+    NSURLRequest *blockRequest = nil;
+    BOOL blocked = NO;
+    @try {
+        blocked = PXDomainBlocksRequest(request);
+        if (blocked) {
+            @try { blockURL = [NSURL URLWithString:@"about:blank"]; if (blockURL) blockRequest = [NSURLRequest requestWithURL:blockURL]; if (!blockRequest) return nil; }
+            @catch (__unused NSException *exception) { return nil; }
+        }
+        return %orig(blocked ? blockRequest : request);
+    } @finally { receiver = nil; request = nil; blockURL = nil; blockRequest = nil; }
 }
 
 - (WKNavigation *)loadHTMLString:(NSString *)string baseURL:(NSURL *)baseURL {
-    if (baseURL && shouldBlockDomain(baseURL.host)) {
-        // STEALTH: Load with localhost base URL
-        NSURL *blockURL = [NSURL URLWithString:@"https://127.0.0.1:1"];
-        return %orig(string, blockURL);
-    }
-    return %orig;
+    __attribute__((objc_precise_lifetime)) id receiver = self;
+    NSURL *blockURL = nil;
+    BOOL blocked = NO;
+    @try {
+        blocked = PXDomainBlocksURL(baseURL);
+        if (blocked) {
+            @try { blockURL = [NSURL URLWithString:@"https://127.0.0.1:1"]; if (!blockURL) return nil; }
+            @catch (__unused NSException *exception) { return nil; }
+        }
+        return %orig(string, blocked ? blockURL : baseURL);
+    } @finally { receiver = nil; string = nil; baseURL = nil; blockURL = nil; }
 }
 
 - (WKNavigation *)loadFileURL:(NSURL *)URL allowingReadAccessToURL:(NSURL *)readAccessURL {
-    if (URL && shouldBlockDomain(URL.host)) {
-        // STEALTH: Load blank page instead
-        NSURLRequest *blockRequest = [NSURLRequest requestWithURL:[NSURL URLWithString:@"about:blank"]];
-        return [self loadRequest:blockRequest];
-    }
-    return %orig;
+    __attribute__((objc_precise_lifetime)) id receiver = self;
+    NSURL *blockURL = nil;
+    NSURLRequest *blockRequest = nil;
+    BOOL blocked = NO;
+    @try {
+        blocked = PXDomainBlocksURL(URL);
+        if (blocked) {
+            @try { blockURL = [NSURL URLWithString:@"about:blank"]; if (blockURL) blockRequest = [NSURLRequest requestWithURL:blockURL]; if (!blockRequest) return nil; }
+            @catch (__unused NSException *exception) { return nil; }
+        }
+        if (blocked) return [self loadRequest:blockRequest];
+        return %orig(URL, readAccessURL);
+    } @finally { receiver = nil; URL = nil; readAccessURL = nil; blockURL = nil; blockRequest = nil; }
 }
 
 %end
@@ -404,12 +448,20 @@ static NSURLSession *PXDomainObservedSession(NSURLSession *session) {
 %hook WKNavigationAction
 
 - (NSURLRequest *)request {
-    NSURLRequest *originalRequest = %orig;
-    if (originalRequest.URL && shouldBlockDomain(originalRequest.URL.host)) {
-        // STEALTH: Return request to localhost
-        return [NSURLRequest requestWithURL:[NSURL URLWithString:@"https://127.0.0.1:1"]];
-    }
-    return originalRequest;
+    __attribute__((objc_precise_lifetime)) id receiver = self;
+    NSURLRequest *originalRequest = nil, *blockRequest = nil;
+    NSURL *blockURL = nil;
+    @try {
+        originalRequest = %orig;
+        @try {
+            if (PXDomainBlocksRequest(originalRequest)) {
+                blockURL = [NSURL URLWithString:@"https://127.0.0.1:1"];
+                if (blockURL) blockRequest = [NSURLRequest requestWithURL:blockURL];
+                return blockRequest;
+            }
+        } @catch (__unused NSException *exception) { }
+        return originalRequest;
+    } @finally { receiver = nil; originalRequest = nil; blockRequest = nil; blockURL = nil; }
 }
 
 %end

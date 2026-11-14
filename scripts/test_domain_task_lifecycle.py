@@ -24,7 +24,7 @@ def source_contracts() -> None:
     fixture = (ROOT / "tests/PXDomainTaskLifecycleTests.m").read_text(encoding="utf-8")
     session = hook.split("#pragma mark - NSURLSession Lifecycle Blocking", 1)[1].split(
         "#pragma mark - NSURLConnection Legacy Support", 1)[0]
-    check(session.count("NSURLSession *session = %orig;") == 3 and
+    check(session.count("session = %orig;") == 3 and
           session.count("return PXDomainObservedSession(session);") == 3,
           "all three public session constructors must preserve original results")
     check("PXDomainObservedSession(%orig)" not in session,
