@@ -63,8 +63,11 @@ def source_contracts(source=None):
     init = method(s, '- (instancetype)initWithFrame:(CGRect)frame configuration:(WKWebViewConfiguration *)configuration')
     assert 'PXUASyncRegisterWKWebView(webView);' in init and 'PXUASyncHeaderAndJSEnabled' not in init
     header = method(s, '- (void)setValue:(NSString *)value forHTTPHeaderField:(NSString *)field')
-    assert header.index('uint64_t syncEpoch = PXUASyncEpoch();') < header.index('BOOL syncEnabled =')
+    prepared = method(s, 'static NSString *PXUAPrepareRequestHeader(NSMutableURLRequest *request, NSString *value, NSString *field,\n                                        PXUAHeaderKind kind, NSString *__strong *syncHost,\n                                        NSString *__strong *syncUA, uint64_t *epoch)')
+    assert prepared.index('PXUASyncEpoch()') < prepared.index('BOOL syncEnabled =')
+    assert '*epoch = syncEpoch;' in prepared
     assert 'PXUASyncApplyToWebViewsForHost(host, modifiedValue, syncEpoch);' in header
+    assert header.index('%orig(candidate ?: value, field);') < header.index('PXUASyncApplyToWebViewsForHost')
     settings = method(s, 'static void settingsChanged(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo)')
     assert settings.count('PXUAPolicyInvalidate();') == 1
     assert 'scripts/test_ua_policy_and_sync.py --native' in (ROOT / '.github/workflows/build-ios-arm.yml').read_text()

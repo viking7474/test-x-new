@@ -77,6 +77,9 @@ jobs:
       - name: UA policy and main-thread WebView sync
         run: python3 scripts/test_ua_policy_and_sync.py --native
 
+      - name: Test native UA hook delegation and request fast path
+        run: python3 scripts/test_ua_hook_dispatch.py --native
+
       - name: Test native artifact preparation and manager wrappers
         run: python3 scripts/test_runtime_artifact_preparation.py --native
 

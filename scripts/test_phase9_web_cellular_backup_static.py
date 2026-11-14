@@ -22,7 +22,7 @@ require("PXNormalizeUserAgent" in ua and "Version/" in ua and "Mobile/" in ua,
         "central UA normalizer missing")
 require("PXNormalizeUserAgent(*userAgentString" in hooks,
         "legacy UA surfaces do not delegate to central normalizer")
-require("PXCanonicalWebIdentityHeaders" in hooks and "managedIdentityHeaders" in hooks,
+require("PXCanonicalWebIdentityHeaders" in hooks and all(token in hooks for token in ("PXUAClassifyHeader", "PXUAHeaderLanguage", "PXUAHeaderPlatform", "PXUAHeaderMobile")),
         "managed web identity headers are not synchronized")
 require("PXWebKitHelperProcessIsInScope" in hooks and "PXScopeOptionAllowSafariAuthStack" in hooks,
         "WebKit helper scope is not fail closed")
