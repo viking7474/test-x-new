@@ -94,7 +94,10 @@ typedef BOOL (^PXGethostuuidPreBlock)(uuid_t _Nonnull uuid, const struct timespe
                   preBlock:(id _Nullable)preBlock
                  postBlock:(id _Nullable)postBlock;
 
-/// Install MSHookFunction once per owned symbol. Safe to call multiple times.
+/// Install once in the process, inline on the first admitted caller.
+/// Same-thread reentry returns; concurrent callers retain dispatch_once waiting.
+/// Missing hook engine leaves the pass unstarted; individual symbol failures after
+/// it starts are not retried (a hook may have partially succeeded).
 - (void)installOwnedSymbolsIfNeeded;
 
 /// Whether a given symbol has been installed by the coordinator.

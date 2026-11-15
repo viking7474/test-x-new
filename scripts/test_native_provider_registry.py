@@ -55,8 +55,9 @@ def source_contracts(source=None):
     assert mapper.count('result = g_orig_sysctlnametomib ?') == 1
     assert 'providers = nil;\n        }\n        if (!handled)' in mapper
     diag = method(s, '- (NSDictionary *)diagnostics')
-    assert 'state = [self _captureProviderState];' in diag and '@finally { os_unfair_lock_unlock(&_lock); }' in diag
-    assert diag.index('os_unfair_lock_unlock(&_lock);') < diag.index('for (NSString *sym in state.providers)')
+    assert 'state = [self _captureProviderState];' in diag and 'metadata = [self _captureInstallationMetadata];' in diag
+    assert 'os_unfair_lock_lock' not in diag
+    assert diag.index('_captureInstallationMetadata') < diag.index('for (NSString *sym in state.providers)')
     assert 'providersBySymbol' not in s and 'globalProviderIDs' not in s
     check_macro_arity((ROOT / 'tests/PXNativeProviderRegistryTests.m').read_text(encoding='utf-8'), 'provider-registry')
     assert 'scripts/test_native_provider_registry.py --native' in (ROOT / '.github/workflows/build-ios-arm.yml').read_text()

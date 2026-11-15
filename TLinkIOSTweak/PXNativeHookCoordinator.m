@@ -47,15 +47,107 @@ NSString * const kPXNativeSymbolGethostuuid = @"gethostuuid";
 @implementation PXNativeProviderState
 @end
 static __thread BOOL gPXPreparingNativeProvider;
+static __thread BOOL gPXInsideNativeInstallPass;
+static __thread BOOL gPXReadingNativeSymbol;
+
+// Installation metadata is published as a complete immutable packet. Native
+// patching itself is irreversible and remains serialized by the process once.
+@interface PXNativeInstallMetadata : NSObject
+@property (nonatomic, copy) NSSet<NSString *> *installed;
+@property (nonatomic, copy) NSDictionary<NSString *, NSNumber *> *counts;
+@property (nonatomic, copy) NSDictionary<NSString *, NSValue *> *originals;
+@end
+@implementation PXNativeInstallMetadata
+@end
+
+static NSString *PXNativeCanonicalSymbol(NSString *symbol) {
+    NSString *frozen = nil;
+    BOOL previous = gPXReadingNativeSymbol;
+    @try {
+        if (previous) return nil;
+        gPXReadingNativeSymbol = YES;
+        // Internal callers use these constants, including Storage's hot getter.
+        // Pointer checks avoid copying/validating strings on that existing path.
+        if (symbol == kPXNativeSymbolSysctl || symbol == kPXNativeSymbolSysctlByname ||
+            symbol == kPXNativeSymbolSysctlNameToMIB || symbol == kPXNativeSymbolGethostname ||
+            symbol == kPXNativeSymbolGetifaddrs || symbol == kPXNativeSymbolGethostuuid ||
+            symbol == kPXNativeSymbolStatfs || symbol == kPXNativeSymbolStatfs64 ||
+            symbol == kPXNativeSymbolGetfsstat || symbol == kPXNativeSymbolGetfsstat64 ||
+            symbol == kPXNativeSymbolIORegistryEntryCreateCFProperty || symbol == kPXNativeSymbolIORegistryEntryCreateCFProperties ||
+            symbol == kPXNativeSymbolIORegistryEntrySearchCFProperty || symbol == kPXNativeSymbolCFCopySystemVersionDictionary ||
+            symbol == kPXNativeSymbolCNCopyCurrentNetworkInfo) return symbol;
+        if (![symbol isKindOfClass:NSString.class] || !symbol.length) return nil;
+        frozen = [[NSString alloc] initWithString:symbol];
+        return frozen.length ? frozen : nil;
+    } @catch (__unused NSException *exception) { return nil; }
+    @finally { gPXReadingNativeSymbol = previous; symbol = nil; frozen = nil; }
+}
+
+// The five known images must stay loaded while installed trampolines use them.
+// Cache one loader reference per image, including a failed first acquisition;
+// do not reopen the same libSystem image for each missing base symbol.
+static void *PXNativeInstallImage(NSUInteger index) {
+    static const char *paths[] = {
+        "/usr/lib/libSystem.B.dylib", "/usr/lib/system/libsystem_c.dylib",
+        "/System/Library/Frameworks/IOKit.framework/IOKit",
+        "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+        "/System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration"
+    };
+    static void *handles[5];
+    static dispatch_once_t tokens[5];
+    if (index >= 5) return NULL;
+    dispatch_once(&tokens[index], ^{
+        @try {
+            if (index < 2) handles[index] = dlopen(paths[index], RTLD_NOLOAD | RTLD_LAZY);
+            if (!handles[index]) handles[index] = dlopen(paths[index], RTLD_NOW);
+        } @catch (__unused NSException *exception) { handles[index] = NULL; }
+    });
+    return handles[index];
+}
+
+static void *PXNativeResolveInstallSymbol(NSString *symbol) {
+    void *handle = NULL, *address = NULL;
+    @try {
+        if ([symbol isEqualToString:kPXNativeSymbolIORegistryEntryCreateCFProperty] ||
+            [symbol isEqualToString:kPXNativeSymbolIORegistryEntryCreateCFProperties] ||
+            [symbol isEqualToString:kPXNativeSymbolIORegistryEntrySearchCFProperty]) {
+            handle = PXNativeInstallImage(2);
+            return handle ? dlsym(handle, symbol.UTF8String) : NULL;
+        }
+        if ([symbol isEqualToString:kPXNativeSymbolCFCopySystemVersionDictionary]) {
+            handle = PXNativeInstallImage(3);
+            if (!handle) return NULL;
+            address = dlsym(handle, "CFCopySystemVersionDictionary");
+            return address ?: dlsym(handle, "_CFCopySystemVersionDictionary");
+        }
+        if ([symbol isEqualToString:kPXNativeSymbolCNCopyCurrentNetworkInfo]) {
+            handle = PXNativeInstallImage(4);
+            return handle ? dlsym(handle, symbol.UTF8String) : NULL;
+        }
+        address = dlsym(RTLD_DEFAULT, symbol.UTF8String);
+        if (address) return address;
+        for (NSUInteger index = 0; index < 2; index++) {
+            handle = PXNativeInstallImage(index);
+            if (handle) { address = dlsym(handle, symbol.UTF8String); if (address) return address; }
+        }
+        return NULL;
+    } @finally { symbol = nil; }
+}
+
+// Logging is optional; it cannot interrupt patch bookkeeping or poison once.
+static void PXNativeInstallReport(NSString *symbol, NSString *reason, void *original) {
+    @try { PXLog(@"[PXNativeHook] %@: %@ (original=%p)", symbol, reason, original); }
+    @catch (__unused NSException *exception) { }
+    @finally { symbol = nil; reason = nil; }
+}
+
 
 @interface PXNativeHookCoordinator () {
-    os_unfair_lock _lock; // Installation metadata is independent of hot readers.
+    os_unfair_lock _lock; // Immutable installation-metadata pointer only.
     os_unfair_lock _registryLock;
     PXNativeProviderState *_providerState;
+    PXNativeInstallMetadata *_installationMetadata;
 }
-@property (nonatomic, strong) NSMutableSet<NSString *> *installedSymbols;
-@property (nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *installCounts;
-@property (nonatomic, strong) NSMutableDictionary<NSString *, NSValue *> *originalPointers;
 @end
 
 @implementation PXNativeHookCoordinator
@@ -96,9 +188,10 @@ static int (*g_orig_gethostuuid)(uuid_t, const struct timespec *) = NULL;
         _providerState = [PXNativeProviderState new];
         _providerState.providers = @{};
         _providerState.providerIDs = [NSSet set];
-        _installedSymbols = [NSMutableSet set];
-        _installCounts = [NSMutableDictionary dictionary];
-        _originalPointers = [NSMutableDictionary dictionary];
+        _installationMetadata = [PXNativeInstallMetadata new];
+        _installationMetadata.installed = [NSSet set];
+        _installationMetadata.counts = @{};
+        _installationMetadata.originals = @{};
     }
     return self;
 }
@@ -596,151 +689,145 @@ static int PXCoord_gethostuuid(uuid_t id, const struct timespec *wait) {
 
 #pragma mark - Installation
 
-- (void)_markInstalled:(NSString *)symbol original:(void *)orig {
-    [self.installedSymbols addObject:symbol];
-    NSInteger count = [self.installCounts[symbol] integerValue] + 1;
-    self.installCounts[symbol] = @(count);
-    if (orig) {
-        self.originalPointers[symbol] = [NSValue valueWithPointer:orig];
-    }
+- (PXNativeInstallMetadata *)_captureInstallationMetadata {
+    PXNativeInstallMetadata *metadata = nil;
+    os_unfair_lock_lock(&_lock);
+    @try { metadata = _installationMetadata; }
+    @finally { os_unfair_lock_unlock(&_lock); }
+    return metadata;
 }
 
-- (BOOL)_installSymbol:(NSString *)symbolName replace:(void *)replace originalOut:(void **)originalOut {
-    os_unfair_lock_lock(&_lock);
-    if ([self.installedSymbols containsObject:symbolName]) {
-        os_unfair_lock_unlock(&_lock);
-        return YES;
-    }
-    os_unfair_lock_unlock(&_lock);
-
-    if (!dlsym(RTLD_DEFAULT, "MSHookFunction")) {
-        PXLog(@"[PXNativeHook] ❌ MSHookFunction unavailable; cannot install %@", symbolName);
-        return NO;
-    }
-    void *sym = dlsym(RTLD_DEFAULT, symbolName.UTF8String);
-    if (!sym) {
-        const char *libs[] = {
-            "/usr/lib/libSystem.B.dylib",
-            "/usr/lib/system/libsystem_c.dylib",
-            NULL
-        };
-        for (int i = 0; libs[i]; i++) {
-            void *h = dlopen(libs[i], RTLD_NOLOAD);
-            if (!h) h = dlopen(libs[i], RTLD_NOW);
-            if (h) {
-                sym = dlsym(h, symbolName.UTF8String);
-                if (sym) break;
-            }
+- (void)_markInstalled:(NSString *)symbol original:(void *)orig {
+    PXNativeInstallMetadata *basis = nil, *candidate = nil, *retired = nil;
+    NSMutableSet *installed = nil;
+    NSMutableDictionary *counts = nil, *originals = nil;
+    @try {
+        for (;;) {
+            basis = [self _captureInstallationMetadata];
+            if ([basis.installed containsObject:symbol]) return;
+            installed = [basis.installed mutableCopy]; [installed addObject:symbol];
+            counts = [basis.counts mutableCopy]; counts[symbol] = @1;
+            originals = [basis.originals mutableCopy];
+            if (orig) originals[symbol] = [NSValue valueWithPointer:orig];
+            candidate = [PXNativeInstallMetadata new];
+            candidate.installed = installed; candidate.counts = counts; candidate.originals = originals;
+            BOOL published = NO;
+            os_unfair_lock_lock(&_lock);
+            @try {
+                if (_installationMetadata == basis) {
+                    retired = _installationMetadata; _installationMetadata = candidate; published = YES;
+                }
+            } @finally { os_unfair_lock_unlock(&_lock); }
+            retired = nil; basis = nil; candidate = nil; installed = nil; counts = nil; originals = nil;
+            if (published) return;
         }
-    }
-    if (!sym) {
-        PXLog(@"[PXNativeHook] ⚠️ Symbol not found: %@", symbolName);
+    } @finally { symbol = nil; basis = nil; candidate = nil; retired = nil; installed = nil; counts = nil; originals = nil; }
+}
+
+// Called only by the serialized install pass. A failed/throwing hook call may
+// have patched code already; never infer rollback or retry from missing metadata.
+- (BOOL)_installSymbol:(NSString *)symbolName replace:(void *)replace originalOut:(void **)originalOut {
+    __attribute__((objc_precise_lifetime)) PXNativeHookCoordinator *owner = self;
+    NSString *symbol = nil;
+    PXNativeInstallMetadata *metadata = nil;
+    @try {
+        symbol = PXNativeCanonicalSymbol(symbolName);
+        if (!symbol || !replace || !originalOut) return NO;
+        metadata = [self _captureInstallationMetadata];
+        if ([metadata.installed containsObject:symbol]) return YES;
+        void *address = PXNativeResolveInstallSymbol(symbol);
+        if (!address) { PXNativeInstallReport(symbol, @"Symbol not found; not installed", NULL); return NO; }
+        // No coordinator lock spans loader, hook-library or logging callbacks.
+        MSHookFunction(address, replace, originalOut);
+        [self _markInstalled:symbol original:*originalOut];
+        PXNativeInstallReport(symbol, @"Installed", *originalOut);
+        return YES;
+    } @catch (__unused NSException *exception) {
+        PXNativeInstallReport(symbol ?: @"native symbol", @"Installation interrupted; no retry or rollback assumed", NULL);
         return NO;
-    }
-    MSHookFunction(sym, replace, originalOut);
-    os_unfair_lock_lock(&_lock);
-    [self _markInstalled:symbolName original:originalOut ? *originalOut : NULL];
-    os_unfair_lock_unlock(&_lock);
-    PXLog(@"[PXNativeHook] ✅ Installed %@ (original=%p)", symbolName, originalOut ? *originalOut : NULL);
-    return YES;
+    } @finally { symbolName = nil; symbol = nil; metadata = nil; owner = nil; }
 }
 
 - (void)installOwnedSymbolsIfNeeded {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        [self _installSymbol:kPXNativeSymbolSysctl replace:(void *)PXCoord_sysctl originalOut:(void **)&g_orig_sysctl];
-        [self _installSymbol:kPXNativeSymbolSysctlByname replace:(void *)PXCoord_sysctlbyname originalOut:(void **)&g_orig_sysctlbyname];
-        [self _installSymbol:kPXNativeSymbolSysctlNameToMIB replace:(void *)PXCoord_sysctlnametomib originalOut:(void **)&g_orig_sysctlnametomib];
-        [self _installSymbol:kPXNativeSymbolGethostname replace:(void *)PXCoord_gethostname originalOut:(void **)&g_orig_gethostname];
-        [self _installSymbol:kPXNativeSymbolGetifaddrs replace:(void *)PXCoord_getifaddrs originalOut:(void **)&g_orig_getifaddrs];
-        [self _installSymbol:kPXNativeSymbolGethostuuid replace:(void *)PXCoord_gethostuuid originalOut:(void **)&g_orig_gethostuuid];
-        [self _installSymbol:kPXNativeSymbolStatfs replace:(void *)PXCoord_statfs originalOut:(void **)&g_orig_statfs];
-        [self _installSymbol:kPXNativeSymbolStatfs64 replace:(void *)PXCoord_statfs64 originalOut:(void **)&g_orig_statfs64];
-        [self _installSymbol:kPXNativeSymbolGetfsstat replace:(void *)PXCoord_getfsstat originalOut:(void **)&g_orig_getfsstat];
-        [self _installSymbol:kPXNativeSymbolGetfsstat64 replace:(void *)PXCoord_getfsstat64 originalOut:(void **)&g_orig_getfsstat64];
-
-        // IOKit
-        void *iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW);
-        if (iokit) {
-            void *p1 = dlsym(iokit, "IORegistryEntryCreateCFProperty");
-            void *p2 = dlsym(iokit, "IORegistryEntryCreateCFProperties");
-            void *p3 = dlsym(iokit, "IORegistryEntrySearchCFProperty");
-            os_unfair_lock_lock(&self->_lock);
-            if (p1 && ![self.installedSymbols containsObject:kPXNativeSymbolIORegistryEntryCreateCFProperty]) {
-                MSHookFunction(p1, (void *)PXCoord_IORegistryEntryCreateCFProperty, (void **)&g_orig_IORegistryEntryCreateCFProperty);
-                [self _markInstalled:kPXNativeSymbolIORegistryEntryCreateCFProperty original:(void *)g_orig_IORegistryEntryCreateCFProperty];
-            }
-            if (p2 && ![self.installedSymbols containsObject:kPXNativeSymbolIORegistryEntryCreateCFProperties]) {
-                MSHookFunction(p2, (void *)PXCoord_IORegistryEntryCreateCFProperties, (void **)&g_orig_IORegistryEntryCreateCFProperties);
-                [self _markInstalled:kPXNativeSymbolIORegistryEntryCreateCFProperties original:(void *)g_orig_IORegistryEntryCreateCFProperties];
-            }
-            if (p3 && ![self.installedSymbols containsObject:kPXNativeSymbolIORegistryEntrySearchCFProperty]) {
-                MSHookFunction(p3, (void *)PXCoord_IORegistryEntrySearchCFProperty, (void **)&g_orig_IORegistryEntrySearchCFProperty);
-                [self _markInstalled:kPXNativeSymbolIORegistryEntrySearchCFProperty original:(void *)g_orig_IORegistryEntrySearchCFProperty];
-            }
-            os_unfair_lock_unlock(&self->_lock);
+    BOOL previous = gPXInsideNativeInstallPass;
+    if (previous) return; // Same-thread loader/hook reentry must never wait on once.
+    __attribute__((objc_precise_lifetime)) PXNativeHookCoordinator *owner = self;
+    gPXInsideNativeInstallPass = YES;
+    @try {
+        // Do not consume once if the hook engine is not yet visible. A later
+        // explicit constructor call may try again, without a timer/worker/wait.
+        if (!dlsym(RTLD_DEFAULT, "MSHookFunction")) {
+            PXNativeInstallReport(@"coordinator", @"MSHookFunction unavailable; pass not started", NULL);
+            return;
         }
-
-        // CoreFoundation
-        void *cf = dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", RTLD_NOW);
-        if (cf) {
-            void *sym = dlsym(cf, "CFCopySystemVersionDictionary");
-            if (!sym) sym = dlsym(cf, "_CFCopySystemVersionDictionary");
-            if (sym) {
-                os_unfair_lock_lock(&self->_lock);
-                if (![self.installedSymbols containsObject:kPXNativeSymbolCFCopySystemVersionDictionary]) {
-                    MSHookFunction(sym, (void *)PXCoord_CFCopySystemVersionDictionary, (void **)&g_orig_CFCopySystemVersionDictionary);
-                    [self _markInstalled:kPXNativeSymbolCFCopySystemVersionDictionary original:(void *)g_orig_CFCopySystemVersionDictionary];
-                }
-                os_unfair_lock_unlock(&self->_lock);
-            }
-        }
-
-        // SystemConfiguration CNCopyCurrentNetworkInfo
-        void *sc = dlopen("/System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration", RTLD_NOW);
-        if (sc) {
-            void *sym = dlsym(sc, "CNCopyCurrentNetworkInfo");
-            if (sym) {
-                os_unfair_lock_lock(&self->_lock);
-                if (![self.installedSymbols containsObject:kPXNativeSymbolCNCopyCurrentNetworkInfo]) {
-                    MSHookFunction(sym, (void *)PXCoord_CNCopyCurrentNetworkInfo, (void **)&g_orig_CNCopyCurrentNetworkInfo);
-                    [self _markInstalled:kPXNativeSymbolCNCopyCurrentNetworkInfo original:(void *)g_orig_CNCopyCurrentNetworkInfo];
-                }
-                os_unfair_lock_unlock(&self->_lock);
-            }
-        }
-
-        PXLog(@"[PXNativeHook] installOwnedSymbolsIfNeeded complete. diagnostics=%@", [self diagnostics]);
-    });
+        static dispatch_once_t onceToken;
+        // Native callbacks are synchronous; the literal construction finishes
+        // before entering once and its body never lets optional exceptions escape.
+        dispatch_block_t installation = nil;
+        @try {
+            { installation = ^{
+                [self _installSymbol:kPXNativeSymbolSysctl replace:(void *)PXCoord_sysctl originalOut:(void **)&g_orig_sysctl];
+                [self _installSymbol:kPXNativeSymbolSysctlByname replace:(void *)PXCoord_sysctlbyname originalOut:(void **)&g_orig_sysctlbyname];
+                [self _installSymbol:kPXNativeSymbolSysctlNameToMIB replace:(void *)PXCoord_sysctlnametomib originalOut:(void **)&g_orig_sysctlnametomib];
+                [self _installSymbol:kPXNativeSymbolGethostname replace:(void *)PXCoord_gethostname originalOut:(void **)&g_orig_gethostname];
+                [self _installSymbol:kPXNativeSymbolGetifaddrs replace:(void *)PXCoord_getifaddrs originalOut:(void **)&g_orig_getifaddrs];
+                [self _installSymbol:kPXNativeSymbolGethostuuid replace:(void *)PXCoord_gethostuuid originalOut:(void **)&g_orig_gethostuuid];
+                [self _installSymbol:kPXNativeSymbolStatfs replace:(void *)PXCoord_statfs originalOut:(void **)&g_orig_statfs];
+                [self _installSymbol:kPXNativeSymbolStatfs64 replace:(void *)PXCoord_statfs64 originalOut:(void **)&g_orig_statfs64];
+                [self _installSymbol:kPXNativeSymbolGetfsstat replace:(void *)PXCoord_getfsstat originalOut:(void **)&g_orig_getfsstat];
+                [self _installSymbol:kPXNativeSymbolGetfsstat64 replace:(void *)PXCoord_getfsstat64 originalOut:(void **)&g_orig_getfsstat64];
+                [self _installSymbol:kPXNativeSymbolIORegistryEntryCreateCFProperty replace:(void *)PXCoord_IORegistryEntryCreateCFProperty originalOut:(void **)&g_orig_IORegistryEntryCreateCFProperty];
+                [self _installSymbol:kPXNativeSymbolIORegistryEntryCreateCFProperties replace:(void *)PXCoord_IORegistryEntryCreateCFProperties originalOut:(void **)&g_orig_IORegistryEntryCreateCFProperties];
+                [self _installSymbol:kPXNativeSymbolIORegistryEntrySearchCFProperty replace:(void *)PXCoord_IORegistryEntrySearchCFProperty originalOut:(void **)&g_orig_IORegistryEntrySearchCFProperty];
+                [self _installSymbol:kPXNativeSymbolCFCopySystemVersionDictionary replace:(void *)PXCoord_CFCopySystemVersionDictionary originalOut:(void **)&g_orig_CFCopySystemVersionDictionary];
+                [self _installSymbol:kPXNativeSymbolCNCopyCurrentNetworkInfo replace:(void *)PXCoord_CNCopyCurrentNetworkInfo originalOut:(void **)&g_orig_CNCopyCurrentNetworkInfo];
+                @try { PXLog(@"[PXNativeHook] installOwnedSymbolsIfNeeded complete. diagnostics=%@", [self diagnostics]); }
+                @catch (__unused NSException *exception) { }
+            }; }
+            dispatch_once(&onceToken, installation);
+        } @finally { installation = nil; }
+    } @catch (__unused NSException *exception) {
+        PXNativeInstallReport(@"coordinator", @"Installation preflight interrupted", NULL);
+    } @finally { gPXInsideNativeInstallPass = previous; owner = nil; }
 }
 
 - (BOOL)isSymbolInstalled:(NSString *)symbolName {
-    os_unfair_lock_lock(&_lock);
-    BOOL yes = [self.installedSymbols containsObject:symbolName];
-    os_unfair_lock_unlock(&_lock);
-    return yes;
+    __attribute__((objc_precise_lifetime)) PXNativeHookCoordinator *owner = self;
+    NSString *symbol = nil;
+    PXNativeInstallMetadata *metadata = nil;
+    @try {
+        symbol = PXNativeCanonicalSymbol(symbolName);
+        if (!symbol) return NO;
+        metadata = [self _captureInstallationMetadata];
+        return [metadata.installed containsObject:symbol];
+    } @finally { symbolName = nil; symbol = nil; metadata = nil; owner = nil; }
 }
 
 - (void *)originalForSymbol:(NSString *)symbolName {
-    if (!symbolName.length) return NULL;
-    os_unfair_lock_lock(&_lock);
-    NSValue *v = self.originalPointers[symbolName];
-    void *p = v ? v.pointerValue : NULL;
-    os_unfair_lock_unlock(&_lock);
-    return p;
+    __attribute__((objc_precise_lifetime)) PXNativeHookCoordinator *owner = self;
+    NSString *symbol = nil;
+    PXNativeInstallMetadata *metadata = nil;
+    NSValue *value = nil;
+    @try {
+        symbol = PXNativeCanonicalSymbol(symbolName);
+        if (!symbol) return NULL;
+        metadata = [self _captureInstallationMetadata];
+        value = metadata.originals[symbol];
+        return value ? value.pointerValue : NULL;
+    } @finally { symbolName = nil; symbol = nil; metadata = nil; value = nil; owner = nil; }
 }
 
 - (NSDictionary *)diagnostics {
     PXNativeProviderState *state = nil;
+    PXNativeInstallMetadata *metadata = nil;
     NSSet *installed = nil;
     NSDictionary *counts = nil, *originals = nil;
     NSMutableDictionary *out = nil, *symbols = nil;
     NSMutableArray *ids = nil;
     @try {
         state = [self _captureProviderState];
-        os_unfair_lock_lock(&_lock);
-        @try { installed = [_installedSymbols copy]; counts = [_installCounts copy]; originals = [_originalPointers copy]; }
-        @finally { os_unfair_lock_unlock(&_lock); }
+        metadata = [self _captureInstallationMetadata];
+        installed = metadata.installed; counts = metadata.counts; originals = metadata.originals;
         out = [NSMutableDictionary dictionary]; out[@"owner"] = @"PXNativeHookCoordinator";
         symbols = [NSMutableDictionary dictionary];
         for (NSString *sym in state.providers) {
@@ -757,7 +844,7 @@ static int PXCoord_gethostuuid(uuid_t id, const struct timespec *wait) {
         }
         out[@"symbols"] = symbols;
         return out;
-    } @finally { state = nil; installed = nil; counts = nil; originals = nil; out = nil; symbols = nil; ids = nil; }
+    } @finally { state = nil; metadata = nil; installed = nil; counts = nil; originals = nil; out = nil; symbols = nil; ids = nil; }
 }
 
 @end

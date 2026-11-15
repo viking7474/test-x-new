@@ -38,6 +38,9 @@ jobs:
       - name: Test native NSURLSession domain-blocking lifecycle
         run: python3 scripts/test_domain_task_lifecycle.py --native
 
+      - name: Test native coordinator installation reentry and loader boundaries
+        run: python3 scripts/test_native_hook_installation.py --native
+
       - name: Test native coordinator provider registry and dispatch
         run: python3 scripts/test_native_provider_registry.py --native
 

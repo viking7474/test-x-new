@@ -63,6 +63,7 @@ EXTENDED_PYTHON_TESTS = [
     "scripts/test_domain_task_lifecycle.py",
     "scripts/test_domain_transport_boundaries.py",
     "scripts/test_native_provider_registry.py",
+    "scripts/test_native_hook_installation.py",
     "scripts/test_keychain_bridge_retirement.py",
     "scripts/test_bootstrap_policy.py",
     "scripts/test_bootstrap_topology.py",
