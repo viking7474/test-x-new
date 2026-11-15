@@ -2,352 +2,328 @@
 #import <UIKit/UIKit.h>
 #import "TLinkIOSLogging.h"
 #import <objc/runtime.h>
-// #import <ellekit/ellekit.h> // Removed for rootful - using Substrate
-
 #import "PXScope.h"
 #import "PXRuntimeUtilities.h"
 #import "PXPaths.h"
 #import "PXRuntimeSnapshot.h"
 #import <os/lock.h>
+#include <math.h>
+#include <stdint.h>
+#include <string.h>
+#include <time.h>
 
-
-
-// Theme value and timestamp are published as one lock-owned cache unit.
-static os_unfair_lock gThemeCacheLock = OS_UNFAIR_LOCK_INIT;
-static NSString *cachedThemeValue = nil;
-static NSDate *cacheTimestamp = nil;
-static NSTimeInterval kCacheValidityDuration = 300.0; // 5 minutes in seconds
-
-// Forward declarations
-static NSString *getCurrentBundleID(void);
-static NSDictionary *loadScopedApps(void);
-static BOOL isInScopedAppsList(void);
-
-// Define the possible theme values
+// Scalar cache state only: no foreign method or object destruction under lock.
 typedef NS_ENUM(NSInteger, WeaponXThemeStyle) {
-    WeaponXThemeStyleUnspecified,
-    WeaponXThemeStyleLight,
-    WeaponXThemeStyleDark
+    WeaponXThemeStyleUnspecified, WeaponXThemeStyleLight, WeaponXThemeStyleDark
 };
+static os_unfair_lock gThemeCacheLock = OS_UNFAIR_LOCK_INIT;
+static uint64_t gThemeCacheGeneration;
+static BOOL gThemeCacheValid;
+static WeaponXThemeStyle gThemeCachedStyle;
+static double gThemeLoadedAt;
+static const double kCacheValidityDuration = 300.0;
+static __thread BOOL gPXThemePreparing;
+static __thread BOOL gPXThemeBypass;
+static BOOL gPXThemeTraitFactoriesAvailable;
 
-#pragma mark - Scoped Apps Helper Functions
-
-// Get the current bundle ID
+static double PXThemeMonotonicNow(void) {
+    struct timespec ts;
+    return clock_gettime(CLOCK_MONOTONIC, &ts) == 0 ? (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0 : NAN;
+}
+static BOOL PXThemeCacheBegin(double now, WeaponXThemeStyle *style, uint64_t *ticket) {
+    BOOL hit = NO;
+    os_unfair_lock_lock(&gThemeCacheLock);
+    if (gThemeCacheValid && isfinite(now) && isfinite(gThemeLoadedAt) && now >= gThemeLoadedAt &&
+        now - gThemeLoadedAt <= kCacheValidityDuration) {
+        *style = gThemeCachedStyle; hit = YES;
+    } else {
+        *ticket = ++gThemeCacheGeneration;
+        gThemeCacheValid = NO;
+    }
+    os_unfair_lock_unlock(&gThemeCacheLock);
+    return hit;
+}
+static BOOL PXThemeCachePublish(uint64_t ticket, double now, WeaponXThemeStyle style) {
+    BOOL current = NO;
+    os_unfair_lock_lock(&gThemeCacheLock);
+    if (ticket == gThemeCacheGeneration) {
+        current = YES;
+        gThemeCacheValid = isfinite(now) && (style == WeaponXThemeStyleLight || style == WeaponXThemeStyleDark);
+        gThemeCachedStyle = style; gThemeLoadedAt = now;
+    }
+    os_unfair_lock_unlock(&gThemeCacheLock);
+    return current;
+}
+static void PXThemeInvalidateCache(void) {
+    os_unfair_lock_lock(&gThemeCacheLock);
+    ++gThemeCacheGeneration; gThemeCacheValid = NO;
+    gThemeCachedStyle = WeaponXThemeStyleUnspecified; gThemeLoadedAt = 0;
+    os_unfair_lock_unlock(&gThemeCacheLock);
+}
 static NSString *getCurrentBundleID(void) {
-    @try {
-        NSBundle *mainBundle = [NSBundle mainBundle];
-        if (!mainBundle) {
-            return nil;
-        }
-        return [mainBundle bundleIdentifier];
-    } @catch (NSException *e) {
-        return nil;
-    }
+    NSBundle *bundle = nil;
+    @try { bundle = [NSBundle mainBundle]; return bundle.bundleIdentifier; }
+    @catch (__unused NSException *exception) { return nil; }
+    @finally { bundle = nil; }
 }
-
-// Load scoped apps from the plist file
-static NSDictionary *loadScopedApps(void) {
-    PX_RUNTIME_READ_OPERATION;
-    return PXScopedAppsSnapshot();
-}
-
-// Check if the current app is in the scoped apps list
-static BOOL isInScopedAppsList(void) {
-    PX_RUNTIME_READ_OPERATION;
-    @try {
-        NSString *bundleID = getCurrentBundleID();
-        if (!bundleID || [bundleID length] == 0) {
-            return NO;
-        }
-        
-        NSDictionary *scopedApps = loadScopedApps();
-        if (!scopedApps || scopedApps.count == 0) {
-            return NO;
-        }
-        
-        // Check if this bundle ID is in the scoped apps dictionary
-        id appEntry = scopedApps[bundleID];
-        if (!appEntry || ![appEntry isKindOfClass:[NSDictionary class]]) {
-            return NO;
-        }
-        
-        // Check if the app is enabled
-        BOOL isEnabled = [appEntry[@"enabled"] boolValue];
-        return isEnabled;
-        
-    } @catch (NSException *e) {
-        return NO;
-    }
-}
-
-// Helper function to check if we should spoof theme for this bundle ID (with caching)
 static BOOL shouldSpoofForBundle(NSString *bundleID) {
     PX_RUNTIME_READ_OPERATION;
-    if (!bundleID) return NO;
-
-    // SKIP theme spoofing for Safari/Auth stack to avoid text color conflicts
-    // Safari WebKit has its own color management that conflicts with UIKit theme changes
-    NSString *proc = [NSProcessInfo processInfo].processName;
-    if (PXIsSafariStackProcess(bundleID, proc)) {
-        return NO;  // Don't spoof theme for Safari - causes invisible text
-    }
-    return PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionNone);
+    NSString *process = nil;
+    @try {
+        if (!bundleID.length) return NO;
+        process = [NSProcessInfo processInfo].processName;
+        if (PXIsSafariStackProcess(bundleID, process)) return NO;
+        return PXProcessIsAllowedForSpoofing(bundleID, process, PXScopeOptionNone);
+    } @finally { bundleID = nil; process = nil; }
 }
-
-// Helper function to get theme value from profile
+static WeaponXThemeStyle PXThemeDecode(NSString *value) {
+    @try {
+        if ([value isEqualToString:@"Dark"]) return WeaponXThemeStyleDark;
+        if ([value isEqualToString:@"Light"]) return WeaponXThemeStyleLight;
+        return WeaponXThemeStyleUnspecified;
+    } @finally { value = nil; }
+}
 static WeaponXThemeStyle getThemeStyleFromProfile(void) {
     PX_RUNTIME_READ_OPERATION;
-    NSDate *now = [NSDate date];
-    os_unfair_lock_lock(&gThemeCacheLock);
-    NSString *cachedValue = cachedThemeValue;
-    NSDate *loadedAt = cacheTimestamp;
-    os_unfair_lock_unlock(&gThemeCacheLock);
-
-#if !defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    if (cachedValue.length && loadedAt && [now timeIntervalSinceDate:loadedAt] <= kCacheValidityDuration) {
-        if ([cachedValue isEqualToString:@"Dark"]) return WeaponXThemeStyleDark;
-        if ([cachedValue isEqualToString:@"Light"]) return WeaponXThemeStyleLight;
-    }
-#endif
-
+    PXRuntimeReadSnapshot *runtimeView = nil;
+    NSDictionary *deviceIDs = nil, *themeInfo = nil;
+    NSString *identityPath = nil, *deviceIDsPath = nil, *themeValue = nil;
+    id raw = nil;
+    @try {
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    PXRuntimeReadSnapshot *runtimeView = PXCaptureRuntimeSnapshot();
-    NSDictionary *deviceIDs = runtimeView.deviceIDs;
-    NSString *themeValue = [deviceIDs[@"DeviceTheme"] isKindOfClass:NSString.class]
-        ? deviceIDs[@"DeviceTheme"] : nil;
-    if (!themeValue.length) {
-        NSDictionary *themeInfo = [runtimeView profileArtifact:@"deviceTheme"];
-        themeValue = [themeInfo[@"value"] isKindOfClass:NSString.class] ? themeInfo[@"value"] : nil;
-    }
+        // One operation view; no TTL, clock, lock or live file fallback here.
+        runtimeView = PXCaptureRuntimeSnapshot();
+        deviceIDs = runtimeView.deviceIDs;
 #else
-    NSString *identityPath = PXActiveProfileIdentityPath();
-    NSString *deviceIDsPath = PXActiveProfileDeviceIDsPath();
-    NSDictionary *deviceIDs = deviceIDsPath.length
-        ? [NSDictionary dictionaryWithContentsOfFile:deviceIDsPath]
-        : nil;
-    NSString *themeValue = [deviceIDs[@"DeviceTheme"] isKindOfClass:[NSString class]]
-        ? deviceIDs[@"DeviceTheme"]
-        : nil;
-    if (!themeValue.length && identityPath.length) {
-        NSDictionary *themeInfo = [NSDictionary dictionaryWithContentsOfFile:
-            [identityPath stringByAppendingPathComponent:@"device_theme.plist"]];
-        themeValue = [themeInfo[@"value"] isKindOfClass:[NSString class]] ? themeInfo[@"value"] : nil;
-    }
+        double now = PXThemeMonotonicNow();
+        uint64_t ticket = 0;
+        WeaponXThemeStyle cached = WeaponXThemeStyleUnspecified;
+        if (PXThemeCacheBegin(now, &cached, &ticket)) return cached;
+        // Both artifacts belong to one resolved profile identity directory.
+        identityPath = PXActiveProfileIdentityPath();
+        deviceIDsPath = identityPath.length ? [identityPath stringByAppendingPathComponent:@"device_ids.plist"] : nil;
+        deviceIDs = deviceIDsPath.length ? [NSDictionary dictionaryWithContentsOfFile:deviceIDsPath] : nil;
 #endif
-    if (!themeValue.length) themeValue = @"Light";
-
-    os_unfair_lock_lock(&gThemeCacheLock);
-    cachedThemeValue = [themeValue copy];
-    cacheTimestamp = now;
-    os_unfair_lock_unlock(&gThemeCacheLock);
-
-    if ([themeValue isEqualToString:@"Dark"]) return WeaponXThemeStyleDark;
-    if ([themeValue isEqualToString:@"Light"]) return WeaponXThemeStyleLight;
-    return WeaponXThemeStyleUnspecified;
+        if ([deviceIDs isKindOfClass:NSDictionary.class]) raw = deviceIDs[@"DeviceTheme"];
+        if ([raw isKindOfClass:NSString.class] && [raw length]) themeValue = raw;
+        if (!themeValue) {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+            themeInfo = [runtimeView profileArtifact:@"deviceTheme"];
+#else
+            if (identityPath.length) themeInfo = [NSDictionary dictionaryWithContentsOfFile:[identityPath stringByAppendingPathComponent:@"device_theme.plist"]];
+#endif
+            raw = [themeInfo isKindOfClass:NSDictionary.class] ? themeInfo[@"value"] : nil;
+            if ([raw isKindOfClass:NSString.class] && [raw length]) themeValue = raw;
+        }
+        if (!themeValue) themeValue = @"Light"; // Preserve legacy absent-data default.
+        WeaponXThemeStyle style = PXThemeDecode(themeValue);
+#if !defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+        // Invalidation or a newer cold read supersedes this candidate. Do not
+        // repopulate/return its old override; this invocation falls back native.
+        if (!PXThemeCachePublish(ticket, now, style)) return WeaponXThemeStyleUnspecified;
+#endif
+        return style;
+    } @finally {
+        runtimeView = nil; deviceIDs = nil; themeInfo = nil; raw = nil;
+        identityPath = nil; deviceIDsPath = nil; themeValue = nil;
+    }
 }
-
-// UIUserInterfaceStyle mapping function
-static UIUserInterfaceStyle mapThemeStyleToUIUserInterfaceStyle(WeaponXThemeStyle themeStyle) {
-    switch (themeStyle) {
-        case WeaponXThemeStyleDark:
-            return UIUserInterfaceStyleDark;
-        case WeaponXThemeStyleLight:
-            return UIUserInterfaceStyleLight;
-        case WeaponXThemeStyleUnspecified:
-        default:
-            return UIUserInterfaceStyleUnspecified;
+static UIUserInterfaceStyle mapThemeStyleToUIUserInterfaceStyle(WeaponXThemeStyle style) {
+    switch (style) {
+        case WeaponXThemeStyleDark: return UIUserInterfaceStyleDark;
+        case WeaponXThemeStyleLight: return UIUserInterfaceStyleLight;
+        default: return UIUserInterfaceStyleUnspecified;
+    }
+}
+// Internal work is entered only with the preparation guard already claimed.
+static WeaponXThemeStyle PXThemeReadStyleForOperation(NSString *__strong *bundleOut) {
+    NSString *bundle = nil;
+    @try {
+        bundle = getCurrentBundleID();
+        if (!shouldSpoofForBundle(bundle)) return WeaponXThemeStyleUnspecified;
+        if (bundleOut) *bundleOut = bundle;
+        return getThemeStyleFromProfile();
+    } @finally { bundle = nil; }
+}
+static WeaponXThemeStyle PXThemeResolveOverride(NSString *__strong *bundleOut) {
+    BOOL previous = gPXThemePreparing;
+    @try {
+        if (previous || gPXThemeBypass) return WeaponXThemeStyleUnspecified;
+        gPXThemePreparing = YES;
+        return PXThemeReadStyleForOperation(bundleOut);
+    } @catch (__unused NSException *exception) { return WeaponXThemeStyleUnspecified; }
+    @finally { gPXThemePreparing = previous; }
+}
+static void PXThemeLogOverride(NSString *bundle, UIUserInterfaceStyle style) {
+    @try {
+        if (PXLogOnceClaim(@"ThemeHooks.bundle", bundle))
+            PXLog(@"[WeaponX] Spoofing device theme for %@ to: %@", bundle, style == UIUserInterfaceStyleDark ? @"Dark" : @"Light");
+    } @catch (__unused NSException *exception) { }
+    @finally { bundle = nil; }
+}
+static void PXThemeLogInstallation(NSString *format, id detail) {
+    @try { PXLog(format, detail); }
+    @catch (__unused NSException *exception) { }
+    @finally { format = nil; detail = nil; }
+}
+static UITraitCollection *PXThemeProjectTraits(UITraitCollection *original) {
+    UITraitCollection *styleTrait = nil, *merged = nil;
+    NSArray *inputs = nil;
+    BOOL previous = gPXThemePreparing, bypass = gPXThemeBypass;
+    @try {
+        if (!original || previous || bypass || !gPXThemeTraitFactoriesAvailable) return original;
+        gPXThemePreparing = YES;
+        WeaponXThemeStyle theme = PXThemeReadStyleForOperation(NULL);
+        if (theme == WeaponXThemeStyleUnspecified) return original;
+        UIUserInterfaceStyle style = mapThemeStyleToUIUserInterfaceStyle(theme);
+        // Read the native style, not our own scalar getter override. Keep the
+        // bypass through factories so their nested trait queries remain native.
+        gPXThemeBypass = YES;
+        if (original.userInterfaceStyle == style) return original;
+        styleTrait = [UITraitCollection traitCollectionWithUserInterfaceStyle:style];
+        if (!styleTrait) return original;
+        inputs = @[original, styleTrait];
+        merged = [UITraitCollection traitCollectionWithTraitsFromCollections:inputs];
+        return merged ?: original;
+    } @catch (__unused NSException *exception) { return original; }
+    @finally {
+        gPXThemePreparing = previous; gPXThemeBypass = bypass;
+        original = nil; styleTrait = nil; merged = nil; inputs = nil;
     }
 }
 
-// Hook definitions
-%group ThemeHooks
+// Validate actual runtime capabilities; an OS version alone does not prove a
+// private selector exists or carries the ABI used by a replacement.
+static const char *PXThemeSkipQualifiers(const char *type) {
+    while (type && *type && strchr("rnNoORV", *type)) type++;
+    return type;
+}
+static BOOL PXThemeTypeMatches(const char *actual, const char *expected) {
+    actual = PXThemeSkipQualifiers(actual); expected = PXThemeSkipQualifiers(expected);
+    if (!actual || !expected) return NO;
+    if (!strcmp(expected, @encode(id))) return *actual == '@' && actual[1] != '?';
+    return !strcmp(actual, expected);
+}
+static BOOL PXThemeMethodSupported(Class cls, SEL selector, const char *result, const char *argument) {
+    NSMethodSignature *signature = nil;
+    @try {
+        Method method = cls && selector ? class_getInstanceMethod(cls, selector) : NULL;
+        const char *types = method ? method_getTypeEncoding(method) : NULL;
+        if (!types) return NO;
+        signature = [NSMethodSignature signatureWithObjCTypes:types];
+        if (signature.numberOfArguments < 2) return NO;
+        const char *receiver = PXThemeSkipQualifiers([signature getArgumentTypeAtIndex:0]);
+        BOOL receiverOK = receiver && ((*receiver == '@' && receiver[1] != '?') || !strcmp(receiver, @encode(Class)));
+        return signature.numberOfArguments == (argument ? 3u : 2u) &&
+            PXThemeTypeMatches(signature.methodReturnType, result) &&
+            receiverOK &&
+            PXThemeTypeMatches([signature getArgumentTypeAtIndex:1], @encode(SEL)) &&
+            (!argument || PXThemeTypeMatches([signature getArgumentTypeAtIndex:2], argument));
+    } @catch (__unused NSException *exception) { return NO; }
+    @finally { signature = nil; }
+}
 
-// Hook UITraitCollection to intercept userInterfaceStyle
+%group ThemeStyleGetter
 %hook UITraitCollection
-
-// Method for getting userInterfaceStyle property
 - (UIUserInterfaceStyle)userInterfaceStyle {
     PX_RUNTIME_READ_OPERATION;
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    
-    // Check if spoofing is needed for this app
-    if (bundleID && shouldSpoofForBundle(bundleID)) {
-        WeaponXThemeStyle themeStyle = getThemeStyleFromProfile();
-        
-        if (themeStyle != WeaponXThemeStyleUnspecified) {
-            UIUserInterfaceStyle spoofedStyle = mapThemeStyleToUIUserInterfaceStyle(themeStyle);
-            
-            // Log the first time we spoof for an app (to reduce spam).
-            if (PXLogOnceClaim(@"ThemeHooks.bundle", bundleID)) {
-                PXLog(@"[WeaponX] Spoofing device theme for %@ to: %@",
-                      bundleID,
-                      (spoofedStyle == UIUserInterfaceStyleDark) ? @"Dark" : @"Light");
-            }
-            
-            return spoofedStyle;
+    __attribute__((objc_precise_lifetime)) id receiver = self;
+    NSString *bundle = nil;
+    @try {
+        WeaponXThemeStyle theme = PXThemeResolveOverride(&bundle);
+        if (theme != WeaponXThemeStyleUnspecified) {
+            UIUserInterfaceStyle style = mapThemeStyleToUIUserInterfaceStyle(theme);
+            PXThemeLogOverride(bundle, style); return style;
         }
-    }
-    
-    // Return original value if not spoofing
-    return %orig;
+        return %orig;
+    } @finally { bundle = nil; receiver = nil; }
 }
-
-// For iOS 17, there's a new named retrieval method
+%end
+%end
+%group ThemeEffectiveGetter
+%hook UITraitCollection
 - (UIUserInterfaceStyle)effectiveUserInterfaceStyle {
     PX_RUNTIME_READ_OPERATION;
-    if (@available(iOS 17.0, *)) {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        
-        // Check if spoofing is needed for this app
-        if (bundleID && shouldSpoofForBundle(bundleID)) {
-            WeaponXThemeStyle themeStyle = getThemeStyleFromProfile();
-            
-            if (themeStyle != WeaponXThemeStyleUnspecified) {
-                return mapThemeStyleToUIUserInterfaceStyle(themeStyle);
-            }
+    __attribute__((objc_precise_lifetime)) id receiver = self;
+    @try {
+        if (@available(iOS 17.0, *)) {
+            WeaponXThemeStyle theme = PXThemeResolveOverride(NULL);
+            if (theme != WeaponXThemeStyleUnspecified) return mapThemeStyleToUIUserInterfaceStyle(theme);
         }
-    }
-    
-    // Return original value if not spoofing
-    return %orig;
+        return %orig;
+    } @finally { receiver = nil; }
 }
-
 %end
-
-// Hook UIScreen to intercept system-wide theme setting
+%end
+%group ThemeScreenTraits
 %hook UIScreen
-
 - (UITraitCollection *)traitCollection {
     PX_RUNTIME_READ_OPERATION;
-    UITraitCollection *originalTraitCollection = %orig;
-    
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    
-    // Check if we need to spoof
-    if (bundleID && shouldSpoofForBundle(bundleID)) {
-        WeaponXThemeStyle themeStyle = getThemeStyleFromProfile();
-        
-        if (themeStyle != WeaponXThemeStyleUnspecified) {
-            // Create a trait collection with our spoofed interface style
-            UIUserInterfaceStyle spoofedStyle = mapThemeStyleToUIUserInterfaceStyle(themeStyle);
-            
-            UITraitCollection *interfaceStyleTrait = [UITraitCollection traitCollectionWithUserInterfaceStyle:spoofedStyle];
-            
-            // Merge with original trait collection to preserve other traits
-            return [UITraitCollection traitCollectionWithTraitsFromCollections:@[originalTraitCollection, interfaceStyleTrait]];
-        }
-    }
-    
-    return originalTraitCollection;
+    __attribute__((objc_precise_lifetime)) id receiver = self;
+    UITraitCollection *original = nil;
+    @try { original = %orig; return PXThemeProjectTraits(original); }
+    @finally { original = nil; receiver = nil; }
 }
-
 %end
-
-// Hook UIView for apps that check theme at the view level
+%end
+%group ThemeViewTraits
 %hook UIView
-
 - (UITraitCollection *)traitCollection {
     PX_RUNTIME_READ_OPERATION;
-    UITraitCollection *originalTraitCollection = %orig;
-    
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    
-    // Check if we need to spoof
-    if (bundleID && shouldSpoofForBundle(bundleID)) {
-        WeaponXThemeStyle themeStyle = getThemeStyleFromProfile();
-        
-        if (themeStyle != WeaponXThemeStyleUnspecified) {
-            // Create a trait collection with our spoofed interface style
-            UIUserInterfaceStyle spoofedStyle = mapThemeStyleToUIUserInterfaceStyle(themeStyle);
-            
-            UITraitCollection *interfaceStyleTrait = [UITraitCollection traitCollectionWithUserInterfaceStyle:spoofedStyle];
-            
-            // Merge with original trait collection to preserve other traits
-            return [UITraitCollection traitCollectionWithTraitsFromCollections:@[originalTraitCollection, interfaceStyleTrait]];
-        }
-    }
-    
-    return originalTraitCollection;
+    __attribute__((objc_precise_lifetime)) id receiver = self;
+    UITraitCollection *original = nil;
+    @try { original = %orig; return PXThemeProjectTraits(original); }
+    @finally { original = nil; receiver = nil; }
 }
-
 %end
-
-// Hook UIViewController for apps that check theme at the controller level
+%end
+%group ThemeControllerTraits
 %hook UIViewController
-
 - (UITraitCollection *)traitCollection {
     PX_RUNTIME_READ_OPERATION;
-    UITraitCollection *originalTraitCollection = %orig;
-    
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    
-    // Check if we need to spoof
-    if (bundleID && shouldSpoofForBundle(bundleID)) {
-        WeaponXThemeStyle themeStyle = getThemeStyleFromProfile();
-        
-        if (themeStyle != WeaponXThemeStyleUnspecified) {
-            // Create a trait collection with our spoofed interface style
-            UIUserInterfaceStyle spoofedStyle = mapThemeStyleToUIUserInterfaceStyle(themeStyle);
-            
-            UITraitCollection *interfaceStyleTrait = [UITraitCollection traitCollectionWithUserInterfaceStyle:spoofedStyle];
-            
-            // Merge with original trait collection to preserve other traits
-            return [UITraitCollection traitCollectionWithTraitsFromCollections:@[originalTraitCollection, interfaceStyleTrait]];
-        }
-    }
-    
-    return originalTraitCollection;
+    __attribute__((objc_precise_lifetime)) id receiver = self;
+    UITraitCollection *original = nil;
+    @try { original = %orig; return PXThemeProjectTraits(original); }
+    @finally { original = nil; receiver = nil; }
 }
-
 %end
-
-// Hook any WebKit bridges for web detection of dark mode
+%end
+%group ThemeWebKitScheme
 %hook WKWebView
-
-// Hook preferredColorScheme for WebKit
 - (void)_setPreferredColorScheme:(NSInteger)colorScheme {
     PX_RUNTIME_READ_OPERATION;
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    
-    // Check if we need to spoof
-    if (bundleID && shouldSpoofForBundle(bundleID)) {
-        WeaponXThemeStyle themeStyle = getThemeStyleFromProfile();
-        
-        if (themeStyle != WeaponXThemeStyleUnspecified) {
-            // Map our theme style to WebKit's color scheme values (0 = light, 1 = dark)
-            NSInteger spoofedColorScheme = (themeStyle == WeaponXThemeStyleDark) ? 1 : 0;
-            %orig(spoofedColorScheme);
-            return;
-        }
-    }
-    
-    %orig;
+    __attribute__((objc_precise_lifetime)) id receiver = self;
+    @try {
+        WeaponXThemeStyle theme = PXThemeResolveOverride(NULL);
+        NSInteger resolved = theme == WeaponXThemeStyleUnspecified ? colorScheme : (theme == WeaponXThemeStyleDark ? 1 : 0);
+        %orig(resolved);
+    } @finally { receiver = nil; }
 }
-
+%end
 %end
 
-%end // End of ThemeHooks group
-
-// Notification handler to refresh theme settings when toggled
 static void themeSettingsChanged(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
-    PXInvalidateScopeDecisionCache();
-    NSString *notificationName = (__bridge NSString *)name;
-    PXLog(@"[WeaponX] Received settings notification: %@", notificationName);
-    
-    os_unfair_lock_lock(&gThemeCacheLock);
-    cachedThemeValue = nil;
-    cacheTimestamp = nil;
-    os_unfair_lock_unlock(&gThemeCacheLock);
+    (void)center; (void)observer; (void)object; (void)userInfo;
+    @autoreleasepool {
+        NSString *notification = nil;
+        // Cache invalidation must survive an optional scope/logging failure.
+        PXThemeInvalidateCache();
+        @try { PXInvalidateScopeDecisionCache(); } @catch (__unused NSException *exception) { }
+        @try { notification = (__bridge NSString *)name; PXLog(@"[WeaponX] Received settings notification: %@", notification); }
+        @catch (__unused NSException *exception) { }
+        @finally { notification = nil; }
+    }
 }
 
 // Constructor to initialize hooks
 %ctor {
     @autoreleasepool {
         if (!PXBootstrapAllows(PXHookCapabilityNative)) return;
+        NSString *bundleID = nil, *process = nil;
         @try {
-            PXLog(@"[ThemeHooks] Initializing theme hooks");
+            PXThemeLogInstallation(@"[ThemeHooks] Initializing theme hooks", nil);
             
-            NSString *bundleID = getCurrentBundleID();
+            bundleID = getCurrentBundleID();
             
             // Skip if we can't get bundle ID
             if (!bundleID || [bundleID length] == 0) {
@@ -363,15 +339,29 @@ static void themeSettingsChanged(CFNotificationCenterRef center, void *observer,
             // Don't hook system processes - including Safari (theme spoofing causes text issues)
             // Note: We deliberately skip Safari for theme hooks even if Safari Spoofing is enabled, 
             // because theme spoofing causes invisible text in WebKit forms (Dark mode text on Light mode background).
-            if (!PXProcessIsAllowedForSpoofing(bundleID, [NSProcessInfo processInfo].processName, PXScopeOptionNone)) {
-                PXLog(@"[ThemeHooks] App %@ is not scoped, skipping hook installation", bundleID);
+            process = [NSProcessInfo processInfo].processName;
+            if (!PXProcessIsAllowedForSpoofing(bundleID, process, PXScopeOptionNone)) {
+                PXThemeLogInstallation(@"[ThemeHooks] App %@ is not scoped, skipping hook installation", bundleID);
                 return;
             }
             
-            PXLog(@"[ThemeHooks] App %@ is scoped, setting up theme hooks", bundleID);
+            PXThemeLogInstallation(@"[ThemeHooks] App %@ is scoped, setting up theme hooks", bundleID);
             
             // Initialize hooks for scoped apps only
-            %init(ThemeHooks);
+            gPXThemeTraitFactoriesAvailable =
+                PXThemeMethodSupported(object_getClass(UITraitCollection.class), @selector(traitCollectionWithUserInterfaceStyle:), @encode(id), @encode(NSInteger)) &&
+                PXThemeMethodSupported(object_getClass(UITraitCollection.class), @selector(traitCollectionWithTraitsFromCollections:), @encode(id), @encode(id)) &&
+                PXThemeMethodSupported(UITraitCollection.class, @selector(userInterfaceStyle), @encode(NSInteger), NULL);
+            if (PXThemeMethodSupported(UITraitCollection.class, @selector(userInterfaceStyle), @encode(NSInteger), NULL)) { %init(ThemeStyleGetter); }
+            if (@available(iOS 17.0, *)) {
+                if (PXThemeMethodSupported(UITraitCollection.class, NSSelectorFromString(@"effectiveUserInterfaceStyle"), @encode(NSInteger), NULL)) { %init(ThemeEffectiveGetter); }
+            }
+            if (gPXThemeTraitFactoriesAvailable) {
+                if (PXThemeMethodSupported(UIScreen.class, @selector(traitCollection), @encode(id), NULL)) { %init(ThemeScreenTraits); }
+                if (PXThemeMethodSupported(UIView.class, @selector(traitCollection), @encode(id), NULL)) { %init(ThemeViewTraits); }
+                if (PXThemeMethodSupported(UIViewController.class, @selector(traitCollection), @encode(id), NULL)) { %init(ThemeControllerTraits); }
+            }
+            if (PXThemeMethodSupported(NSClassFromString(@"WKWebView"), NSSelectorFromString(@"_setPreferredColorScheme:"), @encode(void), @encode(NSInteger))) { %init(ThemeWebKitScheme); }
             
             // Register for theme spoofing toggle notification
             CFNotificationCenterAddObserver(
@@ -410,10 +400,10 @@ static void themeSettingsChanged(CFNotificationCenterRef center, void *observer,
                 CFNotificationSuspensionBehaviorDeliverImmediately
             );
             
-            PXLog(@"[ThemeHooks] Theme hooks successfully initialized for scoped app: %@", bundleID);
+            PXThemeLogInstallation(@"[ThemeHooks] Theme capability setup completed for scoped app: %@", bundleID);
             
         } @catch (NSException *e) {
-            PXLog(@"[ThemeHooks] ❌ Exception in constructor: %@", e);
-        }
+            PXThemeLogInstallation(@"[ThemeHooks] ❌ Exception in constructor: %@", e);
+        } @finally { bundleID = nil; process = nil; }
     }
 } 
