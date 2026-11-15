@@ -43,13 +43,13 @@ static BOOL PXThemeCacheBegin(double now, WeaponXThemeStyle *style, uint64_t *ti
     os_unfair_lock_unlock(&gThemeCacheLock);
     return hit;
 }
-static BOOL PXThemeCachePublish(uint64_t ticket, double now, WeaponXThemeStyle style) {
+static BOOL PXThemeCachePublish(uint64_t ticket, double now, WeaponXThemeStyle style, BOOL enabled) {
     BOOL current = NO;
     os_unfair_lock_lock(&gThemeCacheLock);
     if (ticket == gThemeCacheGeneration) {
         current = YES;
-        gThemeCacheValid = isfinite(now) && (style == WeaponXThemeStyleLight || style == WeaponXThemeStyleDark);
-        gThemeCachedStyle = style; gThemeLoadedAt = now;
+        gThemeCacheValid = isfinite(now) && (!enabled || style == WeaponXThemeStyleLight || style == WeaponXThemeStyleDark);
+        gThemeCachedStyle = enabled ? style : WeaponXThemeStyleUnspecified; gThemeLoadedAt = now;
     }
     os_unfair_lock_unlock(&gThemeCacheLock);
     return current;
@@ -83,26 +83,128 @@ static WeaponXThemeStyle PXThemeDecode(NSString *value) {
         return WeaponXThemeStyleUnspecified;
     } @finally { value = nil; }
 }
+// One canonical enablement rule; an invalid present primary never falls back.
+typedef NS_ENUM(NSInteger, PXThemeEnablement) { PXThemeEnablementMissing, PXThemeEnablementDisabled, PXThemeEnablementEnabled };
+static BOOL PXThemeBool(id value) {
+    @try { return ([value isKindOfClass:NSNumber.class] || [value isKindOfClass:NSString.class]) && [value boolValue]; }
+    @finally { value = nil; }
+}
+static PXThemeEnablement PXThemePrimaryEnablement(NSDictionary *settings) {
+    id flags = nil, value = nil;
+    @try {
+        if (!settings) return PXThemeEnablementMissing;
+        if (![settings isKindOfClass:NSDictionary.class]) return PXThemeEnablementDisabled;
+        flags = settings[@"EnabledIdentifiers"];
+        if (!flags) return PXThemeEnablementMissing;
+        if (![flags isKindOfClass:NSDictionary.class]) return PXThemeEnablementDisabled;
+        value = flags[@"DeviceTheme"];
+        if (!value) return PXThemeEnablementMissing;
+        return PXThemeBool(value) ? PXThemeEnablementEnabled : PXThemeEnablementDisabled;
+    } @finally { settings = nil; flags = nil; value = nil; }
+}
+static BOOL PXThemeSecondaryEnablement(NSDictionary *security) {
+    id value = nil;
+    @try {
+        if (![security isKindOfClass:NSDictionary.class]) return NO;
+        value = security[@"deviceThemeSpoofEnabled"];
+        return PXThemeBool(value);
+    } @finally { security = nil; value = nil; }
+}
+static NSDictionary *PXThemeDictionaryAtPath(NSString *path) {
+    NSDictionary *dictionary = nil;
+    @try { if (path.length) dictionary = [NSDictionary dictionaryWithContentsOfFile:path]; return dictionary; }
+    @finally { path = nil; dictionary = nil; }
+}
+typedef NS_ENUM(NSInteger, PXThemeFilePresence) { PXThemeFileMissing, PXThemeFilePresent, PXThemeFileUnreadable };
+static PXThemeFilePresence PXThemePresenceAtPath(NSFileManager *files, NSString *path) {
+    NSDictionary *attributes = nil;
+    NSError *__autoreleasing error = nil;
+    @try {
+        if (!path.length) return PXThemeFileUnreadable;
+        attributes = [files attributesOfItemAtPath:path error:&error];
+        if (attributes) return PXThemeFilePresent;
+        if ([error.domain isEqualToString:NSCocoaErrorDomain] &&
+            (error.code == NSFileReadNoSuchFileError || error.code == NSFileNoSuchFileError)) return PXThemeFileMissing;
+        return PXThemeFileUnreadable;
+    } @finally { files = nil; path = nil; attributes = nil; }
+}
+// Cold rootful legacy reader only. No source gate/recovery, shared manager reload,
+// defaults synchronization or writes occur on a synchronous trait getter.
+static BOOL PXThemeRootfulEnabled(void) {
+    NSFileManager *files = nil;
+    NSString *path = nil, *legacy = nil;
+    NSDictionary *settings = nil, *security = nil;
+    NSUserDefaults *defaults = nil;
+    id value = nil;
+    @try {
+        files = [NSFileManager defaultManager]; path = PXTLinkIOSSettingsPath();
+        PXThemeFilePresence presence = PXThemePresenceAtPath(files, path);
+        if (presence == PXThemeFileUnreadable) return NO;
+        if (presence == PXThemeFileMissing) {
+            legacy = [PXPreferencesPath() stringByAppendingPathComponent:@"com.hydra.tlinkios.plist"];
+            presence = PXThemePresenceAtPath(files, legacy);
+            if (presence == PXThemeFileUnreadable) return NO;
+            if (presence == PXThemeFilePresent) path = legacy;
+        }
+        if (presence == PXThemeFilePresent) {
+            settings = PXThemeDictionaryAtPath(path);
+            if (![settings isKindOfClass:NSDictionary.class]) return NO;
+        }
+        PXThemeEnablement primary = PXThemePrimaryEnablement(settings);
+        if (primary != PXThemeEnablementMissing) return primary == PXThemeEnablementEnabled;
+        // Match the existing security store's disk-first, defaults-on-missing-key
+        // precedence. Corrupt present sources/values disable rather than infer ON.
+        path = PXSecuritySettingsPath();
+        presence = PXThemePresenceAtPath(files, path);
+        if (presence == PXThemeFileUnreadable) return NO;
+        if (presence == PXThemeFilePresent) {
+            security = PXThemeDictionaryAtPath(path);
+            if (![security isKindOfClass:NSDictionary.class]) return NO;
+            value = security[@"deviceThemeSpoofEnabled"];
+            if (value != nil) return PXThemeBool(value);
+        }
+        defaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
+        value = [defaults objectForKey:@"deviceThemeSpoofEnabled"];
+        return PXThemeBool(value);
+    } @finally {
+        files = nil; path = nil; legacy = nil; settings = nil; security = nil; defaults = nil; value = nil;
+    }
+}
 static WeaponXThemeStyle getThemeStyleFromProfile(void) {
     PX_RUNTIME_READ_OPERATION;
     PXRuntimeReadSnapshot *runtimeView = nil;
-    NSDictionary *deviceIDs = nil, *themeInfo = nil;
+    NSDictionary *deviceIDs = nil, *themeInfo = nil, *settings = nil, *security = nil;
     NSString *identityPath = nil, *deviceIDsPath = nil, *themeValue = nil;
     id raw = nil;
     @try {
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
         // One operation view; no TTL, clock, lock or live file fallback here.
         runtimeView = PXCaptureRuntimeSnapshot();
+        settings = runtimeView.tlinkSettings;
+        PXThemeEnablement primary = PXThemePrimaryEnablement(settings);
+        BOOL enabled = primary == PXThemeEnablementEnabled;
+        if (primary == PXThemeEnablementMissing) {
+            security = runtimeView.securitySettings;
+            enabled = PXThemeSecondaryEnablement(security);
+        }
+        if (!enabled) return WeaponXThemeStyleUnspecified;
         deviceIDs = runtimeView.deviceIDs;
 #else
         double now = PXThemeMonotonicNow();
         uint64_t ticket = 0;
         WeaponXThemeStyle cached = WeaponXThemeStyleUnspecified;
         if (PXThemeCacheBegin(now, &cached, &ticket)) return cached;
+        BOOL enabled = PXThemeRootfulEnabled();
+        if (!enabled) {
+            // Unspecified is a cacheable resolved OFF packet, distinct from an
+            // enabled but unknown theme (which remains uncached).
+            PXThemeCachePublish(ticket, now, WeaponXThemeStyleUnspecified, NO);
+            return WeaponXThemeStyleUnspecified;
+        }
         // Both artifacts belong to one resolved profile identity directory.
         identityPath = PXActiveProfileIdentityPath();
         deviceIDsPath = identityPath.length ? [identityPath stringByAppendingPathComponent:@"device_ids.plist"] : nil;
-        deviceIDs = deviceIDsPath.length ? [NSDictionary dictionaryWithContentsOfFile:deviceIDsPath] : nil;
+        deviceIDs = deviceIDsPath.length ? PXThemeDictionaryAtPath(deviceIDsPath) : nil;
 #endif
         if ([deviceIDs isKindOfClass:NSDictionary.class]) raw = deviceIDs[@"DeviceTheme"];
         if ([raw isKindOfClass:NSString.class] && [raw length]) themeValue = raw;
@@ -110,7 +212,7 @@ static WeaponXThemeStyle getThemeStyleFromProfile(void) {
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
             themeInfo = [runtimeView profileArtifact:@"deviceTheme"];
 #else
-            if (identityPath.length) themeInfo = [NSDictionary dictionaryWithContentsOfFile:[identityPath stringByAppendingPathComponent:@"device_theme.plist"]];
+            if (identityPath.length) themeInfo = PXThemeDictionaryAtPath([identityPath stringByAppendingPathComponent:@"device_theme.plist"]);
 #endif
             raw = [themeInfo isKindOfClass:NSDictionary.class] ? themeInfo[@"value"] : nil;
             if ([raw isKindOfClass:NSString.class] && [raw length]) themeValue = raw;
@@ -120,11 +222,11 @@ static WeaponXThemeStyle getThemeStyleFromProfile(void) {
 #if !defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
         // Invalidation or a newer cold read supersedes this candidate. Do not
         // repopulate/return its old override; this invocation falls back native.
-        if (!PXThemeCachePublish(ticket, now, style)) return WeaponXThemeStyleUnspecified;
+        if (!PXThemeCachePublish(ticket, now, style, YES)) return WeaponXThemeStyleUnspecified;
 #endif
         return style;
     } @finally {
-        runtimeView = nil; deviceIDs = nil; themeInfo = nil; raw = nil;
+        runtimeView = nil; deviceIDs = nil; themeInfo = nil; settings = nil; security = nil; raw = nil;
         identityPath = nil; deviceIDsPath = nil; themeValue = nil;
     }
 }

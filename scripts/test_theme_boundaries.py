@@ -27,8 +27,10 @@ def source_contracts(source=None):
     begin = method(s, 'static BOOL PXThemeCacheBegin(double now, WeaponXThemeStyle *style, uint64_t *ticket)')
     assert 'now >= gThemeLoadedAt' in begin and 'now - gThemeLoadedAt <= kCacheValidityDuration' in begin
     assert '*ticket = ++gThemeCacheGeneration;' in begin and 'gThemeCacheValid = NO;' in begin
-    publish = method(s, 'static BOOL PXThemeCachePublish(uint64_t ticket, double now, WeaponXThemeStyle style)')
+    publish = method(s, 'static BOOL PXThemeCachePublish(uint64_t ticket, double now, WeaponXThemeStyle style, BOOL enabled)')
     assert 'ticket == gThemeCacheGeneration' in publish and 'isfinite(now)' in publish
+    assert '(!enabled || style == WeaponXThemeStyleLight || style == WeaponXThemeStyleDark)' in publish
+    assert 'gThemeCachedStyle = enabled ? style : WeaponXThemeStyleUnspecified;' in publish
     invalidate = method(s, 'static void PXThemeInvalidateCache(void)')
     assert '++gThemeCacheGeneration; gThemeCacheValid = NO;' in invalidate
     for body in [begin, publish, invalidate]:
@@ -37,8 +39,23 @@ def source_contracts(source=None):
     read = method(s, 'static WeaponXThemeStyle getThemeStyleFromProfile(void)')
     assert read.count('PXCaptureRuntimeSnapshot()') == 1 and read.count('PXActiveProfileIdentityPath()') == 1
     assert 'PXActiveProfileDeviceIDsPath()' not in read and '[runtimeView profileArtifact:@"deviceTheme"]' in read
-    assert 'if (!PXThemeCachePublish(ticket, now, style)) return WeaponXThemeStyleUnspecified;' in read
+    assert 'if (!PXThemeCachePublish(ticket, now, style, YES)) return WeaponXThemeStyleUnspecified;' in read
     assert 'if (!themeValue) themeValue = @"Light";' in read and 'raw = nil;' in read
+    assert read.index('settings = runtimeView.tlinkSettings;') < read.index('if (!enabled) return WeaponXThemeStyleUnspecified;') < read.index('deviceIDs = runtimeView.deviceIDs;')
+    assert 'if (primary == PXThemeEnablementMissing)' in read and 'security = runtimeView.securitySettings;' in read
+    assert read.index('BOOL enabled = PXThemeRootfulEnabled();') < read.index('identityPath = PXActiveProfileIdentityPath();')
+    assert 'PXThemeCachePublish(ticket, now, WeaponXThemeStyleUnspecified, NO);' in read
+    primary = method(s, 'static PXThemeEnablement PXThemePrimaryEnablement(NSDictionary *settings)')
+    assert 'if (!value) return PXThemeEnablementMissing;' in primary and 'PXThemeEnablementDisabled' in primary
+    assert 'PXThemeBool(value) ? PXThemeEnablementEnabled : PXThemeEnablementDisabled' in primary
+    presence = method(s, 'static PXThemeFilePresence PXThemePresenceAtPath(NSFileManager *files, NSString *path)')
+    assert 'NSError *__autoreleasing error = nil;' in presence and 'NSFileReadNoSuchFileError' in presence
+    assert 'return PXThemeFileUnreadable;' in presence and '@finally' in presence
+    rootful = method(s, 'static BOOL PXThemeRootfulEnabled(void)')
+    assert 'if (presence == PXThemeFileMissing)' in rootful and rootful.count('if (presence == PXThemeFileUnreadable) return NO;') == 3
+    assert rootful.index('if (primary != PXThemeEnablementMissing)') < rootful.index('path = PXSecuritySettingsPath();') < rootful.index('initWithSuiteName:')
+    assert 'if (value != nil) return PXThemeBool(value);' in rootful
+    assert 'defaults = nil; value = nil;' in rootful and 'loadSettings' not in rootful and 'synchronize' not in rootful
     assert 'isInScopedAppsList' not in s and 'loadScopedApps' not in s
     resolve = method(s, 'static WeaponXThemeStyle PXThemeResolveOverride(NSString *__strong *bundleOut)')
     assert 'if (previous || gPXThemeBypass)' in resolve and 'gPXThemePreparing = previous;' in resolve
@@ -62,6 +79,7 @@ def source_contracts(source=None):
     assert 'PXLog(' not in ctor and '@finally { bundleID = nil; process = nil; }' in ctor
     assert 'NSSelectorFromString(@"effectiveUserInterfaceStyle")' in ctor and 'NSSelectorFromString(@"_setPreferredColorScheme:")' in ctor
     check_macro_arity((ROOT / 'tests/PXThemeBoundaryTests.m').read_text(encoding='utf-8'), 'theme-boundary')
+    check_macro_arity((ROOT / 'tests/PXThemeEnablementFileTests.m').read_text(encoding='utf-8'), 'theme-enablement-files')
     assert 'scripts/test_theme_boundaries.py --native' in (ROOT / '.github/workflows/build-ios-arm.yml').read_text()
     assert 'scripts/test_theme_boundaries.py' in (ROOT / 'scripts/release_hardening.py').read_text()
     print('PASS: Theme cache/six adapter/capability source contracts (UIKit/device behavior not implied)')
@@ -73,10 +91,9 @@ def generate_native_fragments(folder):
     helpers = s[s.index('static double PXThemeMonotonicNow'):s.index('%group ThemeStyleGetter')]
     helpers = helpers.replace('clock_gettime(CLOCK_MONOTONIC, &ts)', 'PXFixtureThemeClock(CLOCK_MONOTONIC, &ts)')
     helpers = helpers.replace('[NSBundle mainBundle]', 'PXFixtureMainBundle()').replace('[NSProcessInfo processInfo].processName', 'PXFixtureProcessName()')
-    helpers = helpers.replace('[NSDictionary dictionaryWithContentsOfFile:', 'PXFixtureThemeFile(')
-    # Only the two file-provider call expressions are changed; all theme work is exact.
-    helpers = helpers.replace('PXFixtureThemeFile(deviceIDsPath]', 'PXFixtureThemeFile(deviceIDsPath)')
-    helpers = helpers.replace('PXFixtureThemeFile([identityPath stringByAppendingPathComponent:@"device_theme.plist"]]', 'PXFixtureThemeFile([identityPath stringByAppendingPathComponent:@"device_theme.plist"])')
+    helpers = helpers.replace('[NSDictionary dictionaryWithContentsOfFile:path]', 'PXFixtureThemeFile(path)')
+    helpers = helpers.replace('[NSFileManager defaultManager]', 'PXFixtureThemeFileManager()')
+    helpers = helpers.replace('[[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"]', 'PXFixtureThemeDefaults()')
     (folder / 'PXThemeState.inc').write_text(state, encoding='utf-8')
     notification = method(s, 'static void themeSettingsChanged(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo)')
     (folder / 'PXThemeWork.inc').write_text(helpers + notification, encoding='utf-8')
@@ -91,11 +108,20 @@ def generate_native_fragments(folder):
     (folder / 'PXThemeAdapters.inc').write_text('\n\n'.join(adapters), encoding='utf-8')
 
 
+def generate_enablement_fragments(folder):
+    s = SOURCE.read_text(encoding='utf-8')
+    start = s.index('typedef NS_ENUM(NSInteger, PXThemeEnablement)')
+    end = s.index('static WeaponXThemeStyle getThemeStyleFromProfile(void)', start)
+    work = s[start:end].replace('[[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"]', 'PXFixtureSecurityDefaults()')
+    (folder / 'PXThemeEnablementWork.inc').write_text(work, encoding='utf-8')
+
+
 def native_tests():
     assert sys.platform == 'darwin' and shutil.which('xcrun'), '--native requires macOS/xcrun; cannot silently skip'
     with tempfile.TemporaryDirectory(prefix='px-theme-boundaries-') as tmp:
         folder = Path(tmp)
         generate_native_fragments(folder)
+        generate_enablement_fragments(folder)
         for scheme, defines in (('rootful', []), ('roothide', ['-DTHEOS_PACKAGE_SCHEME_ROOTHIDE=1'])):
             for mode, flag in (('plain-arc', '-fno-objc-arc-exceptions'), ('arc-eh', '-fobjc-arc-exceptions')):
                 binary = folder / (scheme + '-' + mode)
@@ -105,6 +131,12 @@ def native_tests():
                                 str(ROOT / 'tests/PXThemeBoundaryTests.m'), str(ROOT / 'common/PXRuntimeReadScope.m'),
                                 '-framework', 'Foundation', '-framework', 'CoreFoundation', '-o', str(binary)], cwd=ROOT, check=True, timeout=60)
                 subprocess.run([str(binary)], cwd=ROOT, check=True, timeout=90)
+                file_binary = folder / ('enablement-files-' + scheme + '-' + mode)
+                subprocess.run(['xcrun', 'clang', '-O0', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions', flag,
+                                '-Wall', '-Wextra', '-Werror=implicit-function-declaration', '-I', str(folder), *defines,
+                                str(ROOT / 'tests/PXThemeEnablementFileTests.m'), '-framework', 'Foundation', '-o', str(file_binary)],
+                               cwd=ROOT, check=True, timeout=60)
+                subprocess.run([str(file_binary)], cwd=ROOT, check=True, timeout=60)
 
 
 if __name__ == '__main__':

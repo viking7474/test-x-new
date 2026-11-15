@@ -64,6 +64,10 @@ selector appearing only after constructor evaluation is not installed later.
 
 ## Important remaining correctness finding: DeviceTheme toggle
 
+Follow-up: [Patch 8D](PATCH-8D-theme-enablement-packets.md) implements the reader
+enablement contract at source level. The finding below records the 8C baseline;
+8D still requires native/device acceptance and does not complete global authority.
+
 The existing active theme admission checks overall scope/Safari, but does not
 check DeviceTheme enablement. A scoped process with DeviceTheme disabled can
 still override its theme. This is a source-proven logic gap, not fixed or hidden
