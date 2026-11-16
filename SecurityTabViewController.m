@@ -5297,9 +5297,7 @@ static NSString *PXTargetRegionGPSPath(void) {
 - (void)domainBlockingToggleChanged:(UISwitch *)sender {
     DomainBlockingSettings *settings = [DomainBlockingSettings sharedSettings];
     BOOL previous = settings.isEnabled;
-    settings.isEnabled = sender.isOn;
-    if (![settings saveSettings]) {
-        settings.isEnabled = previous;
+    if (![settings setEnabledAndSave:sender.isOn]) {
         [sender setOn:previous animated:YES];
         [self showToastWithMessage:@"Could not save Domain Blocking setting"];
         return;

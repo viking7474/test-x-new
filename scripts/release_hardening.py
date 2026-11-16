@@ -62,6 +62,7 @@ EXTENDED_PYTHON_TESTS = [
     "scripts/test_location_projection_semantics.py",
     "scripts/test_domain_task_lifecycle.py",
     "scripts/test_domain_transport_boundaries.py",
+    "scripts/test_domain_settings.py",
     "scripts/test_native_provider_registry.py",
     "scripts/test_native_hook_installation.py",
     "scripts/test_theme_boundaries.py",

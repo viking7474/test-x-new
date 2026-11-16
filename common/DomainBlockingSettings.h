@@ -3,11 +3,14 @@
 @interface DomainBlockingSettings : NSObject
 
 @property (nonatomic, assign) BOOL isEnabled;
+// Detached compatibility view. Mutate through the management methods or assign
+// a replacement array; mutating a returned array does not change runtime policy.
 @property (nonatomic, strong) NSMutableArray<NSString *> *blockedDomains;
 
 + (instancetype)sharedSettings;
 - (BOOL)saveSettings;
 - (BOOL)loadSettings;
+- (BOOL)setEnabledAndSave:(BOOL)enabled; // Publish only after a successful save.
 - (BOOL)addDomain:(NSString *)domain;
 - (BOOL)removeDomain:(NSString *)domain;
 - (BOOL)isDomainBlocked:(NSString *)domain;

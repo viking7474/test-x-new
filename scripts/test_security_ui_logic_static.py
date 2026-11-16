@@ -167,13 +167,14 @@ for path, key in (
 # Domain Blocking: verified save, synchronized snapshots, successful writes notify running injected processes.
 require("- (BOOL)saveSettings" in domain_h and "- (BOOL)loadSettings" in domain_h,
         "Domain Blocking save/load APIs return success")
-require(domain_m.count("@synchronized (self)") >= 8,
-        "Domain Blocking serializes mutation and accessor paths")
+require(domain_m.count("@synchronized (self)") == 6 and "changeDomain:" in domain_m and "capturedPolicy" in domain_m,
+        "Domain Blocking serializes six writer entries and publishes captured reader packets")
 require("- (BOOL)isDomainBlocked:(NSString *)domain" in domain_m and
-        "@synchronized (self)" in method_body(domain_m, "- (BOOL)isDomainBlocked:(NSString *)domain", 1800),
+        "[self capturedPolicy]" in method_body(domain_m, "- (BOOL)isDomainBlocked:(NSString *)domain", 2400) and
+        "os_unfair_lock_lock(&_policyLock)" in domain_m,
         "Domain runtime decision reads a synchronized snapshot")
 require("- (NSArray<NSDictionary *> *)getCustomDomains" in domain_m and
-        "@synchronized (self)" in method_body(domain_m, "- (NSArray<NSDictionary *> *)getCustomDomains", 1500),
+        "[self capturedPolicy]" in method_body(domain_m, "- (NSArray<NSDictionary *> *)getCustomDomains", 1800),
         "Domain UI accessor is synchronized with runtime reload")
 require("domainBlockingSettingsChanged" in domain_hook and "loadSettings" in domain_hook and
         'CFSTR("com.hydra.tlinkios.domainBlockingChanged")' in domain_hook,
@@ -184,7 +185,7 @@ require("if (![settings setCustomDomainEnabled:domain enabled:enabled])" in doma
         "[self postDomainBlockingChanged];" in domain_ui,
         "Domain management notifies runtime only after verified model mutation")
 domain_master = method_body(security, "- (void)domainBlockingToggleChanged:", 1800)
-require("if (![settings saveSettings])" in domain_master and "settings.isEnabled = previous" in domain_master,
+require("if (![settings setEnabledAndSave:sender.isOn])" in domain_master and "[sender setOn:previous animated:YES]" in domain_master,
         "Domain master switch rolls back on persistence failure")
 
 # App Version editor/list: authoritative writes are checked and UI success is conditional.
