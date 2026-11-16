@@ -195,9 +195,9 @@ def run_source_matrix(matrix: Matrix) -> None:
     matrix.check("source: direct scope consumers use shared membership helper", "PXBundleIsEnabledInScope" in SOURCES["locale"] and "PXBundleIsEnabledInScope" in SOURCES["missing"])
 
     matrix.check("source: thread-safe log-once utility is public", "PXLogOnceClaim" in SOURCES["runtime_h"] and "PXLogOnceResetNamespace" in SOURCES["runtime_h"])
-    matrix.check("source: log-once set initializes exactly once", SOURCES["runtime"].count("gPXLogOnceClaims = [NSMutableSet set]") == 1 and "dispatch_once" in SOURCES["runtime"])
-    matrix.check("source: log-once claim uses unfair lock", "os_unfair_lock_lock(&gPXLogOnceLock)" in log_claim and "os_unfair_lock_unlock(&gPXLogOnceLock)" in log_claim)
-    matrix.check("source: log-once reset uses same lock", "os_unfair_lock_lock(&gPXLogOnceLock)" in log_reset and "os_unfair_lock_unlock(&gPXLogOnceLock)" in log_reset)
+    matrix.check("source: log-once publishes an owned immutable packet", "NSDictionary<NSString *, NSSet<NSString *> *> *gPXLogOnceClaims" in SOURCES["runtime"] and "gPXLogOnceClaims == basis" in SOURCES["runtime"])
+    matrix.check("source: log-once claim uses unfair lock", "PXLogOnceSnapshot()" in log_claim and "PXLogOncePublish(basis, candidate)" in log_claim and "os_unfair_lock_lock(&gPXLogOnceLock)" in SOURCES["runtime"])
+    matrix.check("source: log-once reset uses same lock", "PXLogOnceSnapshot()" in log_reset and "PXLogOncePublish(basis, candidate)" in log_reset and "os_unfair_lock_unlock(&gPXLogOnceLock)" in SOURCES["runtime"])
     matrix.check("source: all former log-once sites use utility", all("PXLogOnceClaim" in SOURCES[name] for name in ["boot", "ios"] if name == "boot") and all("PXLogOnceClaim" in SOURCES[name] for name in ["tweak", "battery", "theme", "pasteboard", "canvas"] if name not in {"battery", "canvas"}))
     matrix.check("source: no mutable log-once sets remain", not re.search(r"static\s+NSMutableSet\s*\*\s*(?:logged|handled|gMissing)", PROJECT_TWEAK_TEXT))
     matrix.check("source: remaining mutable set is synchronized hook registry only", SOURCES["missing"].count("static NSMutableSet *hookedClasses") == 1 and "@synchronized(hookedClasses)" in SOURCES["missing"])

@@ -348,7 +348,7 @@ def run_source_matrix(matrix: Matrix) -> None:
     matrix.check("source: CPU qualifier uses boundary matcher", "PXCPUArchitectureHasToken(architecture, qualifier)" in DEVICE_SOURCE)
     matrix.check("source: NXArchInfo copy is thread-local", "static __thread NXArchInfo" in DEVICE_SOURCE)
     matrix.check("source: NXArchInfo sets complete ABI identity", all(field in nx_hook for field in [".name =", ".cputype =", ".cpusubtype =", ".description ="]))
-    matrix.check("source: memory log registry is synchronized", "PXLogOnceClaim" in memory_log and "os_unfair_lock_lock(&gPXLogOnceLock)" in RUNTIME_UTIL_SOURCE and "dispatch_once" in RUNTIME_UTIL_SOURCE)
+    matrix.check("source: memory log registry is synchronized", "PXLogOnceClaim" in memory_log and "os_unfair_lock_lock(&gPXLogOnceLock)" in RUNTIME_UTIL_SOURCE and "PXLogOncePublish" in RUNTIME_UTIL_SOURCE)
     matrix.check("source: sysctl result counter is atomic", "__sync_fetch_and_add(&resultLogCount" in result_logger)
     matrix.check("source: sysctl result logging preserves errno", "int resultErrno = errno;" in result_logger and "errno = resultErrno;" in result_logger)
     matrix.check("source: handled sysctl paths emit result evidence", device_provider.count("PXCompleteDeviceSpecSysctlResult") >= 15)

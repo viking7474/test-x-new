@@ -5,7 +5,8 @@
 
 /**
  * Custom logging function for TLinkIOS
- * Writes logs to both NSLog and a file
+ * Emits redacted private os_log diagnostics; file output is opt-in and queued.
+ * Diagnostic failures and same-thread recursive logging are contained.
  */
 void PXLog(NSString *format, ...);
 

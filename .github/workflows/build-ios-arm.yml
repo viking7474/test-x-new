@@ -38,6 +38,9 @@ jobs:
       - name: Test native NSURLSession domain-blocking lifecycle
         run: python3 scripts/test_domain_task_lifecycle.py --native
 
+      - name: Test native diagnostic registry and sink boundaries
+        run: python3 scripts/test_logging_boundaries.py --native
+
       - name: Test native Theme cache and trait boundaries
         run: python3 scripts/test_theme_boundaries.py --native
 
