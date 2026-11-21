@@ -11,23 +11,20 @@ NSString * const PXATTZeroIDFAUUIDString = @"00000000-0000-0000-0000-00000000000
 NSDictionary *PXAppVersionApplyToInfoDictionary(NSDictionary *original,
                                                 NSString *version,
                                                 NSString *build) {
-    if (![original isKindOfClass:[NSDictionary class]]) return original;
-    NSMutableDictionary *mutable = [original mutableCopy];
-    if (!mutable) return original;
-    if (version.length) {
-        mutable[@"CFBundleShortVersionString"] = version;
-    }
-    if (build.length) {
-        mutable[@"CFBundleVersion"] = build;
-    }
-    // Immutable copy — never mutate the system dictionary in place.
-    return [mutable copy];
+    NSMutableDictionary *mutable = nil;
+    @try {
+        if (![original isKindOfClass:[NSDictionary class]]) return original;
+        mutable = [original mutableCopy];if (!mutable) return original;
+        if (version.length) mutable[@"CFBundleShortVersionString"] = version;
+        if (build.length) mutable[@"CFBundleVersion"] = build;
+        return [mutable copy];
+    } @finally { original = nil;version = nil;build = nil;mutable = nil; }
 }
 
 NSString *PXAppVersionSafeBundleFilename(NSString *bundleID) {
-    if (!bundleID.length) return nil;
-    NSString *safe = [bundleID stringByReplacingOccurrencesOfString:@"." withString:@"_"];
-    return [safe stringByAppendingString:@"_version.plist"];
+    NSString *safe = nil;
+    @try { if (!bundleID.length) return nil;safe = [bundleID stringByReplacingOccurrencesOfString:@"." withString:@"_"];return [safe stringByAppendingString:@"_version.plist"]; }
+    @finally { bundleID = nil;safe = nil; }
 }
 
 #pragma mark - gethostname

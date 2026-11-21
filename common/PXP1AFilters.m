@@ -77,23 +77,28 @@ BOOL PXUserDefaultsIsUUIDKey(NSString *key) {
 #pragma mark - Pasteboard
 
 NSString *PXPasteboardDeterministicName(NSString *originalName, NSString *uuidString) {
+    NSString *shortUUID = nil;
+    NSArray *parts = nil, *components = nil;
+    NSMutableArray *newComponents = nil;
+    @try {
     if (!originalName.length || !uuidString.length) {
         return originalName;
     }
 
-    NSString *shortUUID = [uuidString componentsSeparatedByString:@"-"].firstObject;
+    parts = [uuidString componentsSeparatedByString:@"-"];shortUUID = parts.firstObject;
     if (!shortUUID.length) {
         return originalName;
     }
 
-    NSArray *components = [originalName componentsSeparatedByString:@"."];
+    components = [originalName componentsSeparatedByString:@"."];
     if (components.count > 0) {
-        NSMutableArray *newComponents = [NSMutableArray arrayWithArray:components];
+        newComponents = [NSMutableArray arrayWithArray:components];
         newComponents[newComponents.count - 1] = shortUUID;
         return [newComponents componentsJoinedByString:@"."];
     }
 
     return [NSString stringWithFormat:@"%@.%@", originalName, shortUUID];
+    } @finally { originalName=nil;uuidString=nil;shortUUID=nil;parts=nil;components=nil;newComponents=nil; }
 }
 
 BOOL PXPasteboardTypeEncodingCompatible(const char *existing, const char *expected) {

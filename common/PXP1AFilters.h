@@ -36,9 +36,9 @@ BOOL PXUserDefaultsLooksLikeUUIDString(NSString * _Nullable str);
 NSString * _Nullable PXPasteboardDeterministicName(NSString * _Nullable originalName,
                                                   NSString * _Nullable uuidString);
 
-// Loose Objective-C type-encoding compatibility check used before installing a
-// runtime hook: exact match, or same return type (first encoding char). NULL
-// inputs are treated as incompatible.
+// Legacy loose comparison retained for API compatibility. It is insufficient
+// for runtime installation: PasteboardHooks validates the complete signature.
+// Exact match or same first return-type character; NULL is incompatible.
 BOOL PXPasteboardTypeEncodingCompatible(const char * _Nullable existing,
                                         const char * _Nullable expected);
 

@@ -1,12 +1,8 @@
-// AppVersionHooks.x
-// App-version spoof helpers + full Info.plist dictionary access paths.
-
+// App-version source/projection caches and borrowed CF result ownership.
 #import <Foundation/Foundation.h>
 #import <CoreFoundation/CoreFoundation.h>
 #import <substrate.h>
 #import <dlfcn.h>
-#import <stdatomic.h>
-
 #import "AppVersionHooks.h"
 #import "PXScope.h"
 #import "PXPaths.h"
@@ -14,514 +10,277 @@
 #import "PXP1BFilters.h"
 #import <os/lock.h>
 
-static NSDictionary *gCachedVersionSpoofPlist = nil;
-static NSDate *gCachedVersionSpoofMTime = nil;
-static NSString *gCachedVersionSpoofPath = nil;
-
 static os_unfair_lock gAppVersionCacheLock = OS_UNFAIR_LOCK_INIT;
-static NSMutableDictionary<NSString *, NSDictionary *> *gCachedProfileVersionPlists = nil;
-static NSMutableDictionary<NSString *, NSDate *> *gCachedProfileVersionMTime = nil;
-
-static void PXEnsureAppVersionProfileCaches(void) {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        gCachedProfileVersionPlists = [NSMutableDictionary dictionary];
-        gCachedProfileVersionMTime = [NSMutableDictionary dictionary];
-    });
-}
-
-static NSString *PXVersionSpoofPlistPath(void) {
-    return [PXPreferencesPath() stringByAppendingPathComponent:@"com.hydra.tlinkios.version_spoof.plist"];
-}
-
-// Full-dictionary CF cache: stable retained CFDictionary per (bundleID + localized + generation)
-static _Atomic int32_t gAppVersionCacheGeneration = 0;
-
-// Prevent infinite recursion:
-// -[NSBundle infoDictionary] <-> -[NSBundle bundleIdentifier] <-> CFBundleGetInfoDictionary
-static __thread int gPXAppVersionInfoRecursion = 0;
-
-// Captured BEFORE hooks install — never call -[NSBundle bundleIdentifier] from hook bodies.
-static NSString *gMainBundleIDCached = nil;
-
-typedef struct {
-    CFDictionaryRef dict;
-    CFStringRef bundleID;
-    int32_t generation;
-    BOOL localized;
-    BOOL valid;
-} PXCFInfoDictCacheEntry;
-
-static PXCFInfoDictCacheEntry gCFInfoDictCache = {0};
-static PXCFInfoDictCacheEntry gCFLocalInfoDictCache = {0};
-static NSDictionary *gNSInfoDictCache = nil;
-static NSDictionary *gNSLocalizedInfoDictCache = nil;
-static NSString *gNSInfoDictBundleID = nil;
-static int32_t gNSInfoDictGeneration = -1;
-static NSString *gNSLocalizedInfoDictBundleID = nil;
-static int32_t gNSLocalizedInfoDictGeneration = -1;
-
-// Forward decls for original CF pointers (used by safe helpers).
+// Immutable packet: unique epoch, path -> plist/mtime, localized -> projection.
+static NSDictionary *gAppVersionState;
+// Get results have no release/eviction signal. Keep every distinct returned value
+// process-owned across invalidation; never borrow from a reclaimable cache slot.
+static NSArray<NSDictionary *> *gAppVersionBorrowedDictionaries;
+static __thread int gPXAppVersionInfoRecursion;
+static __thread BOOL gPXAppVersionReading, gPXAppVersionMasterReading, gPXAppVersionInterning;
+static NSString *gMainBundleIDCached;
 static CFDictionaryRef (*original_CFBundleGetInfoDictionary)(CFBundleRef bundle) = NULL;
 static CFDictionaryRef (*original_CFBundleGetLocalInfoDictionary)(CFBundleRef bundle) = NULL;
 
-/// Main bundle ID without re-entering infoDictionary hooks.
-static NSString *PXMainBundleIDCached(void) {
-    if (gMainBundleIDCached.length) return gMainBundleIDCached;
-
-    // Best effort while already inside a hook: read via ORIGINAL CF API only.
-    if (original_CFBundleGetInfoDictionary) {
-        CFBundleRef mainCF = CFBundleGetMainBundle();
-        if (mainCF) {
-            CFDictionaryRef info = original_CFBundleGetInfoDictionary(mainCF);
-            if (info) {
-                CFStringRef bid = CFDictionaryGetValue(info, kCFBundleIdentifierKey);
-                if (bid && CFGetTypeID(bid) == CFStringGetTypeID()) {
-                    gMainBundleIDCached = CFBridgingRelease(CFStringCreateCopy(kCFAllocatorDefault, bid));
-                    return gMainBundleIDCached;
-                }
-            }
-        }
-    }
-    return nil;
+static BOOL PXAppVersionPublish(NSDictionary *basis, NSDictionary *candidate) {
+    __attribute__((objc_precise_lifetime)) NSDictionary *retired = nil;
+    BOOL published = NO;
+    @try {
+        os_unfair_lock_lock(&gAppVersionCacheLock);
+        @try { if (gAppVersionState == basis) { retired = gAppVersionState;gAppVersionState = candidate;published = YES; } }
+        @finally { os_unfair_lock_unlock(&gAppVersionCacheLock); }
+        return published;
+    } @finally { basis = nil;candidate = nil;retired = nil; }
 }
-
-/// Identifier for an arbitrary CFBundle without going through hooked NSBundle paths.
-static NSString *PXCFBundleIDSafe(CFBundleRef bundle) {
-    if (!bundle) return nil;
-    // Prefer CFBundleGetIdentifier only when NOT inside our info-dict hooks — it can
-    // refresh via CFBundleGetInfoDictionary. When recursing, read from original dict.
-    if (gPXAppVersionInfoRecursion == 0) {
-        CFStringRef cfID = CFBundleGetIdentifier(bundle);
-        if (cfID) return (__bridge NSString *)cfID;
-    }
-    if (original_CFBundleGetInfoDictionary) {
-        CFDictionaryRef info = original_CFBundleGetInfoDictionary(bundle);
-        if (info) {
-            CFStringRef bid = CFDictionaryGetValue(info, kCFBundleIdentifierKey);
-            if (bid && CFGetTypeID(bid) == CFStringGetTypeID()) {
-                return (__bridge NSString *)bid;
-            }
+static NSDictionary *PXAppVersionCapture(void) {
+    NSDictionary *state = nil, *initial = nil;
+    @try {
+        for (;;) {
+            os_unfair_lock_lock(&gAppVersionCacheLock);
+            @try { state = gAppVersionState; } @finally { os_unfair_lock_unlock(&gAppVersionCacheLock); }
+            if (state) return state;
+            initial = @{@"epoch":[NSObject new],@"files":@{},@"projections":@{}};
+            if (PXAppVersionPublish(nil,initial)) return initial;
+            initial = nil;
         }
-    }
-    return nil;
+    } @finally { state = nil;initial = nil; }
 }
-
+static BOOL PXAppVersionEpochCurrent(id epoch) {
+    NSDictionary *state = nil;@try { state = PXAppVersionCapture();return state[@"epoch"] == epoch; } @finally { state = nil;epoch = nil; }
+}
+static BOOL PXAppVersionStore(id epoch, NSString *section, id key, NSDictionary *entry) {
+    NSDictionary *basis = nil, *candidate = nil;
+    NSMutableDictionary *items = nil, *working = nil;
+    @try {
+        for (;;) {
+            basis = PXAppVersionCapture();if (basis[@"epoch"] != epoch) return NO;
+            items = [basis[section] mutableCopy];items[key] = entry;working = [basis mutableCopy];working[section] = [items copy];candidate = [working copy];
+            if (PXAppVersionPublish(basis,candidate)) return YES;
+            basis = nil;candidate = nil;items = nil;working = nil;
+        }
+    } @finally { epoch = nil;section = nil;key = nil;entry = nil;basis = nil;candidate = nil;items = nil;working = nil; }
+}
+static NSString *PXVersionSpoofPlistPath(void) { NSString *root = nil;@try { root = PXPreferencesPath();return [root stringByAppendingPathComponent:@"com.hydra.tlinkios.version_spoof.plist"]; } @finally { root = nil; } }
 static NSDate *PXFileMTime(NSString *path) {
-    if (!path.length) return nil;
-    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil];
-    return [attrs isKindOfClass:[NSDictionary class]] ? attrs[NSFileModificationDate] : nil;
+    NSFileManager *files = nil;NSDictionary *attributes = nil;id date = nil;
+    @try { if (!path.length) return nil;files = [NSFileManager defaultManager];attributes = [files attributesOfItemAtPath:path error:NULL];date = attributes[NSFileModificationDate];return [date isKindOfClass:NSDate.class] ? date : nil; }
+    @finally { path = nil;files = nil;attributes = nil;date = nil; }
 }
-
 static NSDictionary *PXReadPlist(NSString *path) {
-    if (!path.length) return nil;
-    NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:path];
-    return [d isKindOfClass:[NSDictionary class]] ? d : nil;
+    NSDictionary *plist = nil;@try { if (!path.length) return nil;plist = [NSDictionary dictionaryWithContentsOfFile:path];return [plist isKindOfClass:NSDictionary.class] ? plist : nil; }
+    @finally { path = nil;plist = nil; }
 }
-
-static NSString *PXResolveExistingPath(NSArray<NSString *> *candidates) {
-    NSFileManager *fm = [NSFileManager defaultManager];
-    for (NSString *p in candidates) {
-        if (p.length && [fm fileExistsAtPath:p]) {
-            return p;
-        }
-    }
-    return [candidates firstObject];
-}
-
+static BOOL PXAppVersionScalar(id value) { @try { return [value isKindOfClass:NSNumber.class] || [value isKindOfClass:NSString.class]; } @finally { value = nil; } }
 BOOL PXAppVersionSpoofMasterEnabled(void) {
-    NSDictionary *settings = PXReadPlist(PXSecuritySettingsPath());
-    return [settings[@"appVersionSpoofingEnabled"] boolValue];
+    NSDictionary *settings = nil;id flag = nil;BOOL previous = gPXAppVersionMasterReading;
+    @try { if (previous) return NO;gPXAppVersionMasterReading = YES;settings = PXReadPlist(PXSecuritySettingsPath());flag = settings[@"appVersionSpoofingEnabled"];return PXAppVersionScalar(flag) && [flag boolValue]; }
+    @catch (__unused NSException *exception) { return NO; }
+    @finally { settings = nil;flag = nil;gPXAppVersionMasterReading = previous; }
 }
-
-static NSDictionary *PXLoadVersionSpoofPlistCached(void) {
-    NSString *path = PXVersionSpoofPlistPath();
-    NSDate *mtime = PXFileMTime(path);
-
-    os_unfair_lock_lock(&gAppVersionCacheLock);
-    BOOL valid = gCachedVersionSpoofPlist && [path isEqualToString:gCachedVersionSpoofPath] &&
-        ((!mtime && !gCachedVersionSpoofMTime) ||
-         (mtime && gCachedVersionSpoofMTime && [mtime isEqualToDate:gCachedVersionSpoofMTime]));
-    NSDictionary *cached = valid ? gCachedVersionSpoofPlist : nil;
-    os_unfair_lock_unlock(&gAppVersionCacheLock);
-    if (cached) return cached;
-
-    NSDictionary *loaded = PXReadPlist(path);
-    os_unfair_lock_lock(&gAppVersionCacheLock);
-    gCachedVersionSpoofPlist = [loaded copy];
-    gCachedVersionSpoofMTime = [mtime copy];
-    gCachedVersionSpoofPath = [path copy];
-    NSDictionary *published = gCachedVersionSpoofPlist;
-    os_unfair_lock_unlock(&gAppVersionCacheLock);
-    return published;
-}
-
-static NSString *PXReadActiveProfileId(void) {
-    return PXActiveProfileID();
-}
-
-static NSString *PXSafeBundleFilename(NSString *bundleID) {
-    // Delegate to the shared, host-testable helper (P1-B, no drift with tests).
-    return PXAppVersionSafeBundleFilename(bundleID);
-}
-
-static NSDictionary *PXLoadProfileAppVersionPlist(NSString *bundleID) {
-    if (!bundleID.length) return nil;
-    PXEnsureAppVersionProfileCaches();
-
-    NSString *profileId = PXReadActiveProfileId();
-    NSString *profileRoot = PXProfileRootPath(profileId);
-    NSString *fileName = PXSafeBundleFilename(bundleID);
-    if (!profileRoot.length || !fileName.length) return nil;
-
-    NSString *path = [[profileRoot stringByAppendingPathComponent:@"app_versions"]
-        stringByAppendingPathComponent:fileName];
-    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) return nil;
-    NSDate *mtime = PXFileMTime(path);
-
-    os_unfair_lock_lock(&gAppVersionCacheLock);
-    NSDictionary *cached = gCachedProfileVersionPlists[path];
-    NSDate *cachedMTime = gCachedProfileVersionMTime[path];
-    BOOL valid = cached && ((!mtime && !cachedMTime) ||
-        (mtime && cachedMTime && [mtime isEqualToDate:cachedMTime]));
-    os_unfair_lock_unlock(&gAppVersionCacheLock);
-    if (valid) return cached;
-
-    NSDictionary *loaded = PXReadPlist(path);
-    if (!loaded) return nil;
-    os_unfair_lock_lock(&gAppVersionCacheLock);
-    gCachedProfileVersionPlists[path] = [loaded copy];
-    if (mtime) gCachedProfileVersionMTime[path] = [mtime copy];
-    else [gCachedProfileVersionMTime removeObjectForKey:path];
-    NSDictionary *published = gCachedProfileVersionPlists[path];
-    os_unfair_lock_unlock(&gAppVersionCacheLock);
-    return published;
-}
-
-BOOL PXGetSpoofedAppVersionForBundle(NSString *bundleID, NSString **outVersion, NSString **outBuild) {
-    if (outVersion) *outVersion = nil;
-    if (outBuild) *outBuild = nil;
-    if (!bundleID.length) return NO;
-
-    if (!PXAppVersionSpoofMasterEnabled()) {
-        return NO;
-    }
-
-    NSDictionary *global = PXLoadVersionSpoofPlistCached();
-    NSDictionary *spoofedVersions = [global[@"SpoofedVersions"] isKindOfClass:[NSDictionary class]] ? global[@"SpoofedVersions"] : nil;
-    NSDictionary *entry = [spoofedVersions[bundleID] isKindOfClass:[NSDictionary class]] ? spoofedVersions[bundleID] : nil;
-    BOOL enabled = entry ? [entry[@"spoofingEnabled"] boolValue] : NO;
-
-    NSString *ver = [entry[@"spoofedVersion"] isKindOfClass:[NSString class]] ? entry[@"spoofedVersion"] : nil;
-    NSString *bld = [entry[@"spoofedBuild"] isKindOfClass:[NSString class]] ? entry[@"spoofedBuild"] : nil;
-
-    if (enabled && (!ver.length || !bld.length)) {
-        NSDictionary *profilePlist = PXLoadProfileAppVersionPlist(bundleID);
-        if (profilePlist) {
-            if (!ver.length) {
-                ver = [profilePlist[@"spoofedVersion"] isKindOfClass:[NSString class]] ? profilePlist[@"spoofedVersion"] : ver;
-            }
-            if (!bld.length) {
-                bld = [profilePlist[@"spoofedBuild"] isKindOfClass:[NSString class]] ? profilePlist[@"spoofedBuild"] : bld;
-            }
+static NSDictionary *PXAppVersionLoadPath(NSString *path, id epoch) {
+    NSDictionary *state = nil, *entry = nil, *loaded = nil, *candidate = nil;
+    NSDate *before = nil, *after = nil, *saved = nil;
+    @try {
+        if (!path.length) return nil;before = PXFileMTime(path);state = PXAppVersionCapture();if (state[@"epoch"] != epoch) return nil;
+        entry = state[@"files"][path];saved = entry[@"mtime"];
+        if (before && saved && [before isEqualToDate:saved]) return entry[@"plist"];
+        loaded = PXReadPlist(path);if (!loaded) return nil;after = PXFileMTime(path);
+        if (!PXAppVersionEpochCurrent(epoch)) return nil;
+        if (before && after && [before isEqualToDate:after]) {
+            candidate = @{@"mtime":after,@"plist":[loaded copy]};
+            if (!PXAppVersionStore(epoch,@"files",path,candidate)) return nil;
         }
-    }
-
-    if (!enabled) return NO;
-    if (!ver.length && !bld.length) return NO;
-
-    if (outVersion && ver.length) *outVersion = ver;
-    if (outBuild && bld.length) *outBuild = bld;
-    return YES;
+        // No reliable metadata: use this read only, never memoize a nil timestamp.
+        return loaded;
+    } @finally { path = nil;epoch = nil;state = nil;entry = nil;loaded = nil;candidate = nil;before = nil;after = nil;saved = nil; }
 }
-
-static void PXReleaseCFInfoDictCacheEntry(PXCFInfoDictCacheEntry *entry) {
-    if (!entry) return;
-    if (entry->dict) {
-        CFRelease(entry->dict);
-        entry->dict = NULL;
-    }
-    if (entry->bundleID) {
-        CFRelease(entry->bundleID);
-        entry->bundleID = NULL;
-    }
-    entry->generation = 0;
-    entry->localized = NO;
-    entry->valid = NO;
+static NSDictionary *PXLoadVersionSpoofPlistCached(id epoch) {
+    NSString *path = nil;@try { path = PXVersionSpoofPlistPath();return PXAppVersionLoadPath(path,epoch); } @finally { path = nil;epoch = nil; }
 }
-
+static NSDictionary *PXLoadProfileAppVersionPlist(NSString *bundleID, id epoch) {
+    NSString *profile = nil, *root = nil, *name = nil, *directory = nil, *path = nil;
+    @try {
+        if (!bundleID.length) return nil;profile = PXActiveProfileID();root = PXProfileRootPath(profile);name = PXAppVersionSafeBundleFilename(bundleID);
+        if (!root.length || !name.length) return nil;directory = [root stringByAppendingPathComponent:@"app_versions"];path = [directory stringByAppendingPathComponent:name];
+        return PXAppVersionLoadPath(path,epoch);
+    } @finally { bundleID = nil;epoch = nil;profile = nil;root = nil;name = nil;directory = nil;path = nil; }
+}
+BOOL PXGetSpoofedAppVersionForBundle(NSString *bundleID, NSString **outVersion, NSString **outBuild) {
+    NSDictionary *state = nil, *global = nil, *versions = nil, *entry = nil, *profile = nil;
+    NSString *identity = nil, *version = nil, *build = nil;id flag = nil, field = nil, epoch = nil;
+    BOOL previous = gPXAppVersionReading;
+    if (outVersion) *outVersion = nil;if (outBuild) *outBuild = nil;
+    @try {
+        if (previous) return NO;gPXAppVersionReading = YES;
+        if (![bundleID isKindOfClass:NSString.class] || !bundleID.length) return NO;
+        identity = [[NSString alloc] initWithString:bundleID];state = PXAppVersionCapture();epoch = state[@"epoch"];
+        if (!PXAppVersionSpoofMasterEnabled()) return NO;
+        global = PXLoadVersionSpoofPlistCached(epoch);versions = global[@"SpoofedVersions"];
+        if (![versions isKindOfClass:NSDictionary.class]) return NO;entry = versions[identity];if (![entry isKindOfClass:NSDictionary.class]) return NO;
+        flag = entry[@"spoofingEnabled"];if (!PXAppVersionScalar(flag) || ![flag boolValue]) return NO;
+        version = entry[@"spoofedVersion"];build = entry[@"spoofedBuild"];
+        if (![version isKindOfClass:NSString.class]) version = nil;if (![build isKindOfClass:NSString.class]) build = nil;
+        if (!version.length || !build.length) {
+            profile = PXLoadProfileAppVersionPlist(identity,epoch);
+            if (!version.length) { field = profile[@"spoofedVersion"];if ([field isKindOfClass:NSString.class]) version = field; }
+            if (!build.length) { field = profile[@"spoofedBuild"];if ([field isKindOfClass:NSString.class]) build = field; }
+        }
+        if (!version.length && !build.length) return NO;
+        version = version.length ? [[NSString alloc] initWithString:version] : nil;build = build.length ? [[NSString alloc] initWithString:build] : nil;
+        if (!PXAppVersionEpochCurrent(epoch)) return NO;
+        if (outVersion) *outVersion = version;if (outBuild) *outBuild = build;return YES;
+    } @catch (__unused NSException *exception) { return NO; }
+    @finally { bundleID = nil;state = nil;global = nil;versions = nil;entry = nil;profile = nil;identity = nil;version = nil;build = nil;flag = nil;field = nil;epoch = nil;gPXAppVersionReading = previous; }
+}
 void PXAppVersionHooksInvalidateCache(void) {
-    PXEnsureAppVersionProfileCaches();
-    atomic_fetch_add(&gAppVersionCacheGeneration, 1);
-
-    os_unfair_lock_lock(&gAppVersionCacheLock);
-    gCachedVersionSpoofPlist = nil;
-    gCachedVersionSpoofMTime = nil;
-    gCachedVersionSpoofPath = nil;
-    [gCachedProfileVersionPlists removeAllObjects];
-    [gCachedProfileVersionMTime removeAllObjects];
-    PXReleaseCFInfoDictCacheEntry(&gCFInfoDictCache);
-    PXReleaseCFInfoDictCacheEntry(&gCFLocalInfoDictCache);
-    gNSInfoDictCache = nil;
-    gNSInfoDictBundleID = nil;
-    gNSInfoDictGeneration = -1;
-    gNSLocalizedInfoDictCache = nil;
-    gNSLocalizedInfoDictBundleID = nil;
-    gNSLocalizedInfoDictGeneration = -1;
-    os_unfair_lock_unlock(&gAppVersionCacheLock);
+    NSDictionary *basis = nil, *candidate = nil;
+    @try {
+        candidate = @{@"epoch":[NSObject new],@"files":@{},@"projections":@{}};
+        do { basis = PXAppVersionCapture(); } while (!PXAppVersionPublish(basis,candidate));
+    } @finally { basis = nil;candidate = nil; }
     PXInvalidateScopeDecisionCache();
 }
-
-#pragma mark - Full dictionary helpers
-
+static NSString *PXMainBundleIDCached(void) {
+    NSString *identity = nil, *candidate = nil;id value = nil;CFDictionaryRef info = NULL;
+    @try {
+        os_unfair_lock_lock(&gAppVersionCacheLock);
+        @try { identity = gMainBundleIDCached; } @finally { os_unfair_lock_unlock(&gAppVersionCacheLock); }
+        if (identity.length) return identity;
+        if (original_CFBundleGetInfoDictionary) {
+            CFBundleRef main = CFBundleGetMainBundle();if (main) info = original_CFBundleGetInfoDictionary(main);if (info) CFRetain(info);
+            value = info ? (__bridge id)CFDictionaryGetValue(info,kCFBundleIdentifierKey) : nil;
+            if ([value isKindOfClass:NSString.class]) candidate = [[NSString alloc] initWithString:value];
+        }
+        if (!candidate.length) return nil;
+        os_unfair_lock_lock(&gAppVersionCacheLock);
+        @try { if (!gMainBundleIDCached) gMainBundleIDCached = candidate;identity = gMainBundleIDCached; }
+        @finally { os_unfair_lock_unlock(&gAppVersionCacheLock); }
+        return identity;
+    } @finally { if (info) CFRelease(info);identity = nil;candidate = nil;value = nil; }
+}
+static NSString *PXCFBundleIDSafe(CFBundleRef bundle) {
+    CFDictionaryRef info = NULL;NSString *identity = nil;id value = nil;
+    @try {
+        if (!bundle) return nil;
+        if (gPXAppVersionInfoRecursion == 0) { CFStringRef value = CFBundleGetIdentifier(bundle);if (value) return [[NSString alloc] initWithString:(__bridge NSString *)value]; }
+        if (original_CFBundleGetInfoDictionary) info = original_CFBundleGetInfoDictionary(bundle);if (info) CFRetain(info);
+        value = info ? (__bridge id)CFDictionaryGetValue(info,kCFBundleIdentifierKey) : nil;
+        if ([value isKindOfClass:NSString.class]) identity = [[NSString alloc] initWithString:value];return identity;
+    } @finally { if (info) CFRelease(info);identity = nil;value = nil; }
+}
 static BOOL PXAppVersionScopeAllows(void) {
-    // NEVER call -[NSBundle bundleIdentifier] here — it re-enters infoDictionary.
-    NSString *bundleID = PXMainBundleIDCached();
-    if (!bundleID.length) return NO;
-    NSString *proc = [NSProcessInfo processInfo].processName;
-    return PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionNone);
+    NSString *bundleID = nil, *process = nil;NSProcessInfo *info = nil;
+    @try { bundleID = PXMainBundleIDCached();if (!bundleID.length) return NO;info = [NSProcessInfo processInfo];process = info.processName;return PXProcessIsAllowedForSpoofing(bundleID,process,PXScopeOptionNone); }
+    @finally { bundleID = nil;process = nil;info = nil; }
 }
-
-static NSDictionary *PXApplyAppVersionToInfoDictionary(NSDictionary *original, NSString *ver, NSString *build) {
-    // Delegate to the shared, host-testable helper (P1-B, no drift with tests).
-    return PXAppVersionApplyToInfoDictionary(original, ver, build);
-}
-
 static BOOL PXShouldSpoofMainBundleInfo(NSBundle *bundle, NSString **outMainBundleID, NSString **outVer, NSString **outBuild) {
-    if (!bundle) return NO;
-    if (!PXAppVersionScopeAllows()) return NO;
-
-    NSString *mainBundleID = PXMainBundleIDCached();
-    if (!mainBundleID.length) return NO;
-
-    // Only spoof the main bundle. Compare object identity first to avoid
-    // calling -[NSBundle bundleIdentifier] (re-enters infoDictionary).
-    if (bundle != [NSBundle mainBundle]) {
-        // Non-main: try CF path via executable URL / already-known identity only.
-        // Reading [bundle bundleIdentifier] is unsafe under our hooks.
-        return NO;
-    }
-
-    NSString *ver = nil;
-    NSString *build = nil;
-    if (!PXGetSpoofedAppVersionForBundle(mainBundleID, &ver, &build)) return NO;
-    if (!ver.length && !build.length) return NO;
-
-    if (outMainBundleID) *outMainBundleID = mainBundleID;
-    if (outVer) *outVer = ver;
-    if (outBuild) *outBuild = build;
-    return YES;
+    NSString *identity = nil;NSString *__autoreleasing version = nil, *build = nil;
+    @try {
+        if (!bundle || bundle != [NSBundle mainBundle] || !PXAppVersionScopeAllows()) return NO;
+        identity = PXMainBundleIDCached();if (!identity.length || !PXGetSpoofedAppVersionForBundle(identity,&version,&build)) return NO;
+        if (outMainBundleID) *outMainBundleID = identity;if (outVer) *outVer = version;if (outBuild) *outBuild = build;return YES;
+    } @finally { bundle = nil;identity = nil; }
 }
-
-#pragma mark - NSBundle full dictionary hooks
+static BOOL PXShouldSpoofCFBundleInfo(CFBundleRef bundle, NSString **outMainBundleID, NSString **outVer, NSString **outBuild) {
+    NSString *identity = nil, *bundleID = nil;NSString *__autoreleasing version = nil, *build = nil;
+    @try {
+        if (!bundle || !PXAppVersionScopeAllows()) return NO;identity = PXMainBundleIDCached();if (!identity.length) return NO;
+        if (bundle != CFBundleGetMainBundle()) { bundleID = PXCFBundleIDSafe(bundle);if (!bundleID.length || ![bundleID isEqualToString:identity]) return NO; }
+        if (!PXGetSpoofedAppVersionForBundle(identity,&version,&build)) return NO;
+        if (outMainBundleID) *outMainBundleID = identity;if (outVer) *outVer = version;if (outBuild) *outBuild = build;return YES;
+    } @finally { identity = nil;bundleID = nil; }
+}
+static NSDictionary *PXInternAppVersionDictionary(NSDictionary *value) {
+    NSArray *basis = nil, *candidate = nil;NSMutableArray *working = nil;NSDictionary *frozen = nil, *stored = nil;
+    __attribute__((objc_precise_lifetime)) NSArray *retired = nil;
+    BOOL previous = gPXAppVersionInterning;
+    @try {
+        if (previous) return nil;gPXAppVersionInterning = YES;frozen = [value copy];if (!frozen) return nil;
+        for (;;) {
+            os_unfair_lock_lock(&gAppVersionCacheLock);
+            @try { basis = gAppVersionBorrowedDictionaries; } @finally { os_unfair_lock_unlock(&gAppVersionCacheLock); }
+            for (NSUInteger i = 0; i < basis.count; i++) { stored = basis[i];if (stored == frozen || [stored isEqualToDictionary:frozen]) return stored; }
+            working = basis ? [basis mutableCopy] : [NSMutableArray array];[working addObject:frozen];candidate = [working copy];
+            BOOL published = NO;
+            os_unfair_lock_lock(&gAppVersionCacheLock);
+            @try { if (gAppVersionBorrowedDictionaries == basis) { retired = gAppVersionBorrowedDictionaries;gAppVersionBorrowedDictionaries = candidate;published = YES; } }
+            @finally { os_unfair_lock_unlock(&gAppVersionCacheLock); }
+            retired = nil;if (published) return frozen;basis = nil;candidate = nil;working = nil;stored = nil;
+        }
+    } @finally { value = nil;basis = nil;candidate = nil;working = nil;frozen = nil;stored = nil;retired = nil;gPXAppVersionInterning = previous; }
+}
+static NSDictionary *PXAppVersionProjectInfo(NSBundle *bundle, CFBundleRef cfBundle, NSDictionary *original, BOOL localized, BOOL cf) {
+    NSDictionary *state = nil, *cached = nil, *candidate = nil, *result = nil;id epoch = nil;
+    NSString *__autoreleasing identity = nil, *version = nil, *build = nil;
+    @try {
+        if (![original isKindOfClass:NSDictionary.class]) return original;state = PXAppVersionCapture();epoch = state[@"epoch"];
+        BOOL allowed = cf ? PXShouldSpoofCFBundleInfo(cfBundle,&identity,&version,&build) : PXShouldSpoofMainBundleInfo(bundle,&identity,&version,&build);
+        if (!allowed || !PXAppVersionEpochCurrent(epoch)) return original;
+        cached = state[@"projections"][@(localized)];
+        if ([cached[@"bundle"] isEqualToString:identity] && [cached[@"version"] isEqualToString:version ?: @""] && [cached[@"build"] isEqualToString:build ?: @""] && [cached[@"base"] isEqualToDictionary:original]) result = cached[@"result"];
+        else {
+            result = PXAppVersionApplyToInfoDictionary(original,version,build);if (![result isKindOfClass:NSDictionary.class]) return original;
+            candidate = @{@"bundle":identity,@"version":version ?: @"",@"build":build ?: @"",@"base":[original copy],@"result":result};
+            if (!PXAppVersionStore(epoch,@"projections",@(localized),candidate)) return original;
+        }
+        if (cf) { result = PXInternAppVersionDictionary(result);if (!result) return original; }
+        return PXAppVersionEpochCurrent(epoch) ? result : original;
+    } @finally { bundle = nil;original = nil;state = nil;cached = nil;candidate = nil;result = nil;epoch = nil; }
+}
 
 %group AppVersionFullDictionary
-
 %hook NSBundle
-
 - (NSDictionary *)infoDictionary {
-    // Recursion: bundleIdentifier / CFBundleGetInfoDictionary re-enter here.
-    if (gPXAppVersionInfoRecursion > 0) {
-        return %orig;
-    }
-    gPXAppVersionInfoRecursion++;
-    NSDictionary *original = %orig;
-    NSDictionary *result = original;
+    __attribute__((objc_precise_lifetime)) NSBundle *receiver = self;
+    NSDictionary *original = nil, *result = nil;BOOL entered = NO;
     @try {
-        NSString *mainBundleID = nil;
-        NSString *ver = nil;
-        NSString *build = nil;
-        if (!PXShouldSpoofMainBundleInfo(self, &mainBundleID, &ver, &build)) {
-            result = original;
-        } else {
-            int32_t gen = atomic_load(&gAppVersionCacheGeneration);
-            os_unfair_lock_lock(&gAppVersionCacheLock);
-            BOOL valid = gNSInfoDictCache && gNSInfoDictGeneration == gen &&
-                [gNSInfoDictBundleID isEqualToString:mainBundleID];
-            NSDictionary *cached = valid ? gNSInfoDictCache : nil;
-            os_unfair_lock_unlock(&gAppVersionCacheLock);
-            if (cached) {
-                result = cached;
-            } else {
-                NSDictionary *spoofed = PXApplyAppVersionToInfoDictionary(original, ver, build);
-                if (spoofed) {
-                    os_unfair_lock_lock(&gAppVersionCacheLock);
-                    gNSInfoDictCache = [spoofed copy];
-                    gNSInfoDictBundleID = [mainBundleID copy];
-                    gNSInfoDictGeneration = gen;
-                    result = gNSInfoDictCache;
-                    os_unfair_lock_unlock(&gAppVersionCacheLock);
-                }
-            }
-        }
-    } @catch (__unused NSException *e) {
-        result = original;
-    }
-    gPXAppVersionInfoRecursion--;
-    return result;
+        if (gPXAppVersionInfoRecursion > 0) return %orig;
+        gPXAppVersionInfoRecursion++;entered = YES;
+        original = %orig;result = original;
+        @try { result = PXAppVersionProjectInfo(receiver,NULL,original,NO,NO); }
+        @catch (__unused NSException *exception) { result = original; }
+        return result;
+    } @finally { if (entered) gPXAppVersionInfoRecursion--;receiver = nil;original = nil;result = nil; }
 }
-
 - (NSDictionary *)localizedInfoDictionary {
-    if (gPXAppVersionInfoRecursion > 0) {
-        return %orig;
-    }
-    gPXAppVersionInfoRecursion++;
-    NSDictionary *original = %orig;
-    NSDictionary *result = original;
+    __attribute__((objc_precise_lifetime)) NSBundle *receiver = self;
+    NSDictionary *original = nil, *result = nil;BOOL entered = NO;
     @try {
-        NSString *mainBundleID = nil;
-        NSString *ver = nil;
-        NSString *build = nil;
-        if (!PXShouldSpoofMainBundleInfo(self, &mainBundleID, &ver, &build)) {
-            result = original;
-        } else if (!original) {
-            result = original; // may legitimately be nil
-        } else {
-            int32_t gen = atomic_load(&gAppVersionCacheGeneration);
-            os_unfair_lock_lock(&gAppVersionCacheLock);
-            BOOL valid = gNSLocalizedInfoDictCache && gNSLocalizedInfoDictGeneration == gen &&
-                [gNSLocalizedInfoDictBundleID isEqualToString:mainBundleID];
-            NSDictionary *cached = valid ? gNSLocalizedInfoDictCache : nil;
-            os_unfair_lock_unlock(&gAppVersionCacheLock);
-            if (cached) {
-                result = cached;
-            } else {
-                NSDictionary *spoofed = PXApplyAppVersionToInfoDictionary(original, ver, build);
-                if (spoofed) {
-                    os_unfair_lock_lock(&gAppVersionCacheLock);
-                    gNSLocalizedInfoDictCache = [spoofed copy];
-                    gNSLocalizedInfoDictBundleID = [mainBundleID copy];
-                    gNSLocalizedInfoDictGeneration = gen;
-                    result = gNSLocalizedInfoDictCache;
-                    os_unfair_lock_unlock(&gAppVersionCacheLock);
-                }
-            }
-        }
-    } @catch (__unused NSException *e) {
-        result = original;
-    }
-    gPXAppVersionInfoRecursion--;
-    return result;
+        if (gPXAppVersionInfoRecursion > 0) return %orig;
+        gPXAppVersionInfoRecursion++;entered = YES;
+        original = %orig;result = original;
+        @try { result = PXAppVersionProjectInfo(receiver,NULL,original,YES,NO); }
+        @catch (__unused NSException *exception) { result = original; }
+        return result;
+    } @finally { if (entered) gPXAppVersionInfoRecursion--;receiver = nil;original = nil;result = nil; }
 }
-
 %end
-
-%end // AppVersionFullDictionary
-
-#pragma mark - CFBundle full dictionary hooks
-
-static BOOL PXShouldSpoofCFBundleInfo(CFBundleRef bundle, NSString **outMainBundleID, NSString **outVer, NSString **outBuild) {
-    if (!bundle) return NO;
-    if (!PXAppVersionScopeAllows()) return NO;
-
-    NSString *mainBundleID = PXMainBundleIDCached();
-    if (!mainBundleID.length) return NO;
-
-    // Only main CFBundle. Compare with CFBundleGetMainBundle to avoid CFBundleGetIdentifier
-    // (which can refresh info dictionary and re-enter our hook).
-    if (bundle != CFBundleGetMainBundle()) {
-        NSString *nsBundleID = PXCFBundleIDSafe(bundle);
-        if (!nsBundleID.length || ![nsBundleID isEqualToString:mainBundleID]) return NO;
-    }
-
-    NSString *ver = nil;
-    NSString *build = nil;
-    if (!PXGetSpoofedAppVersionForBundle(mainBundleID, &ver, &build)) return NO;
-    if (!ver.length && !build.length) return NO;
-
-    if (outMainBundleID) *outMainBundleID = mainBundleID;
-    if (outVer) *outVer = ver;
-    if (outBuild) *outBuild = build;
-    return YES;
-}
-
-static CFDictionaryRef PXCachedOrBuildCFInfoDict(CFBundleRef bundle,
-                                                 CFDictionaryRef original,
-                                                 BOOL localized,
-                                                 PXCFInfoDictCacheEntry *cache) {
-    if (!original || !cache) return original;
-
-    NSString *mainBundleID = nil;
-    NSString *ver = nil;
-    NSString *build = nil;
-    if (!PXShouldSpoofCFBundleInfo(bundle, &mainBundleID, &ver, &build)) {
-        return original;
-    }
-
-    int32_t gen = atomic_load(&gAppVersionCacheGeneration);
-    os_unfair_lock_lock(&gAppVersionCacheLock);
-    BOOL valid = cache->valid && cache->dict && cache->generation == gen &&
-        cache->localized == localized && cache->bundleID &&
-        CFEqual(cache->bundleID, (__bridge CFStringRef)mainBundleID);
-    CFDictionaryRef cached = valid ? cache->dict : NULL;
-    os_unfair_lock_unlock(&gAppVersionCacheLock);
-    if (cached) return cached;
-
-    NSDictionary *nsOrig = (__bridge NSDictionary *)original;
-    NSDictionary *spoofed = PXApplyAppVersionToInfoDictionary(nsOrig, ver, build);
-    if (!spoofed) return original;
-    CFDictionaryRef retained = CFBridgingRetain(spoofed);
-    if (!retained) return original;
-
-    os_unfair_lock_lock(&gAppVersionCacheLock);
-    BOOL anotherValid = cache->valid && cache->dict && cache->generation == gen &&
-        cache->localized == localized && cache->bundleID &&
-        CFEqual(cache->bundleID, (__bridge CFStringRef)mainBundleID);
-    if (anotherValid) {
-        CFRelease(retained);
-    } else {
-        PXReleaseCFInfoDictCacheEntry(cache);
-        cache->dict = retained;
-        cache->bundleID = CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)mainBundleID);
-        cache->generation = gen;
-        cache->localized = localized;
-        cache->valid = YES;
-    }
-    CFDictionaryRef published = cache->dict;
-    os_unfair_lock_unlock(&gAppVersionCacheLock);
-    return published;
-
-}
-
+%end
 static CFDictionaryRef replaced_CFBundleGetInfoDictionary(CFBundleRef bundle) {
-    if (gPXAppVersionInfoRecursion > 0) {
-        return original_CFBundleGetInfoDictionary ? original_CFBundleGetInfoDictionary(bundle) : NULL;
-    }
-    gPXAppVersionInfoRecursion++;
-    CFDictionaryRef original = NULL;
-    if (original_CFBundleGetInfoDictionary) {
-        original = original_CFBundleGetInfoDictionary(bundle);
-    }
-    CFDictionaryRef result = original;
+    CFDictionaryRef original = NULL, result = NULL;BOOL entered = NO, retainedBundle = NO, retainedOriginal = NO;
     @try {
-        result = PXCachedOrBuildCFInfoDict(bundle, original, NO, &gCFInfoDictCache);
-    } @catch (__unused NSException *e) {
-        result = original;
-    }
-    gPXAppVersionInfoRecursion--;
-    return result;
+        if (gPXAppVersionInfoRecursion > 0) return original_CFBundleGetInfoDictionary ? original_CFBundleGetInfoDictionary(bundle) : NULL;
+        gPXAppVersionInfoRecursion++;entered = YES;
+        if (bundle) { CFRetain(bundle);retainedBundle = YES; }
+        original = original_CFBundleGetInfoDictionary ? original_CFBundleGetInfoDictionary(bundle) : NULL;result = original;
+        if (original) { CFRetain(original);retainedOriginal = YES; }
+        @try { result = (__bridge CFDictionaryRef)PXAppVersionProjectInfo(nil,bundle,(__bridge NSDictionary *)original,NO,YES); }
+        @catch (__unused NSException *exception) { result = original; }
+        return result;
+    } @finally { if (retainedOriginal) CFRelease(original);if (retainedBundle) CFRelease(bundle);if (entered) gPXAppVersionInfoRecursion--; }
 }
-
 static CFDictionaryRef replaced_CFBundleGetLocalInfoDictionary(CFBundleRef bundle) {
-    if (gPXAppVersionInfoRecursion > 0) {
-        return original_CFBundleGetLocalInfoDictionary ? original_CFBundleGetLocalInfoDictionary(bundle) : NULL;
-    }
-    gPXAppVersionInfoRecursion++;
-    CFDictionaryRef original = NULL;
-    if (original_CFBundleGetLocalInfoDictionary) {
-        original = original_CFBundleGetLocalInfoDictionary(bundle);
-    }
-    CFDictionaryRef result = original;
+    CFDictionaryRef original = NULL, result = NULL;BOOL entered = NO, retainedBundle = NO, retainedOriginal = NO;
     @try {
-        // Local info dict may be NULL — pass through.
-        if (original) {
-            result = PXCachedOrBuildCFInfoDict(bundle, original, YES, &gCFLocalInfoDictCache);
-        }
-    } @catch (__unused NSException *e) {
-        result = original;
-    }
-    gPXAppVersionInfoRecursion--;
-    return result;
+        if (gPXAppVersionInfoRecursion > 0) return original_CFBundleGetLocalInfoDictionary ? original_CFBundleGetLocalInfoDictionary(bundle) : NULL;
+        gPXAppVersionInfoRecursion++;entered = YES;
+        if (bundle) { CFRetain(bundle);retainedBundle = YES; }
+        original = original_CFBundleGetLocalInfoDictionary ? original_CFBundleGetLocalInfoDictionary(bundle) : NULL;result = original;
+        if (original) { CFRetain(original);retainedOriginal = YES; }
+        @try { result = (__bridge CFDictionaryRef)PXAppVersionProjectInfo(nil,bundle,(__bridge NSDictionary *)original,YES,YES); }
+        @catch (__unused NSException *exception) { result = original; }
+        return result;
+    } @finally { if (retainedOriginal) CFRelease(original);if (retainedBundle) CFRelease(bundle);if (entered) gPXAppVersionInfoRecursion--; }
 }
 
 static void *PXFindCFSymbol(void *handle, const char *names[], int count) {
@@ -538,11 +297,11 @@ static void PXAppVersionCacheInvalidateNotification(CFNotificationCenterRef cent
                                                     CFStringRef name,
                                                     const void *object,
                                                     CFDictionaryRef userInfo) {
-    PXAppVersionHooksInvalidateCache();
+    @try { PXAppVersionHooksInvalidateCache(); } @catch (__unused NSException *exception) { }
 }
 
 %dtor {
-    PXAppVersionHooksInvalidateCache();
+    @try { PXAppVersionHooksInvalidateCache(); } @catch (__unused NSException *exception) { }
 }
 
 %ctor {

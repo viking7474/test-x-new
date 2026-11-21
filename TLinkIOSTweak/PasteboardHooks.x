@@ -13,41 +13,62 @@
 #import "PXPaths.h"
 #import "PXP1AFilters.h"
 #import <os/lock.h>
+#include <string.h>
 
 
 
-// Global variables to track state
-static NSMutableDictionary *customChangeCountMap = nil; // Store custom change counts per app
-static NSMutableDictionary *lastKnownPasteboardData = nil; // Cache pasteboard content hash
-
+// One immutable packet; collection work and retirement stay outside the lock.
 static os_unfair_lock gPasteboardStateLock = OS_UNFAIR_LOCK_INIT;
-static void PXEnsurePasteboardState(void) {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        customChangeCountMap = [NSMutableDictionary dictionary];
-        lastKnownPasteboardData = [NSMutableDictionary dictionary];
-    });
+static NSDictionary *gPasteboardState;
+static __thread BOOL gPXInsidePasteboard;
+static BOOL PXPublishPasteboardState(NSDictionary *basis, NSDictionary *candidate) {
+    __attribute__((objc_precise_lifetime)) NSDictionary *retired = nil;BOOL published = NO;
+    @try {
+        os_unfair_lock_lock(&gPasteboardStateLock);
+        @try { if (gPasteboardState == basis) { retired=gPasteboardState;gPasteboardState=candidate;published=YES; } }
+        @finally { os_unfair_lock_unlock(&gPasteboardStateLock); }
+        return published;
+    } @finally { basis=nil;candidate=nil;retired=nil; }
 }
-
-// Forward declarations
+static NSDictionary *PXCapturePasteboardState(void) {
+    NSDictionary *state=nil,*initial=nil;
+    @try { for (;;) {
+        os_unfair_lock_lock(&gPasteboardStateLock);
+        @try { state=gPasteboardState; } @finally { os_unfair_lock_unlock(&gPasteboardStateLock); }
+        if (state) return state;
+        initial=@{@"epoch":[NSObject new],@"entries":@{}};if (PXPublishPasteboardState(nil,initial)) return initial;initial=nil;
+    }} @finally { state=nil;initial=nil; }
+}
+static void PXEnsurePasteboardState(void) { (void)PXCapturePasteboardState(); }
+static NSNumber *PXUpdatePasteboardState(NSString *bundleID, NSInteger nativeCount, NSString *hash, BOOL increment, id epoch) {
+    NSDictionary *basis=nil,*entry=nil,*candidate=nil;NSMutableDictionary *entries=nil,*working=nil,*next=nil;NSNumber *result=nil;
+    @try { for (;;) {
+        basis=PXCapturePasteboardState();if (basis[@"epoch"]!=epoch) return nil;
+        entry=basis[@"entries"][bundleID];NSInteger count=entry[@"count"] ? [entry[@"count"] integerValue] : nativeCount;
+        BOOL changed=hash && (!entry[@"hash"] || ![entry[@"hash"] isEqualToString:hash]);
+        if (entry[@"count"] && !increment && !changed) return entry[@"count"];
+        if ((increment || changed) && count<NSIntegerMax) count++;
+        result=@(count);next=entry ? [entry mutableCopy] : [NSMutableDictionary dictionary];next[@"count"]=result;if (hash) next[@"hash"]=hash;
+        entries=[basis[@"entries"] mutableCopy];entries[bundleID]=[next copy];working=[basis mutableCopy];working[@"entries"]=[entries copy];candidate=[working copy];
+        if (PXPublishPasteboardState(basis,candidate)) return result;
+        basis=nil;entry=nil;candidate=nil;entries=nil;working=nil;next=nil;result=nil;
+    }} @finally { bundleID=nil;hash=nil;epoch=nil;basis=nil;entry=nil;candidate=nil;entries=nil;working=nil;next=nil;result=nil; }
+}
 static NSString *getCurrentBundleID(void);
 static NSDictionary *loadScopedApps(void);
 static BOOL isInScopedAppsList(void);
 static NSString *getSpoofedPasteboardUUID(void);
 static BOOL shouldSpoofForBundle(NSString *bundleID);
-static NSInteger getCustomChangeCount(NSString *bundleID, NSInteger originalCount);
-static void incrementCustomChangeCount(NSString *bundleID);
-static BOOL hasPasteboardContentChanged(NSString *bundleID, UIPasteboard *pasteboard);
 static NSString *deterministicPasteboardName(NSString *originalName, NSString *uuidString);
-
-// Callback function for notifications that clear the cache
 static void clearCacheCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
-    PXInvalidateScopeDecisionCache();
-    PXEnsurePasteboardState();
-    os_unfair_lock_lock(&gPasteboardStateLock);
-    [customChangeCountMap removeAllObjects];
-    [lastKnownPasteboardData removeAllObjects];
-    os_unfair_lock_unlock(&gPasteboardStateLock);
+    (void)center;(void)observer;(void)name;(void)object;(void)userInfo;
+    NSDictionary *basis=nil,*candidate=nil;
+    @try {
+        candidate=@{@"epoch":[NSObject new],@"entries":@{}};
+        do { basis=PXCapturePasteboardState(); } while (!PXPublishPasteboardState(basis,candidate));
+        PXInvalidateScopeDecisionCache();
+    } @catch (__unused NSException *exception) { }
+    @finally { basis=nil;candidate=nil; }
 }
 
 #pragma mark - Scoped Apps Helper Functions
@@ -167,72 +188,16 @@ static NSString *getSpoofedPasteboardUUID(void) {
     return uuid;
 }
 
-static NSInteger getCustomChangeCount(NSString *bundleID, NSInteger originalCount) {
-    PXEnsurePasteboardState();
-    os_unfair_lock_lock(&gPasteboardStateLock);
-    NSNumber *currentValue = customChangeCountMap[bundleID];
-    if (!currentValue) customChangeCountMap[bundleID] = @(originalCount);
-    NSInteger result = currentValue ? [currentValue integerValue] : originalCount;
-    os_unfair_lock_unlock(&gPasteboardStateLock);
-    return result;
-}
-
-static void incrementCustomChangeCount(NSString *bundleID) {
-    PXEnsurePasteboardState();
-    os_unfair_lock_lock(&gPasteboardStateLock);
-    NSNumber *currentValue = customChangeCountMap[bundleID];
-    customChangeCountMap[bundleID] = @([currentValue integerValue] + 1);
-    os_unfair_lock_unlock(&gPasteboardStateLock);
-}
-
 static NSString *getPasteboardContentHash(UIPasteboard *pasteboard) {
+    NSMutableString *input=nil;NSArray *types=nil,*probe=nil;NSString *type=nil,*urlString=nil;id value=nil;UIImage *image=nil;NSData *data=nil;NSURL *url=nil;
     @try {
-        NSMutableString *hashInput = [NSMutableString string];
-        
-        NSArray *types = @[@"public.text", @"public.plain-text", @"public.utf8-plain-text"];
-        for (NSString *type in types) {
-            if ([pasteboard containsPasteboardTypes:@[type]]) {
-                id value = [pasteboard valueForPasteboardType:type];
-                if ([value isKindOfClass:[NSString class]]) {
-                    [hashInput appendString:(NSString *)value];
-                }
-            }
-        }
-        
-        if (pasteboard.image) {
-            NSData *imageData = UIImagePNGRepresentation(pasteboard.image);
-            if (imageData) {
-                [hashInput appendFormat:@"IMG:%lu", (unsigned long)imageData.hash];
-            }
-        }
-        
-        if (pasteboard.URL) {
-            [hashInput appendString:[pasteboard.URL absoluteString]];
-        }
-        
-        return [NSString stringWithFormat:@"%lu", (unsigned long)[hashInput hash]];
-        
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] ⚠️ Exception computing pasteboard hash: %@", exception);
-        return @"ERROR";
-    }
-}
-
-static BOOL hasPasteboardContentChanged(NSString *bundleID, UIPasteboard *pasteboard) {
-    @try {
-        PXEnsurePasteboardState();
-        NSString *newHash = getPasteboardContentHash(pasteboard);
-        os_unfair_lock_lock(&gPasteboardStateLock);
-        NSString *oldHash = lastKnownPasteboardData[bundleID];
-        lastKnownPasteboardData[bundleID] = newHash;
-        BOOL changed = !oldHash || ![oldHash isEqualToString:newHash];
-        os_unfair_lock_unlock(&gPasteboardStateLock);
-        return changed;
-        
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] ⚠️ Exception checking pasteboard changes: %@", exception);
-        return NO;
-    }
+        input=[NSMutableString string];types=@[@"public.text",@"public.plain-text",@"public.utf8-plain-text"];
+        for (NSUInteger i=0;i<types.count;i++) { type=types[i];probe=@[type];if ([pasteboard containsPasteboardTypes:probe]) { value=[pasteboard valueForPasteboardType:type];if ([value isKindOfClass:NSString.class]) [input appendString:value]; } }
+        image=pasteboard.image;if (image) { data=UIImagePNGRepresentation(image);if (data) [input appendFormat:@"IMG:%lu",(unsigned long)data.hash]; }
+        url=pasteboard.URL;if (url) { urlString=url.absoluteString;[input appendString:urlString]; }
+        return [NSString stringWithFormat:@"%lu",(unsigned long)input.hash];
+    } @catch (__unused NSException *exception) { return @"ERROR"; }
+    @finally { pasteboard=nil;input=nil;types=nil;probe=nil;type=nil;urlString=nil;value=nil;image=nil;data=nil;url=nil; }
 }
 
 // Build deterministic custom pasteboard name from PasteboardUUID.
@@ -250,376 +215,146 @@ static NSString *(*orig_name)(id, SEL) = NULL;
 static NSInteger (*orig_changeCount)(id, SEL) = NULL;
 static void (*orig_setPersistent)(id, SEL, BOOL) = NULL;
 static BOOL (*orig_isPersistent)(id, SEL) = NULL;
-static NSArray *(*orig_itemProviders)(id, SEL) = NULL;
-static NSArray *(*orig_itemSetWithPreferredPasteboardTypes)(id, SEL, NSArray *) = NULL;
-static BOOL (*orig_containsPasteboardTypes)(id, SEL, NSArray *) = NULL;
 static id (*orig_valueForPasteboardType)(id, SEL, NSString *) = NULL;
 static void (*orig_setDataForPasteboardType)(id, SEL, NSData *, NSString *) = NULL;
 static void (*orig_setItems)(id, SEL, NSArray *) = NULL;
 
 // Class methods
-static UIPasteboard *(*orig_generalPasteboard)(id, SEL) = NULL;
 static UIPasteboard *(*orig_pasteboardWithNameCreate)(id, SEL, NSString *, BOOL) = NULL;
-static UIPasteboard *(*orig_pasteboardWithUniqueName)(id, SEL) = NULL;
 static UIPasteboard *(*orig_pasteboardWithURLCreate)(id, SEL, NSURL *, BOOL) = NULL;
 
 #pragma mark - Hook implementations
 
 static NSUUID *hook_uniquePasteboardUUID(id self, SEL _cmd) {
     PX_RUNTIME_READ_OPERATION;
+    __attribute__((objc_precise_lifetime)) id receiver=self;NSString *bundleID=nil,*uuidString=nil;NSUUID *projected=nil;BOOL previous=gPXInsidePasteboard;
     @try {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (shouldSpoofForBundle(bundleID)) {
-            NSString *uuidString = getSpoofedPasteboardUUID();
-            NSUUID *uuid = [[NSUUID alloc] initWithUUIDString:uuidString];
-            if (uuid) {
-                PXLog(@"[WeaponX] 🔄 Spoofing Pasteboard UUID with: %@", uuidString);
-                return uuid;
-            }
-        }
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] ⚠️ Exception in uniquePasteboardUUID hook: %@", exception);
-    }
-    
-    if (orig_uniquePasteboardUUID) {
-        return orig_uniquePasteboardUUID(self, _cmd);
-    }
-    return nil;
+        if (previous) return orig_uniquePasteboardUUID ? orig_uniquePasteboardUUID(receiver,_cmd) : nil;
+        gPXInsidePasteboard=YES;
+        @try { bundleID=getCurrentBundleID();if (shouldSpoofForBundle(bundleID)) { uuidString=getSpoofedPasteboardUUID();projected=[[NSUUID alloc] initWithUUIDString:uuidString]; } } @catch (__unused NSException *exception) { }
+        if (projected) return projected;
+        return orig_uniquePasteboardUUID ? orig_uniquePasteboardUUID(receiver,_cmd) : nil;
+    } @finally { receiver=nil;bundleID=nil;uuidString=nil;projected=nil;gPXInsidePasteboard=previous; }
 }
 
 static NSString *hook_name(id self, SEL _cmd) {
     PX_RUNTIME_READ_OPERATION;
-    NSString *originalName = orig_name ? orig_name(self, _cmd) : nil;
-    
+    __attribute__((objc_precise_lifetime)) id receiver=self;
+    BOOL previous=gPXInsidePasteboard;NSString *bundleID=nil,*uuidString=nil;NSString *projected=nil;
+    NSString *original=nil,*result=original;
     @try {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        
-        // General pasteboard name must NOT change; only custom/unique pasteboards
-        if (shouldSpoofForBundle(bundleID) && originalName &&
-            ![originalName isEqualToString:@"com.apple.UIKit.pboard.general"]) {
-            NSString *uuidString = getSpoofedPasteboardUUID();
-            NSString *spoofedName = deterministicPasteboardName(originalName, uuidString);
-            if (spoofedName && ![spoofedName isEqualToString:originalName]) {
-                PXLog(@"[WeaponX] 🔄 Spoofing Pasteboard name from '%@' to '%@'", originalName, spoofedName);
-                return spoofedName;
-            }
-        }
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] ⚠️ Exception in name hook: %@", exception);
-    }
-    
-    return originalName;
-}
-
-static UIPasteboard *hook_generalPasteboard(id self, SEL _cmd) {
-    PX_RUNTIME_READ_OPERATION;
-    UIPasteboard *original = orig_generalPasteboard ? orig_generalPasteboard(self, _cmd) : nil;
-    
-    @try {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (shouldSpoofForBundle(bundleID)) {
-            PXLog(@"[WeaponX] 📋 Accessed general pasteboard from %@", bundleID);
-        }
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] ⚠️ Exception in generalPasteboard hook: %@", exception);
-    }
-    
-    return original;
+        if (previous) return orig_name ? orig_name(receiver, _cmd) : nil;
+        gPXInsidePasteboard=YES;
+        original=orig_name ? orig_name(receiver, _cmd) : nil;result=original;
+        @try { bundleID=getCurrentBundleID();if (shouldSpoofForBundle(bundleID) && [original isKindOfClass:NSString.class] && ![original isEqualToString:@"com.apple.UIKit.pboard.general"]) { uuidString=getSpoofedPasteboardUUID();projected=deterministicPasteboardName(original,uuidString);if (projected) result=projected; } } @catch (__unused NSException *exception) { result=original; }
+        return result;
+    } @finally { receiver=nil;bundleID=nil;uuidString=nil;gPXInsidePasteboard=previous;original=nil;result=nil; projected=nil; }
 }
 
 static UIPasteboard *hook_pasteboardWithNameCreate(id self, SEL _cmd, NSString *pasteboardName, BOOL create) {
     PX_RUNTIME_READ_OPERATION;
+    __attribute__((objc_precise_lifetime)) id receiver=self;
+    BOOL previous=gPXInsidePasteboard;NSString *bundleID=nil,*uuidString=nil;NSString *effective=pasteboardName,*projected=nil;
+    UIPasteboard *original=nil,*result=original;
     @try {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        
-        if (shouldSpoofForBundle(bundleID) && pasteboardName.length > 0 &&
-            ![pasteboardName isEqualToString:@"com.apple.UIKit.pboard.general"]) {
-            NSString *uuidString = getSpoofedPasteboardUUID();
-            NSString *spoofedName = deterministicPasteboardName(pasteboardName, uuidString);
-            if (spoofedName.length > 0) {
-                PXLog(@"[WeaponX] 🔄 Creating pasteboard with spoofed name: %@ (original: %@)", spoofedName, pasteboardName);
-                if (orig_pasteboardWithNameCreate) {
-                    return orig_pasteboardWithNameCreate(self, _cmd, spoofedName, create);
-                }
-            }
-        }
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] ⚠️ Exception in pasteboardWithName:create: hook: %@", exception);
-    }
-    
-    if (orig_pasteboardWithNameCreate) {
-        return orig_pasteboardWithNameCreate(self, _cmd, pasteboardName, create);
-    }
-    return nil;
-}
-
-static UIPasteboard *hook_pasteboardWithUniqueName(id self, SEL _cmd) {
-    PX_RUNTIME_READ_OPERATION;
-    UIPasteboard *original = orig_pasteboardWithUniqueName ? orig_pasteboardWithUniqueName(self, _cmd) : nil;
-    
-    @try {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (shouldSpoofForBundle(bundleID) && original) {
-            PXLog(@"[WeaponX] 📋 Created pasteboard with unique name from %@", bundleID);
-        }
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] ⚠️ Exception in pasteboardWithUniqueName hook: %@", exception);
-    }
-    
-    return original;
+        if (previous) return orig_pasteboardWithNameCreate ? orig_pasteboardWithNameCreate(receiver, _cmd, effective, create) : nil;
+        gPXInsidePasteboard=YES;
+        @try { bundleID=getCurrentBundleID();if (shouldSpoofForBundle(bundleID) && [pasteboardName isKindOfClass:NSString.class] && pasteboardName.length && ![pasteboardName isEqualToString:@"com.apple.UIKit.pboard.general"]) { uuidString=getSpoofedPasteboardUUID();projected=deterministicPasteboardName(pasteboardName,uuidString);if (projected.length) effective=projected; } } @catch (__unused NSException *exception) { }
+        result=orig_pasteboardWithNameCreate ? orig_pasteboardWithNameCreate(receiver, _cmd, effective, create) : nil;
+        return result;
+    } @finally { receiver=nil;bundleID=nil;uuidString=nil;gPXInsidePasteboard=previous;original=nil;result=nil; pasteboardName=nil;effective=nil;projected=nil; }
 }
 
 static UIPasteboard *hook_pasteboardWithURLCreate(id self, SEL _cmd, NSURL *url, BOOL create) {
     PX_RUNTIME_READ_OPERATION;
+    __attribute__((objc_precise_lifetime)) id receiver=self;
+    BOOL previous=gPXInsidePasteboard;NSString *bundleID=nil,*uuidString=nil;NSURL *effective=url,*projected=nil;NSString *text=nil,*shortID=nil;NSArray *parts=nil;
+    UIPasteboard *original=nil,*result=original;
     @try {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        
-        if (shouldSpoofForBundle(bundleID) && url) {
-            NSString *uuidString = getSpoofedPasteboardUUID();
-            NSString *shortUUID = [uuidString componentsSeparatedByString:@"-"].firstObject;
-            
-            NSURL *spoofedURL = nil;
-            NSString *originalURLString = [url absoluteString];
-            
-            if ([originalURLString containsString:@"?"]) {
-                spoofedURL = [NSURL URLWithString:[NSString stringWithFormat:@"%@&uuid=%@", originalURLString, shortUUID]];
-            } else {
-                spoofedURL = [NSURL URLWithString:[NSString stringWithFormat:@"%@?uuid=%@", originalURLString, shortUUID]];
-            }
-            
-            if (!spoofedURL) {
-                spoofedURL = url;
-            }
-            
-            PXLog(@"[WeaponX] 🔄 Creating pasteboard with spoofed URL: %@ (original: %@)", spoofedURL, url);
-            if (orig_pasteboardWithURLCreate) {
-                return orig_pasteboardWithURLCreate(self, _cmd, spoofedURL, create);
-            }
-        }
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] ⚠️ Exception in pasteboardWithURL:create: hook: %@", exception);
-    }
-    
-    if (orig_pasteboardWithURLCreate) {
-        return orig_pasteboardWithURLCreate(self, _cmd, url, create);
-    }
-    return nil;
+        if (previous) return orig_pasteboardWithURLCreate ? orig_pasteboardWithURLCreate(receiver, _cmd, effective, create) : nil;
+        gPXInsidePasteboard=YES;
+        @try { bundleID=getCurrentBundleID();if (shouldSpoofForBundle(bundleID) && url) { uuidString=getSpoofedPasteboardUUID();parts=[uuidString componentsSeparatedByString:@"-"];shortID=parts.firstObject;text=url.absoluteString;projected=[NSURL URLWithString:[NSString stringWithFormat:[text containsString:@"?"] ? @"%@&uuid=%@" : @"%@?uuid=%@",text,shortID]];if (projected) effective=projected; } } @catch (__unused NSException *exception) { }
+        result=orig_pasteboardWithURLCreate ? orig_pasteboardWithURLCreate(receiver, _cmd, effective, create) : nil;
+        return result;
+    } @finally { receiver=nil;bundleID=nil;uuidString=nil;gPXInsidePasteboard=previous;original=nil;result=nil; url=nil;effective=nil;projected=nil;text=nil;shortID=nil;parts=nil; }
 }
 
 static NSInteger hook_changeCount(id self, SEL _cmd) {
     PX_RUNTIME_READ_OPERATION;
-    NSInteger originalCount = orig_changeCount ? orig_changeCount(self, _cmd) : 0;
-    
+    __attribute__((objc_precise_lifetime)) id receiver=self;
+    BOOL previous=gPXInsidePasteboard;NSString *bundleID=nil,*uuidString=nil;NSDictionary *ticket=nil;NSString *hash=nil;NSNumber *count=nil;
+    NSInteger original=0,result=original;
     @try {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        
-        if (shouldSpoofForBundle(bundleID)) {
-            NSInteger spoofedCount = getCustomChangeCount(bundleID, originalCount);
-            
-            if (hasPasteboardContentChanged(bundleID, (UIPasteboard *)self)) {
-                incrementCustomChangeCount(bundleID);
-                spoofedCount = getCustomChangeCount(bundleID, originalCount);
-            }
-            
-            PXLog(@"[WeaponX] 🔄 Spoofing pasteboard changeCount: %ld (original: %ld)",
-                 (long)spoofedCount, (long)originalCount);
-            return spoofedCount;
-        }
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] ⚠️ Exception in changeCount hook: %@", exception);
-    }
-    
-    return originalCount;
+        if (previous) return orig_changeCount ? orig_changeCount(receiver, _cmd) : 0;
+        gPXInsidePasteboard=YES;
+        original=orig_changeCount ? orig_changeCount(receiver, _cmd) : 0;result=original;
+        @try { bundleID=getCurrentBundleID();if (shouldSpoofForBundle(bundleID)) { ticket=PXCapturePasteboardState();hash=getPasteboardContentHash((UIPasteboard *)receiver);count=PXUpdatePasteboardState(bundleID,original,hash,NO,ticket[@"epoch"]);if (count) result=count.integerValue; } } @catch (__unused NSException *exception) { result=original; }
+        return result;
+    } @finally { receiver=nil;bundleID=nil;uuidString=nil;gPXInsidePasteboard=previous; ticket=nil;hash=nil;count=nil; }
 }
 
 static void hook_setPersistent(id self, SEL _cmd, BOOL persistent) {
     PX_RUNTIME_READ_OPERATION;
+    __attribute__((objc_precise_lifetime)) id receiver=self;
+    BOOL previous=gPXInsidePasteboard;NSString *bundleID=nil,*uuidString=nil;BOOL effective=persistent;
     @try {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        
-        if (shouldSpoofForBundle(bundleID)) {
-            PXLog(@"[WeaponX] 📋 App %@ trying to set pasteboard persistence: %@",
-                 bundleID, persistent ? @"YES" : @"NO");
-            if (orig_setPersistent) {
-                orig_setPersistent(self, _cmd, YES);
-            }
-            return;
-        }
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] ⚠️ Exception in setPersistent: hook: %@", exception);
-    }
-    
-    if (orig_setPersistent) {
-        orig_setPersistent(self, _cmd, persistent);
-    }
+        if (previous) { if (orig_setPersistent) orig_setPersistent(receiver,_cmd, effective);return; }
+        gPXInsidePasteboard=YES;
+        @try { bundleID=getCurrentBundleID();if (shouldSpoofForBundle(bundleID)) effective=YES; } @catch (__unused NSException *exception) { }
+        if (orig_setPersistent) { orig_setPersistent(receiver,_cmd, effective); }
+    } @finally { receiver=nil;bundleID=nil;uuidString=nil;gPXInsidePasteboard=previous;  }
 }
 
 static BOOL hook_isPersistent(id self, SEL _cmd) {
     PX_RUNTIME_READ_OPERATION;
-    BOOL originalValue = orig_isPersistent ? orig_isPersistent(self, _cmd) : NO;
-    
+    __attribute__((objc_precise_lifetime)) id receiver=self;
+    BOOL previous=gPXInsidePasteboard;NSString *bundleID=nil,*uuidString=nil;
+    BOOL original=NO,result=original;
     @try {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        
-        if (shouldSpoofForBundle(bundleID)) {
-            PXLog(@"[WeaponX] 📋 App %@ checking pasteboard persistence", bundleID);
-            return YES;
-        }
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] ⚠️ Exception in isPersistent hook: %@", exception);
-    }
-    
-    return originalValue;
-}
-
-static NSArray *hook_itemProviders(id self, SEL _cmd) {
-    PX_RUNTIME_READ_OPERATION;
-    NSArray *originalProviders = orig_itemProviders ? orig_itemProviders(self, _cmd) : nil;
-    
-    @try {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (shouldSpoofForBundle(bundleID) && originalProviders) {
-            PXLog(@"[WeaponX] 📋 App %@ accessing pasteboard item providers (%lu items)",
-                 bundleID, (unsigned long)originalProviders.count);
-        }
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] ⚠️ Exception in itemProviders hook: %@", exception);
-    }
-    
-    return originalProviders;
-}
-
-static NSArray *hook_itemSetWithPreferredPasteboardTypes(id self, SEL _cmd, NSArray *types) {
-    PX_RUNTIME_READ_OPERATION;
-    NSArray *originalItemSet = orig_itemSetWithPreferredPasteboardTypes
-        ? orig_itemSetWithPreferredPasteboardTypes(self, _cmd, types)
-        : nil;
-    
-    @try {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (shouldSpoofForBundle(bundleID) && originalItemSet) {
-            PXLog(@"[WeaponX] 📋 App %@ accessing pasteboard items with preferred types: %@",
-                 bundleID, types);
-        }
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] ⚠️ Exception in itemSetWithPreferredPasteboardTypes: hook: %@", exception);
-    }
-    
-    return originalItemSet;
-}
-
-static BOOL hook_containsPasteboardTypes(id self, SEL _cmd, NSArray *pasteboardTypes) {
-    PX_RUNTIME_READ_OPERATION;
-    BOOL originalResult = orig_containsPasteboardTypes
-        ? orig_containsPasteboardTypes(self, _cmd, pasteboardTypes)
-        : NO;
-    
-    @try {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        
-        if (shouldSpoofForBundle(bundleID) && pasteboardTypes) {
-            if ([pasteboardTypes containsObject:@"com.apple.uikit.pboard-uuid"] ||
-                [pasteboardTypes containsObject:@"com.apple.uikit.pboard-devices"]) {
-                PXLog(@"[WeaponX] ⚠️ Possible fingerprinting: App %@ checking for special types: %@",
-                      bundleID, pasteboardTypes);
-            }
-        }
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] ⚠️ Exception in containsPasteboardTypes: hook: %@", exception);
-    }
-    
-    return originalResult;
+        if (previous) return orig_isPersistent ? orig_isPersistent(receiver, _cmd) : NO;
+        gPXInsidePasteboard=YES;
+        original=orig_isPersistent ? orig_isPersistent(receiver, _cmd) : NO;result=original;
+        @try { bundleID=getCurrentBundleID();if (shouldSpoofForBundle(bundleID)) result=YES; } @catch (__unused NSException *exception) { result=original; }
+        return result;
+    } @finally { receiver=nil;bundleID=nil;uuidString=nil;gPXInsidePasteboard=previous;  }
 }
 
 static id hook_valueForPasteboardType(id self, SEL _cmd, NSString *pasteboardType) {
     PX_RUNTIME_READ_OPERATION;
-    id originalValue = orig_valueForPasteboardType
-        ? orig_valueForPasteboardType(self, _cmd, pasteboardType)
-        : nil;
-    
+    __attribute__((objc_precise_lifetime)) id receiver=self;
+    BOOL previous=gPXInsidePasteboard;NSString *bundleID=nil,*uuidString=nil;NSUUID *uuid=nil;NSData *data=nil;NSError *__autoreleasing error=nil;
+    id original=nil,result=original;
     @try {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        
-        if (shouldSpoofForBundle(bundleID) && pasteboardType) {
-            if ([pasteboardType isEqualToString:@"com.apple.uikit.pboard-uuid"] ||
-                [pasteboardType isEqualToString:@"com.apple.uikit.pboard-devices"] ||
-                [pasteboardType containsString:@"uuid"] ||
-                [pasteboardType containsString:@"device"]) {
-                
-                PXLog(@"[WeaponX] ⚠️ App %@ accessing potentially identifying pasteboard type: %@",
-                      bundleID, pasteboardType);
-                
-                if ([pasteboardType isEqualToString:@"com.apple.uikit.pboard-uuid"]) {
-                    NSString *spoofedUUID = getSpoofedPasteboardUUID();
-                    NSUUID *uuid = [[NSUUID alloc] initWithUUIDString:spoofedUUID];
-                    
-                    NSError *archiveError = nil;
-                    NSData *uuidData = nil;
-                    
-                    if (@available(iOS 12.0, *)) {
-                        uuidData = [NSKeyedArchiver archivedDataWithRootObject:uuid requiringSecureCoding:NO error:&archiveError];
-                        if (archiveError) {
-                            PXLog(@"[WeaponX] ⚠️ Error archiving UUID data: %@", archiveError);
-                        }
-                    } else {
-                        @try {
-                            #pragma clang diagnostic push
-                            #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-                            uuidData = [NSKeyedArchiver archivedDataWithRootObject:uuid];
-                            #pragma clang diagnostic pop
-                        } @catch (NSException *exception) {
-                            PXLog(@"[WeaponX] ⚠️ Exception archiving UUID data: %@", exception);
-                        }
-                    }
-                    
-                    if (uuidData) {
-                        return uuidData;
-                    }
-                }
-            }
-        }
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] ⚠️ Exception in valueForPasteboardType: hook: %@", exception);
-    }
-    
-    return originalValue;
+        if (previous) return orig_valueForPasteboardType ? orig_valueForPasteboardType(receiver, _cmd, pasteboardType) : nil;
+        gPXInsidePasteboard=YES;
+        original=orig_valueForPasteboardType ? orig_valueForPasteboardType(receiver, _cmd, pasteboardType) : nil;result=original;
+        @try { if ([pasteboardType isEqualToString:@"com.apple.uikit.pboard-uuid"]) { bundleID=getCurrentBundleID();if (shouldSpoofForBundle(bundleID)) { uuidString=getSpoofedPasteboardUUID();uuid=[[NSUUID alloc] initWithUUIDString:uuidString];if (uuid) { data=[NSKeyedArchiver archivedDataWithRootObject:uuid requiringSecureCoding:NO error:&error];if (data) result=data; } } } } @catch (__unused NSException *exception) { result=original; }
+        return result;
+    } @finally { receiver=nil;bundleID=nil;uuidString=nil;gPXInsidePasteboard=previous;original=nil;result=nil; pasteboardType=nil;uuid=nil;data=nil; }
 }
 
 static void hook_setDataForPasteboardType(id self, SEL _cmd, NSData *data, NSString *pasteboardType) {
     PX_RUNTIME_READ_OPERATION;
+    __attribute__((objc_precise_lifetime)) id receiver=self;
+    BOOL previous=gPXInsidePasteboard;NSString *bundleID=nil,*uuidString=nil;NSDictionary *ticket=nil;BOOL enabled=NO;
     @try {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        
-        if (shouldSpoofForBundle(bundleID)) {
-            incrementCustomChangeCount(bundleID);
-            PXLog(@"[WeaponX] 📋 App %@ setting pasteboard data for type: %@", bundleID, pasteboardType);
-        }
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] ⚠️ Exception in setData:forPasteboardType: hook: %@", exception);
-    }
-    
-    if (orig_setDataForPasteboardType) {
-        orig_setDataForPasteboardType(self, _cmd, data, pasteboardType);
-    }
+        if (previous) { if (orig_setDataForPasteboardType) orig_setDataForPasteboardType(receiver,_cmd, data, pasteboardType);return; }
+        gPXInsidePasteboard=YES;
+        @try { ticket=PXCapturePasteboardState();bundleID=getCurrentBundleID();enabled=shouldSpoofForBundle(bundleID); } @catch (__unused NSException *exception) { }
+        if (orig_setDataForPasteboardType) { orig_setDataForPasteboardType(receiver,_cmd, data, pasteboardType); @try { if (enabled) (void)PXUpdatePasteboardState(bundleID,0,nil,YES,ticket[@"epoch"]); } @catch (__unused NSException *exception) { } }
+    } @finally { receiver=nil;bundleID=nil;uuidString=nil;gPXInsidePasteboard=previous; data=nil;pasteboardType=nil;ticket=nil; }
 }
 
 static void hook_setItems(id self, SEL _cmd, NSArray *items) {
     PX_RUNTIME_READ_OPERATION;
+    __attribute__((objc_precise_lifetime)) id receiver=self;
+    BOOL previous=gPXInsidePasteboard;NSString *bundleID=nil,*uuidString=nil;NSDictionary *ticket=nil;BOOL enabled=NO;
     @try {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        
-        if (shouldSpoofForBundle(bundleID)) {
-            incrementCustomChangeCount(bundleID);
-            PXLog(@"[WeaponX] 📋 App %@ setting pasteboard items (%lu items)",
-                 bundleID, (unsigned long)items.count);
-        }
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] ⚠️ Exception in setItems: hook: %@", exception);
-    }
-    
-    if (orig_setItems) {
-        orig_setItems(self, _cmd, items);
-    }
+        if (previous) { if (orig_setItems) orig_setItems(receiver,_cmd, items);return; }
+        gPXInsidePasteboard=YES;
+        @try { ticket=PXCapturePasteboardState();bundleID=getCurrentBundleID();enabled=shouldSpoofForBundle(bundleID); } @catch (__unused NSException *exception) { }
+        if (orig_setItems) { orig_setItems(receiver,_cmd, items); @try { if (enabled) (void)PXUpdatePasteboardState(bundleID,0,nil,YES,ticket[@"epoch"]); } @catch (__unused NSException *exception) { } }
+    } @finally { receiver=nil;bundleID=nil;uuidString=nil;gPXInsidePasteboard=previous; items=nil;ticket=nil; }
 }
 
 #pragma mark - Runtime installer
@@ -631,11 +366,29 @@ static void logUnsupportedSelectorOnce(NSString *selectorName) {
     }
 }
 
-// Compare type encodings loosely: accept exact match or same leading return/arg count pattern.
+// Validate every argument and return ABI; accept qualified objects and byte BOOLs.
 // Does not add selectors that don't exist.
+static const char *PXUnqualifiedPasteboardType(const char *type) {
+    while (type && *type && strchr("rnNoORV",*type)) type++;
+    return type;
+}
+static BOOL PXPasteboardABIType(const char *actual, const char *expected) {
+    actual=PXUnqualifiedPasteboardType(actual);expected=PXUnqualifiedPasteboardType(expected);
+    if (!actual || !expected) return NO;
+    if (*expected=='@') return *actual=='@' && actual[1]!='?';
+    if (*expected=='B') return (*actual=='B' || *actual=='c') && !actual[1];
+    return strcmp(actual,expected)==0;
+}
 static BOOL typeEncodingCompatible(const char *existing, const char *expected) {
-    // Delegate to the shared, host-testable helper (P1-A, no drift with tests).
-    return PXPasteboardTypeEncodingCompatible(existing, expected);
+    NSMethodSignature *actual=nil,*wanted=nil;
+    @try {
+        if (!existing || !expected) return NO;
+        actual=[NSMethodSignature signatureWithObjCTypes:existing];wanted=[NSMethodSignature signatureWithObjCTypes:expected];
+        if (!actual || !wanted || actual.numberOfArguments!=wanted.numberOfArguments || !PXPasteboardABIType(actual.methodReturnType,wanted.methodReturnType)) return NO;
+        for (NSUInteger i=0;i<actual.numberOfArguments;i++) if (!PXPasteboardABIType([actual getArgumentTypeAtIndex:i],[wanted getArgumentTypeAtIndex:i])) return NO;
+        return YES;
+    } @catch (__unused NSException *exception) { return NO; }
+    @finally { actual=nil;wanted=nil; }
 }
 
 // Install instance method hook if method exists and encoding is compatible.
@@ -698,67 +451,49 @@ static void installPasteboardHooks(void) {
     }
     
     // Public / commonly available paths
-    installClassHook(pasteboardClass,
-                     @selector(generalPasteboard),
-                     (IMP)hook_generalPasteboard,
-                     (IMP *)&orig_generalPasteboard,
-                     NULL,
-                     @"+generalPasteboard");
     
     installClassHook(pasteboardClass,
                      @selector(pasteboardWithName:create:),
                      (IMP)hook_pasteboardWithNameCreate,
                      (IMP *)&orig_pasteboardWithNameCreate,
-                     NULL,
+                     "@@:@B",
                      @"+pasteboardWithName:create:");
     
-    installClassHook(pasteboardClass,
-                     @selector(pasteboardWithUniqueName),
-                     (IMP)hook_pasteboardWithUniqueName,
-                     (IMP *)&orig_pasteboardWithUniqueName,
-                     NULL,
-                     @"+pasteboardWithUniqueName");
     
     installInstanceHook(pasteboardClass,
                         @selector(name),
                         (IMP)hook_name,
                         (IMP *)&orig_name,
-                        NULL,
+                        "@@:",
                         @"-name");
     
     installInstanceHook(pasteboardClass,
                         @selector(changeCount),
                         (IMP)hook_changeCount,
                         (IMP *)&orig_changeCount,
-                        NULL,
+                        sizeof(NSInteger)==8 ? "q@:" : "i@:",
                         @"-changeCount");
     
-    installInstanceHook(pasteboardClass,
-                        @selector(containsPasteboardTypes:),
-                        (IMP)hook_containsPasteboardTypes,
-                        (IMP *)&orig_containsPasteboardTypes,
-                        NULL,
-                        @"-containsPasteboardTypes:");
     
     installInstanceHook(pasteboardClass,
                         @selector(valueForPasteboardType:),
                         (IMP)hook_valueForPasteboardType,
                         (IMP *)&orig_valueForPasteboardType,
-                        NULL,
+                        "@@:@",
                         @"-valueForPasteboardType:");
     
     installInstanceHook(pasteboardClass,
                         @selector(setData:forPasteboardType:),
                         (IMP)hook_setDataForPasteboardType,
                         (IMP *)&orig_setDataForPasteboardType,
-                        NULL,
+                        "v@:@@",
                         @"-setData:forPasteboardType:");
     
     installInstanceHook(pasteboardClass,
                         @selector(setItems:),
                         (IMP)hook_setItems,
                         (IMP *)&orig_setItems,
-                        NULL,
+                        "v@:@",
                         @"-setItems:");
     
     // Optional / private / version-dependent selectors — install only if present
@@ -767,7 +502,7 @@ static void installPasteboardHooks(void) {
                         @selector(uniquePasteboardUUID),
                         (IMP)hook_uniquePasteboardUUID,
                         (IMP *)&orig_uniquePasteboardUUID,
-                        NULL,
+                        "@@:",
                         @"-uniquePasteboardUUID");
     
     // pasteboardWithURL:create: is not available on all iOS versions
@@ -776,37 +511,24 @@ static void installPasteboardHooks(void) {
                      urlSel,
                      (IMP)hook_pasteboardWithURLCreate,
                      (IMP *)&orig_pasteboardWithURLCreate,
-                     NULL,
+                     "@@:@B",
                      @"+pasteboardWithURL:create:");
     
     installInstanceHook(pasteboardClass,
                         @selector(setPersistent:),
                         (IMP)hook_setPersistent,
                         (IMP *)&orig_setPersistent,
-                        NULL,
+                        "v@:B",
                         @"-setPersistent:");
     
     installInstanceHook(pasteboardClass,
                         @selector(isPersistent),
                         (IMP)hook_isPersistent,
                         (IMP *)&orig_isPersistent,
-                        NULL,
+                        "B@:",
                         @"-isPersistent");
     
-    installInstanceHook(pasteboardClass,
-                        @selector(itemProviders),
-                        (IMP)hook_itemProviders,
-                        (IMP *)&orig_itemProviders,
-                        NULL,
-                        @"-itemProviders");
     
-    SEL itemSetSel = NSSelectorFromString(@"itemSetWithPreferredPasteboardTypes:");
-    installInstanceHook(pasteboardClass,
-                        itemSetSel,
-                        (IMP)hook_itemSetWithPreferredPasteboardTypes,
-                        (IMP *)&orig_itemSetWithPreferredPasteboardTypes,
-                        NULL,
-                        @"-itemSetWithPreferredPasteboardTypes:");
     
     PXLog(@"[PasteboardHooks] Runtime installer finished");
 }

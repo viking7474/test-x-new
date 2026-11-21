@@ -224,8 +224,8 @@ def run_source_matrix(matrix: Matrix) -> None:
     matrix.check("source: DeviceModel mutable map and timestamp share synchronized block", "@synchronized(modelCache)" in SOURCES["device_model"] and "cacheTimestamp = nil" in SOURCES["device_model"])
     matrix.check("source: Canvas no longer uses global srand/rand state", "srand(" not in SOURCES["canvas"] and "rand()" not in SOURCES["canvas"])
     matrix.check("source: Canvas maps initialize at one site", SOURCES["canvas"].count("cachedBundleDecisions = [NSMutableDictionary dictionary]") == 1 and SOURCES["canvas"].count("noiseSeedCache = [NSMutableDictionary dictionary]") == 1)
-    matrix.check("source: Pasteboard maps initialize at one site", SOURCES["pasteboard"].count("customChangeCountMap = [NSMutableDictionary dictionary]") == 1 and SOURCES["pasteboard"].count("lastKnownPasteboardData = [NSMutableDictionary dictionary]") == 1)
-    matrix.check("source: AppVersion maps initialize at one site", SOURCES["app_version"].count("gCachedProfileVersionPlists = [NSMutableDictionary dictionary]") == 1 and SOURCES["app_version"].count("gCachedProfileVersionMTime = [NSMutableDictionary dictionary]") == 1)
+    matrix.check("source: Pasteboard publishes coherent count/hash packets", "gPasteboardState == basis" in SOURCES["pasteboard"] and 'next[@"count"]=result' in SOURCES["pasteboard"] and 'next[@"hash"]=hash' in SOURCES["pasteboard"])
+    matrix.check("source: AppVersion publishes immutable epoch/cache packets", "PXAppVersionCapture" in SOURCES["app_version"] and "gAppVersionState == basis" in SOURCES["app_version"] and "@\"files\":@{},@\"projections\":@{}" in SOURCES["app_version"])
 
     matrix.check("source: DeviceSpec cache is initialized only through setup method", "deviceSpecsCache" not in COMMON_TEXT and SOURCES["device_model_manager"].count("[self setupDeviceSpecifications]") == 1)
     matrix.check("source: device specifications publish once", SOURCES["device_model_manager"].count("self.deviceSpecifications = [specs copy]") == 1)

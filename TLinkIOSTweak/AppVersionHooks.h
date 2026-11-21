@@ -9,5 +9,6 @@ BOOL PXAppVersionSpoofMasterEnabled(void);
 // Only provides values for the passed bundleID; caller decides scope (main-bundle-only, etc.).
 BOOL PXGetSpoofedAppVersionForBundle(NSString *bundleID, NSString **outVersion, NSString **outBuild);
 
-// Invalidate cached plist reads.
+// Revoke cached reads/projections and pending candidates. Borrowed CF dictionary
+// results keep process-owned lifetime across invalidation; they are not evicted.
 void PXAppVersionHooksInvalidateCache(void);

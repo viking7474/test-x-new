@@ -41,6 +41,12 @@ jobs:
       - name: Test native diagnostic registry and sink boundaries
         run: python3 scripts/test_logging_boundaries.py --native
 
+      - name: Test native App Version source and borrowed dictionary boundaries
+        run: python3 scripts/test_app_version_boundaries.py --native
+
+      - name: Test native Pasteboard boundary facades and count state
+        run: python3 scripts/test_pasteboard_boundaries.py --native
+
       - name: Test native Theme cache and trait boundaries
         run: python3 scripts/test_theme_boundaries.py --native
 
